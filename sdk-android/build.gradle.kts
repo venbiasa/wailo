@@ -1,0 +1,31 @@
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+
+plugins {
+    // AGP 9 provides built-in Kotlin support; the kotlin-android plugin is no longer applied.
+    alias(libs.plugins.androidLibrary)
+}
+
+android {
+    namespace = "com.venbiasa.waylay.sdk.android"
+    compileSdk = libs.versions.android.compileSdk.get().toInt()
+
+    defaultConfig {
+        minSdk = libs.versions.android.minSdk.get().toInt()
+    }
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_21
+        targetCompatibility = JavaVersion.VERSION_21
+    }
+}
+
+kotlin {
+    compilerOptions {
+        jvmTarget = JvmTarget.JVM_21
+    }
+}
+
+dependencies {
+    implementation(projects.protocol)
+    implementation(projects.core)
+}
