@@ -11,8 +11,14 @@ coroutines = "1.10.2"
 ktor = "3.4.3"
 wire = "5.3.5"
 okhttp = "4.12.0"
+asm = "9.9"
+junit = "4.13.2"
 
 [libraries]
+agp-api = { module = "com.android.tools.build:gradle-api", version.ref = "agp" }
+asm = { module = "org.ow2.asm:asm", version.ref = "asm" }
+asm-util = { module = "org.ow2.asm:asm-util", version.ref = "asm" }
+junit = { module = "junit:junit", version.ref = "junit" }
 kotlinx-coroutines-core = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core", version.ref = "coroutines" }
 kotlinx-coroutines-swing = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-swing", version.ref = "coroutines" }
 

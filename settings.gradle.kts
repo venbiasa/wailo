@@ -3,6 +3,9 @@ rootProject.name = "wailo"
 enableFeaturePreview("TYPESAFE_PROJECT_ACCESSORS")
 
 pluginManagement {
+    // Build-time bytecode instrumentation plugin, kept as an isolated build so its
+    // ASM/AGP-API deps never leak onto any runtime classpath.
+    includeBuild("wailo-gradle-plugin")
     repositories {
         google {
             mavenContent {

@@ -83,6 +83,9 @@ Append-only. Newest at the bottom. Each entry: context, decision, consequences.
 
 ## ADR-0009: Capture third-party and non-OkHttp traffic via auto-instrumentation (build-time ASM on Android, swizzle on iOS)
 
+- Status: Accepted (locked). Android build-time ASM is being de-risked now via a `wailo-gradle-plugin`
+  proof-of-concept (`OkHttpClient.Builder.build()` call-site rewriting + a `WailoRuntime` hook); the iOS
+  `+load` swizzle stays deferred until iOS work starts.
 - Context: ADR-0001 accepted that only traffic through the instrumented client is captured, and ADR-0007
   wires that client manually (`Wailo.interceptor()`). Manual wiring only reaches HTTP clients the app
   itself constructs, so third-party libraries/SDKs that build their own OkHttp client (or use another
@@ -130,5 +133,7 @@ Append-only. Newest at the bottom. Each entry: context, decision, consequences.
   - Streaming/non-request-response traffic (WebSocket, gRPC, SSE) surfaced by these sources may require new
     `protocol` message kinds when implemented — schema evolves in `protocol`, never as device-side DTOs
     (invariant #1).
-  - This ADR fixes the *approach*, not the schedule: implementation lands in the roadmap "Later" phase
-    (auto-instrumentation, iOS SDK), after the M3/M4 desktop work.
+  - This ADR fixes the *approach*, not the schedule. A `wailo-gradle-plugin` POC now proves the Android
+    ASM mechanism end-to-end (call-site rewrite + `WailoRuntime.hook` + idempotent injection). Hardening
+    into a shipped milestone (shaded-OkHttp allowlist, `HttpURLConnection`/Cronet, startup `ContentProvider`
+    default sink) and the iOS SDK remain in the roadmap "Later" phase, after the M3/M4 desktop work.

@@ -21,6 +21,7 @@ import androidx.compose.ui.unit.dp
 import com.venbiasa.wailo.core.plus
 import com.venbiasa.wailo.sdk.android.LogcatSink
 import com.venbiasa.wailo.sdk.android.Wailo
+import com.venbiasa.wailo.sdk.android.WailoRuntime
 import okhttp3.Call
 import okhttp3.Callback
 import okhttp3.MediaType.Companion.toMediaType
@@ -36,14 +37,23 @@ class MainActivity : ComponentActivity() {
     private val wsSink by lazy {
         Wailo.webSocketSink(appId = packageName, deviceName = Build.MODEL).also { it.start() }
     }
-    private val client by lazy {
+    private val sink by lazy { wsSink + LogcatSink() }
+
+    // No Wailo interceptor here: the Gradle plugin rewrites this build() call site to route through
+    // WailoRuntime, so this "third-party-style" client is captured purely by auto-instrumentation.
+    private val autoClient by lazy { OkHttpClient.Builder().build() }
+
+    // Manually wired *and* auto-instrumented: proves the hook is idempotent (captured once, not twice).
+    private val manualClient by lazy {
         OkHttpClient.Builder()
-            .addInterceptor(Wailo.interceptor(sink = wsSink + LogcatSink()))
+            .addInterceptor(Wailo.interceptor(sink = sink))
             .build()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Seed the process-global sink auto-instrumented clients report to (ADR-0009).
+        WailoRuntime.install(sink)
         setContent {
             val results = remember { mutableStateListOf<String>() }
             LaunchedEffect(Unit) { runSampleTraffic(results) }
@@ -66,32 +76,40 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun runSampleTraffic(results: SnapshotStateList<String>) {
-        sampleRequests().forEach { request ->
-            client.newCall(request).enqueue(object : Callback {
-                override fun onFailure(call: Call, e: IOException) {
-                    post(results, "${request.method} ${request.url} -> ${e.message}")
-                }
+        // Auto-instrumented client (no manual interceptor): captured via the Gradle plugin.
+        fire(autoClient, getRequest("https://jsonplaceholder.typicode.com/todos/1"), "auto", results)
+        fire(autoClient, postRequest(), "auto", results)
+        // Manually wired *and* instrumented: expected to appear exactly once (idempotent hook).
+        fire(manualClient, getRequest("https://jsonplaceholder.typicode.com/todos/2"), "manual", results)
+    }
 
-                override fun onResponse(call: Call, response: Response) {
-                    response.use { post(results, "${request.method} ${request.url} -> HTTP ${it.code}") }
-                }
-            })
-        }
+    private fun fire(
+        client: OkHttpClient,
+        request: Request,
+        label: String,
+        results: SnapshotStateList<String>,
+    ) {
+        client.newCall(request).enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                post(results, "[$label] ${request.method} ${request.url} -> ${e.message}")
+            }
+
+            override fun onResponse(call: Call, response: Response) {
+                response.use { post(results, "[$label] ${request.method} ${request.url} -> HTTP ${it.code}") }
+            }
+        })
     }
 
     private fun post(results: SnapshotStateList<String>, line: String) {
         runOnUiThread { results.add(line) }
     }
 
-    private fun sampleRequests(): List<Request> = listOf(
-        Request.Builder()
-            .url("https://jsonplaceholder.typicode.com/todos/1")
-            .build(),
-        Request.Builder()
-            .url("https://jsonplaceholder.typicode.com/posts")
-            .post("""{"title":"wailo","body":"hello","userId":1}""".toRequestBody(JSON))
-            .build(),
-    )
+    private fun getRequest(url: String): Request = Request.Builder().url(url).build()
+
+    private fun postRequest(): Request = Request.Builder()
+        .url("https://jsonplaceholder.typicode.com/posts")
+        .post("""{"title":"wailo","body":"hello","userId":1}""".toRequestBody(JSON))
+        .build()
 
     private companion object {
         private val JSON = "application/json; charset=utf-8".toMediaType()

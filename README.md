@@ -31,6 +31,7 @@ Two boundaries keep the system decoupled:
 | `protocol`      | KMP library; protobuf schema + Wire-generated types               |
 | `core`          | KMP library; capture model, sinks, transport ports, WS client     |
 | `sdk-android`   | Android library; `WailoInterceptor` (OkHttp) - the injected SDK  |
+| `wailo-gradle-plugin` | Build-time only; ASM plugin that auto-instruments OkHttp |
 | `engine`        | JVM library; WebSocket server + multi-session store + query API   |
 | `shared`        | KMP; Compose Multiplatform viewer UI + view models                |
 | `desktopApp`    | Compose Desktop entry point                                       |
@@ -93,14 +94,30 @@ adb shell am start -n com.venbiasa.wailo.sample/.MainActivity
 Captured requests appear live in the desktop window. The sample already wires this up, so
 running the four commands above is enough to see traffic stream across.
 
-## Roadmap
+## Auto-instrumentation
 
-- M0 - Repo structure / skeleton (builds empty) [done]
-- M1 - SDK first: capture HTTP via OkHttp interceptor, verifiable in Logcat [done]
-- M2 - Transport + engine: WebSocket over `adb reverse`, multi-session store [done]
-- M3 - Desktop viewer: Compose live request inspector [current: text list done; 3-pane next, moving into `shared`]
-- M4 - Polish: multi-device helper, docs
-- Later - CLI (Appium), MCP server, iOS SDK, wifi/mDNS discovery, rules (breakpoint / map-local / map-remote)
+`Wailo.interceptor()` only reaches OkHttp clients the app itself builds. To also capture clients
+built by third-party libraries, the host app can apply the build-time ASM plugin, which rewrites
+every `OkHttpClient.Builder.build()` call site (app code *and* dependencies) to route through
+`WailoRuntime` — so no per-client wiring is needed and capture starts at app launch.
+
+```kotlin
+// host app build.gradle.kts
+plugins {
+    id("com.venbiasa.wailo.instrumentation")
+}
+```
+
+```kotlin
+// once at startup: the sink auto-instrumented clients report to
+WailoRuntime.install(Wailo.webSocketSink(appId = packageName, deviceName = Build.MODEL).also { it.start() })
+
+// no interceptor added here, yet this client is still captured
+val client = OkHttpClient.Builder().build()
+```
+
+The hook is idempotent: a client that *also* wires `Wailo.interceptor()` is captured exactly once.
+The `sample-android` app demonstrates both paths.
 
 ## License
 
