@@ -3,6 +3,8 @@ import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 plugins {
     // AGP 9 provides built-in Kotlin support; the kotlin-android plugin is no longer applied.
     alias(libs.plugins.androidApplication)
+    alias(libs.plugins.composeMultiplatform)
+    alias(libs.plugins.composeCompiler)
 }
 
 android {
@@ -37,4 +39,13 @@ kotlin {
 
 dependencies {
     implementation(projects.sdkAndroid)
+
+    // Required at runtime: the SDK declares OkHttp compileOnly.
+    implementation(libs.okhttp)
+
+    implementation(libs.androidx.activity.compose)
+    implementation(libs.compose.runtime)
+    implementation(libs.compose.foundation)
+    implementation(libs.compose.material)
+    implementation(libs.compose.ui)
 }

@@ -1,0 +1,39 @@
+syntax = "proto3";
+
+package com.venbiasa.waylay.protocol;
+
+// Capture model only; transport framing (envelope, hello) is added in M2.
+
+message HttpExchange {
+  string id = 1;
+  int64 started_at_epoch_ms = 2;
+  int64 duration_ms = 3;
+  HttpRequest request = 4;
+  HttpResponse response = 5;
+  // Set only on failure before any response (not for HTTP error statuses).
+  string error = 6;
+}
+
+message HttpRequest {
+  string method = 1;
+  string url = 2;
+  repeated Header headers = 3;
+  bytes body = 4;
+  // Declared length; -1 if unknown.
+  int64 body_size = 5;
+  bool body_truncated = 6;
+}
+
+message HttpResponse {
+  int32 code = 1;
+  string message = 2;
+  repeated Header headers = 3;
+  bytes body = 4;
+  int64 body_size = 5;
+  bool body_truncated = 6;
+}
+
+message Header {
+  string name = 1;
+  string value = 2;
+}

@@ -16,5 +16,11 @@ kotlin {
 }
 
 dependencies {
-    implementation(projects.protocol)
+    // Exposed on the query API (CapturedExchange, StateFlow), so consumers see them.
+    api(projects.protocol)
+    api(libs.kotlinx.coroutines.core)
+
+    implementation(libs.ktor.server.core)
+    implementation(libs.ktor.server.cio)
+    implementation(libs.ktor.server.websockets)
 }

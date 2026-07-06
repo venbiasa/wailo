@@ -50,12 +50,55 @@ Two boundaries keep the system decoupled:
 ./gradlew :sample-android:assembleDebug
 ```
 
+## Using the SDK (M1)
+
+Add the interceptor to the app's OkHttp client. The host app owns OkHttp; the SDK
+depends on it only at compile time, so no version is forced on you.
+
+```kotlin
+val client = OkHttpClient.Builder()
+    .addInterceptor(Waylay.interceptor())
+    .build()
+```
+
+By default, captured exchanges are printed to Logcat under the `Waylay` tag. Run the
+sample and watch them stream:
+
+```bash
+./gradlew :sample-android:installDebug
+adb shell am start -n com.venbiasa.waylay.sample/.MainActivity
+adb logcat -s Waylay
+```
+
+## Streaming to the desktop (M2)
+
+Swap the Logcat sink for a WebSocket sink and run the desktop app as the receiver. The
+device is the client; the desktop is the server on `:8899`, forwarded with `adb reverse`.
+
+```kotlin
+// stream + LogcatSink() fans out: send to the desktop and still log locally
+val stream = Waylay.webSocketSink(appId = packageName, deviceName = Build.MODEL).also { it.start() }
+val client = OkHttpClient.Builder()
+    .addInterceptor(Waylay.interceptor(sink = stream + LogcatSink()))
+    .build()
+```
+
+```bash
+./gradlew :desktopApp:run                     # start the desktop receiver (live text list)
+adb reverse tcp:8899 tcp:8899                 # route device localhost:8899 -> desktop
+./gradlew :sample-android:installDebug
+adb shell am start -n com.venbiasa.waylay.sample/.MainActivity
+```
+
+Captured requests appear live in the desktop window. The sample already wires this up, so
+running the four commands above is enough to see traffic stream across.
+
 ## Roadmap
 
-- M0 - Repo structure / skeleton (builds empty) [current]
-- M1 - SDK first: capture HTTP via OkHttp interceptor, verifiable in Logcat
-- M2 - Transport + engine: WebSocket over `adb reverse`, multi-session store
-- M3 - Desktop viewer: Compose 3-pane live request inspector
+- M0 - Repo structure / skeleton (builds empty) [done]
+- M1 - SDK first: capture HTTP via OkHttp interceptor, verifiable in Logcat [done]
+- M2 - Transport + engine: WebSocket over `adb reverse`, multi-session store [done]
+- M3 - Desktop viewer: Compose live request inspector [current: text list done; 3-pane next, moving into `shared`]
 - M4 - Polish: multi-device helper, docs
 - Later - CLI (Appium), MCP server, iOS SDK, wifi/mDNS discovery, rules (breakpoint / map-local / map-remote)
 

@@ -1,0 +1,20 @@
+syntax = "proto3";
+
+package com.venbiasa.waylay.protocol;
+
+import "waylay/capture.proto";
+
+// One Envelope per WebSocket frame. The client opens with a Hello, then streams
+// exchanges; the server keys sessions off that Hello.
+message Envelope {
+  oneof message {
+    Hello hello = 1;
+    HttpExchange exchange = 2;
+  }
+}
+
+message Hello {
+  string device_name = 1;
+  string app_id = 2;
+  string platform = 3;
+}

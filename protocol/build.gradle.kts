@@ -3,6 +3,7 @@ import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 plugins {
     alias(libs.plugins.kotlinMultiplatform)
     alias(libs.plugins.androidKotlinMultiplatformLibrary)
+    alias(libs.plugins.wire)
 }
 
 kotlin {
@@ -19,6 +20,15 @@ kotlin {
 
     sourceSets {
         commonMain.dependencies {
+            // Generated messages are part of this module's API.
+            api(libs.wire.runtime)
         }
+    }
+}
+
+wire {
+    kotlin {}
+    sourcePath {
+        srcDir("src/commonMain/proto")
     }
 }

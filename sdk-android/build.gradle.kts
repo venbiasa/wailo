@@ -27,5 +27,9 @@ kotlin {
 
 dependencies {
     implementation(projects.protocol)
-    implementation(projects.core)
+    // api: WaylayClient/CaptureSink are part of the SDK's public surface.
+    api(projects.core)
+
+    // Host app owns OkHttp; compileOnly avoids forcing a version on it (invariant #3).
+    compileOnly(libs.okhttp)
 }
