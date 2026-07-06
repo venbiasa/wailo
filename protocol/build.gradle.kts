@@ -10,7 +10,7 @@ kotlin {
     jvm()
 
     androidLibrary {
-        namespace = "com.venbiasa.waylay.protocol"
+        namespace = "com.venbiasa.wailo.protocol"
         compileSdk = libs.versions.android.compileSdk.get().toInt()
         minSdk = libs.versions.android.minSdk.get().toInt()
         compilerOptions {

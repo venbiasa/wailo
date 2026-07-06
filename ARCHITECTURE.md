@@ -7,7 +7,7 @@ it live on the desktop, with the same capture core reusable by headless automati
 
 ## The two firewalls
 
-Waylay is deliberately organized around two stable boundaries so the roadmap (automation, MCP, iOS)
+Wailo is deliberately organized around two stable boundaries so the roadmap (automation, MCP, iOS)
 does not require rewrites:
 
 1. **Wire protocol (`protocol`)** - the protobuf schema is the single contract between device and
@@ -21,7 +21,7 @@ does not require rewrites:
 ```mermaid
 flowchart LR
   subgraph device [Device / app under test]
-    ok[OkHttp / URLSession] --> intc["Waylay interceptor (sdk-android / sdk-ios)"]
+    ok[OkHttp / URLSession] --> intc["Wailo interceptor (sdk-android / sdk-ios)"]
     intc --> core["core: capture model + WS client"]
   end
   core -->|"protobuf Envelope over WebSocket"| server["engine: WS server"]

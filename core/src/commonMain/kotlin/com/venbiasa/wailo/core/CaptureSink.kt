@@ -1,6 +1,6 @@
-package com.venbiasa.waylay.core
+package com.venbiasa.wailo.core
 
-import com.venbiasa.waylay.protocol.HttpExchange
+import com.venbiasa.wailo.protocol.HttpExchange
 
 /** Where captured exchanges are delivered; keeps interceptors from hard-coding a transport. */
 fun interface CaptureSink {

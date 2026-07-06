@@ -1,4 +1,4 @@
-package com.venbiasa.waylay.desktop
+package com.venbiasa.wailo.desktop
 
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
@@ -17,21 +17,21 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.application
-import com.venbiasa.waylay.engine.CapturedExchange
-import com.venbiasa.waylay.engine.WaylayEngine
+import com.venbiasa.wailo.engine.CapturedExchange
+import com.venbiasa.wailo.engine.WailoEngine
 
 fun main() = application {
-    val engine = remember { WaylayEngine().also(WaylayEngine::start) }
+    val engine = remember { WailoEngine().also(WailoEngine::start) }
     val exchanges by engine.exchanges.collectAsState()
 
-    Window(onCloseRequest = ::exitApplication, title = "Waylay") {
+    Window(onCloseRequest = ::exitApplication, title = "Wailo") {
         MaterialTheme {
             Surface(Modifier.fillMaxSize()) {
                 Column(Modifier.fillMaxSize().padding(12.dp)) {
                     Text("Captured requests (${exchanges.size})", style = MaterialTheme.typography.h6)
                     Spacer(Modifier.height(8.dp))
                     if (exchanges.isEmpty()) {
-                        Text("Waiting for traffic on :${WaylayEngine.DEFAULT_PORT} …")
+                        Text("Waiting for traffic on :${WailoEngine.DEFAULT_PORT} …")
                     } else {
                         LazyColumn(Modifier.fillMaxSize()) {
                             items(exchanges.asReversed()) { row ->

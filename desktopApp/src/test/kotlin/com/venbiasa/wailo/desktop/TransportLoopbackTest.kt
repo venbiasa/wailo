@@ -1,12 +1,12 @@
-package com.venbiasa.waylay.desktop
+package com.venbiasa.wailo.desktop
 
-import com.venbiasa.waylay.core.WaylayClient
-import com.venbiasa.waylay.engine.CapturedExchange
-import com.venbiasa.waylay.engine.WaylayEngine
-import com.venbiasa.waylay.protocol.Hello
-import com.venbiasa.waylay.protocol.HttpExchange
-import com.venbiasa.waylay.protocol.HttpRequest
-import com.venbiasa.waylay.protocol.HttpResponse
+import com.venbiasa.wailo.core.WailoClient
+import com.venbiasa.wailo.engine.CapturedExchange
+import com.venbiasa.wailo.engine.WailoEngine
+import com.venbiasa.wailo.protocol.Hello
+import com.venbiasa.wailo.protocol.HttpExchange
+import com.venbiasa.wailo.protocol.HttpRequest
+import com.venbiasa.wailo.protocol.HttpResponse
 import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -15,8 +15,8 @@ import kotlin.test.assertEquals
 class TransportLoopbackTest {
 
     private val port = 18899
-    private val engine = WaylayEngine(port = port)
-    private var client: WaylayClient? = null
+    private val engine = WailoEngine(port = port)
+    private var client: WailoClient? = null
 
     @AfterTest
     fun tearDown() {
@@ -27,7 +27,7 @@ class TransportLoopbackTest {
     @Test
     fun exchangeReachesEngineAcrossTheSocket() {
         engine.start()
-        val client = WaylayClient(
+        val client = WailoClient(
             hello = Hello(device_name = "pixel-test", app_id = "com.venbiasa.test", platform = "jvm"),
             host = "localhost",
             port = port,

@@ -9,7 +9,7 @@ kotlin {
     jvm()
 
     androidLibrary {
-        namespace = "com.venbiasa.waylay.shared"
+        namespace = "com.venbiasa.wailo.shared"
         compileSdk = libs.versions.android.compileSdk.get().toInt()
         minSdk = libs.versions.android.minSdk.get().toInt()
         compilerOptions {

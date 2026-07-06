@@ -1,6 +1,6 @@
 syntax = "proto3";
 
-package com.venbiasa.waylay.protocol;
+package com.venbiasa.wailo.protocol;
 
 // Capture model only; transport framing (envelope, hello) is added in M2.
 

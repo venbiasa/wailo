@@ -1,10 +1,10 @@
-package com.venbiasa.waylay.sdk.android
+package com.venbiasa.wailo.sdk.android
 
-import com.venbiasa.waylay.core.CaptureSink
-import com.venbiasa.waylay.protocol.Header
-import com.venbiasa.waylay.protocol.HttpExchange
-import com.venbiasa.waylay.protocol.HttpRequest
-import com.venbiasa.waylay.protocol.HttpResponse
+import com.venbiasa.wailo.core.CaptureSink
+import com.venbiasa.wailo.protocol.Header
+import com.venbiasa.wailo.protocol.HttpExchange
+import com.venbiasa.wailo.protocol.HttpRequest
+import com.venbiasa.wailo.protocol.HttpResponse
 import okhttp3.Headers
 import okhttp3.Interceptor
 import okhttp3.Request
@@ -19,7 +19,7 @@ import java.util.UUID
  * OkHttp [Interceptor] that copies each exchange to a [CaptureSink] without
  * consuming the real bodies (request buffered, response via peekBody), capped at [maxBodyBytes].
  */
-class WaylayInterceptor internal constructor(
+class WailoInterceptor internal constructor(
     private val sink: CaptureSink,
     private val maxBodyBytes: Long,
 ) : Interceptor {

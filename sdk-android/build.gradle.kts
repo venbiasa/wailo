@@ -6,7 +6,7 @@ plugins {
 }
 
 android {
-    namespace = "com.venbiasa.waylay.sdk.android"
+    namespace = "com.venbiasa.wailo.sdk.android"
     compileSdk = libs.versions.android.compileSdk.get().toInt()
 
     defaultConfig {
@@ -27,7 +27,7 @@ kotlin {
 
 dependencies {
     implementation(projects.protocol)
-    // api: WaylayClient/CaptureSink are part of the SDK's public surface.
+    // api: WailoClient/CaptureSink are part of the SDK's public surface.
     api(projects.core)
 
     // Host app owns OkHttp; compileOnly avoids forcing a version on it (invariant #3).

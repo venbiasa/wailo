@@ -1,4 +1,4 @@
-rootProject.name = "waylay"
+rootProject.name = "wailo"
 
 enableFeaturePreview("TYPESAFE_PROJECT_ACCESSORS")
 

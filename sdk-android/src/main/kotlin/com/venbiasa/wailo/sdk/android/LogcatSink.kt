@@ -1,10 +1,10 @@
-package com.venbiasa.waylay.sdk.android
+package com.venbiasa.wailo.sdk.android
 
 import android.util.Log
-import com.venbiasa.waylay.core.CaptureSink
-import com.venbiasa.waylay.protocol.HttpExchange
-import com.venbiasa.waylay.protocol.HttpRequest
-import com.venbiasa.waylay.protocol.HttpResponse
+import com.venbiasa.wailo.core.CaptureSink
+import com.venbiasa.wailo.protocol.HttpExchange
+import com.venbiasa.wailo.protocol.HttpRequest
+import com.venbiasa.wailo.protocol.HttpResponse
 import okio.ByteString
 
 /** [CaptureSink] that prints exchanges to Logcat — the M1 verification surface. */
@@ -63,7 +63,7 @@ class LogcatSink(
     }
 
     companion object {
-        const val DEFAULT_TAG: String = "Waylay"
+        const val DEFAULT_TAG: String = "Wailo"
         const val DEFAULT_MAX_BODY_PREVIEW_CHARS: Int = 4000
         private const val TEXT_SNIFF_BYTES: Int = 64
     }

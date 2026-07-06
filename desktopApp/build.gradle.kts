@@ -19,7 +19,7 @@ kotlin {
 
 compose.desktop {
     application {
-        mainClass = "com.venbiasa.waylay.desktop.MainKt"
+        mainClass = "com.venbiasa.wailo.desktop.MainKt"
     }
 }
 

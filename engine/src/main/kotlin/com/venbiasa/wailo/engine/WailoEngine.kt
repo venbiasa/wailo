@@ -1,8 +1,8 @@
-package com.venbiasa.waylay.engine
+package com.venbiasa.wailo.engine
 
-import com.venbiasa.waylay.protocol.Envelope
-import com.venbiasa.waylay.protocol.Hello
-import com.venbiasa.waylay.protocol.HttpExchange
+import com.venbiasa.wailo.protocol.Envelope
+import com.venbiasa.wailo.protocol.Hello
+import com.venbiasa.wailo.protocol.HttpExchange
 import io.ktor.server.application.install
 import io.ktor.server.cio.CIO
 import io.ktor.server.engine.EmbeddedServer
@@ -30,7 +30,7 @@ data class CapturedExchange(
  * protobuf stream, and publishes exchanges as a [StateFlow] for any frontend
  * (desktop UI now; CLI/MCP later). UI-agnostic by design — no Compose here.
  */
-class WaylayEngine(
+class WailoEngine(
     private val port: Int = DEFAULT_PORT,
     private val maxRetained: Int = DEFAULT_MAX_RETAINED,
 ) {

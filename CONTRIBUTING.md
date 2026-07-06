@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for your interest in Waylay.
+Thanks for your interest in Wailo.
 
 ## Development setup
 

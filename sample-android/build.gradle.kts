@@ -8,11 +8,11 @@ plugins {
 }
 
 android {
-    namespace = "com.venbiasa.waylay.sample"
+    namespace = "com.venbiasa.wailo.sample"
     compileSdk = libs.versions.android.compileSdk.get().toInt()
 
     defaultConfig {
-        applicationId = "com.venbiasa.waylay.sample"
+        applicationId = "com.venbiasa.wailo.sample"
         minSdk = libs.versions.android.minSdk.get().toInt()
         targetSdk = libs.versions.android.targetSdk.get().toInt()
         versionCode = 1

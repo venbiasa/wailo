@@ -2,7 +2,7 @@
 
 Guidance for AI agents and contributors working in this repo. Keep it accurate; it is loaded every session.
 
-## What Waylay is
+## What Wailo is
 
 An in-app network interception SDK (Android/iOS) that streams captured HTTP(S) traffic over a
 local WebSocket to a Kotlin Multiplatform desktop app. Later: headless automation (Appium) and MCP.

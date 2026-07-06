@@ -36,7 +36,7 @@ Append-only. Newest at the bottom. Each entry: context, decision, consequences.
 ## ADR-0005: Follow current KMP-wizard conventions, add sibling modules
 
 - Context: Want familiar, maintainable structure, but the wizard emits a single-app project while
-  Waylay needs an isolated SDK, an engine, and samples.
+  Wailo needs an isolated SDK, an engine, and samples.
 - Decision: Adopt the wizard's toolchain and conventions (version catalog with plugin aliases,
   `com.android.kotlin.multiplatform.library` DSL, foojay, `shared` + `desktopApp` naming) and add
   `protocol`, `core`, `sdk-android`, `engine`, `sample-android` as sibling modules.
@@ -56,7 +56,7 @@ Append-only. Newest at the bottom. Each entry: context, decision, consequences.
 - Decision: Define the capture messages (`HttpExchange`/`HttpRequest`/`HttpResponse`/`Header`) in
   `protocol` now and use the Wire-generated types directly as the device-side model. `core` exposes a
   single `CaptureSink` port; the platform interceptor knows nothing about where exchanges go.
-  `sdk-android` provides the OkHttp `WaylayInterceptor` plus a `LogcatSink` for M1 verification.
+  `sdk-android` provides the OkHttp `WailoInterceptor` plus a `LogcatSink` for M1 verification.
 - Consequences: One representation from capture to wire, so M2 adds a WebSocket sink without touching
   the interceptor. Transport framing (envelope, hello) is intentionally *not* defined yet. OkHttp is
   `compileOnly` in `sdk-android` so the SDK never imposes a version on the host app (invariant #3).
@@ -69,10 +69,10 @@ Append-only. Newest at the bottom. Each entry: context, decision, consequences.
   - Add `Envelope { oneof { Hello, HttpExchange } }` + `Hello` to `protocol`. Each WebSocket frame is
     one binary-encoded `Envelope`; the device opens with `Hello` (device/app/platform), then streams
     `exchange` envelopes. The server keys sessions off that `Hello`.
-  - `core.WaylayClient` (Ktor CIO client) implements `CaptureSink`: `onExchange` only enqueues, a
+  - `core.WailoClient` (Ktor CIO client) implements `CaptureSink`: `onExchange` only enqueues, a
     background loop drains and auto-reconnects, and the buffer drops oldest on overflow so a slow or
     absent desktop can never block or OOM the host app.
-  - `engine.WaylayEngine` (Ktor CIO server) decodes envelopes into `CapturedExchange` rows and
+  - `engine.WailoEngine` (Ktor CIO server) decodes envelopes into `CapturedExchange` rows and
     publishes them as a `StateFlow` — the UI-agnostic query surface (invariant #2).
   - Interim UI: `desktopApp` renders that `StateFlow` as a plain text list for now; the richer viewer
     lands in `shared` at M3, so `shared` stays a placeholder until then. `desktopApp` takes a
@@ -84,13 +84,13 @@ Append-only. Newest at the bottom. Each entry: context, decision, consequences.
 ## ADR-0009: Capture third-party and non-OkHttp traffic via auto-instrumentation (build-time ASM on Android, swizzle on iOS)
 
 - Context: ADR-0001 accepted that only traffic through the instrumented client is captured, and ADR-0007
-  wires that client manually (`Waylay.interceptor()`). Manual wiring only reaches HTTP clients the app
+  wires that client manually (`Wailo.interceptor()`). Manual wiring only reaches HTTP clients the app
   itself constructs, so third-party libraries/SDKs that build their own OkHttp client (or use another
   stack) are invisible. We want capture that (a) reaches third-party libraries without their cooperation,
   (b) begins at process launch with no user action, and (c) keeps ADR-0001's promise: no device proxy, no
   certificate install, no MITM/TLS termination.
 - Decision:
-  - Keep `Waylay.interceptor()` as the simple, production-safe *baseline* for app-owned clients. Auto-
+  - Keep `Wailo.interceptor()` as the simple, production-safe *baseline* for app-owned clients. Auto-
     instrumentation is additive on top of it, not a replacement.
   - The strategy on both platforms is the same principle: hook the *shared networking framework* the third
     party depends on, installed before the first request — never the library or its construction site.
@@ -98,7 +98,7 @@ Append-only. Newest at the bottom. Each entry: context, decision, consequences.
     `InstrumentationScope.ALL`) that auto-wraps OkHttp (`OkHttpClient$Builder.build()` call sites) and,
     opt-in, `HttpURLConnection` (`URL.openConnection()`), routing exchanges into the existing `CaptureSink`.
     Hooks are woven at compile time, so they exist from the first instruction; a startup `ContentProvider`
-    initializes a process-global default sink, and the `WaylayClient` buffer (ADR-0008) covers exchanges
+    initializes a process-global default sink, and the `WailoClient` buffer (ADR-0008) covers exchanges
     captured before the desktop connects.
   - iOS: a native `sdk-ios` that from `+load` (before `main`) installs a global `URLProtocol` by swizzling
     `URLSessionConfiguration` (and/or swizzles the `URLSession` task/delegate API for higher fidelity), so

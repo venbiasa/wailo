@@ -1,6 +1,6 @@
-# Waylay
+# Wailo
 
-In-app network inspection for mobile. Waylay is an interceptor **SDK** you drop into an
+In-app network inspection for mobile. Wailo is an interceptor **SDK** you drop into an
 Android or iOS app; it streams captured HTTP(S) traffic to a **desktop app** where you can
 inspect requests and responses live. Unlike a system proxy, capture happens inside the app,
 so there's no certificate juggling or device-wide proxy setup.
@@ -21,7 +21,7 @@ Two boundaries keep the system decoupled:
   thin frontends over it.
 
 ```
-[App under test] -> Waylay SDK (Android/iOS) --(protobuf over WebSocket)--> [engine] -> desktop UI / CLI / MCP
+[App under test] -> Wailo SDK (Android/iOS) --(protobuf over WebSocket)--> [engine] -> desktop UI / CLI / MCP
 ```
 
 ## Modules
@@ -30,7 +30,7 @@ Two boundaries keep the system decoupled:
 | --------------- | ----------------------------------------------------------------- |
 | `protocol`      | KMP library; protobuf schema + Wire-generated types               |
 | `core`          | KMP library; capture model, sinks, transport ports, WS client     |
-| `sdk-android`   | Android library; `WaylayInterceptor` (OkHttp) - the injected SDK  |
+| `sdk-android`   | Android library; `WailoInterceptor` (OkHttp) - the injected SDK  |
 | `engine`        | JVM library; WebSocket server + multi-session store + query API   |
 | `shared`        | KMP; Compose Multiplatform viewer UI + view models                |
 | `desktopApp`    | Compose Desktop entry point                                       |
@@ -57,17 +57,17 @@ depends on it only at compile time, so no version is forced on you.
 
 ```kotlin
 val client = OkHttpClient.Builder()
-    .addInterceptor(Waylay.interceptor())
+    .addInterceptor(Wailo.interceptor())
     .build()
 ```
 
-By default, captured exchanges are printed to Logcat under the `Waylay` tag. Run the
+By default, captured exchanges are printed to Logcat under the `Wailo` tag. Run the
 sample and watch them stream:
 
 ```bash
 ./gradlew :sample-android:installDebug
-adb shell am start -n com.venbiasa.waylay.sample/.MainActivity
-adb logcat -s Waylay
+adb shell am start -n com.venbiasa.wailo.sample/.MainActivity
+adb logcat -s Wailo
 ```
 
 ## Streaming to the desktop (M2)
@@ -77,9 +77,9 @@ device is the client; the desktop is the server on `:8899`, forwarded with `adb 
 
 ```kotlin
 // stream + LogcatSink() fans out: send to the desktop and still log locally
-val stream = Waylay.webSocketSink(appId = packageName, deviceName = Build.MODEL).also { it.start() }
+val stream = Wailo.webSocketSink(appId = packageName, deviceName = Build.MODEL).also { it.start() }
 val client = OkHttpClient.Builder()
-    .addInterceptor(Waylay.interceptor(sink = stream + LogcatSink()))
+    .addInterceptor(Wailo.interceptor(sink = stream + LogcatSink()))
     .build()
 ```
 
@@ -87,7 +87,7 @@ val client = OkHttpClient.Builder()
 ./gradlew :desktopApp:run                     # start the desktop receiver (live text list)
 adb reverse tcp:8899 tcp:8899                 # route device localhost:8899 -> desktop
 ./gradlew :sample-android:installDebug
-adb shell am start -n com.venbiasa.waylay.sample/.MainActivity
+adb shell am start -n com.venbiasa.wailo.sample/.MainActivity
 ```
 
 Captured requests appear live in the desktop window. The sample already wires this up, so

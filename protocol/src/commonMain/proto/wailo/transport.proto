@@ -1,8 +1,8 @@
 syntax = "proto3";
 
-package com.venbiasa.waylay.protocol;
+package com.venbiasa.wailo.protocol;
 
-import "waylay/capture.proto";
+import "wailo/capture.proto";
 
 // One Envelope per WebSocket frame. The client opens with a Hello, then streams
 // exchanges; the server keys sessions off that Hello.

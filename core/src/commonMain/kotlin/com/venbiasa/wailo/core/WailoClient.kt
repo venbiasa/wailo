@@ -1,8 +1,8 @@
-package com.venbiasa.waylay.core
+package com.venbiasa.wailo.core
 
-import com.venbiasa.waylay.protocol.Envelope
-import com.venbiasa.waylay.protocol.Hello
-import com.venbiasa.waylay.protocol.HttpExchange
+import com.venbiasa.wailo.protocol.Envelope
+import com.venbiasa.wailo.protocol.Hello
+import com.venbiasa.wailo.protocol.HttpExchange
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.cio.CIO
 import io.ktor.client.plugins.websocket.WebSockets
@@ -24,7 +24,7 @@ import kotlinx.coroutines.launch
  * buffer, reconnecting whenever the desktop isn't up yet. Overflow drops the
  * oldest so a slow/absent desktop never blocks or OOMs the host app.
  */
-class WaylayClient(
+class WailoClient(
     private val hello: Hello,
     private val host: String = DEFAULT_HOST,
     private val port: Int = DEFAULT_PORT,
