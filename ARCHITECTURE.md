@@ -21,10 +21,9 @@ does not require rewrites:
 ```mermaid
 flowchart LR
   subgraph device [Device / app under test]
-    ok[OkHttp / URLSession] --> intc["Wailo interceptor (sdk-android / sdk-ios)"]
-    intc --> core["core: capture model + WS client"]
+    ok[OkHttp / URLSession] --> intc["Wailo interceptor + capture model + WS client (sdk-android / sdk-ios)"]
   end
-  core -->|"protobuf Envelope over WebSocket"| server["engine: WS server"]
+  intc -->|"protobuf Envelope over WebSocket"| server["engine: WS server"]
   server --> store["engine: SessionStore (per device/app)"]
   store --> ui["shared + desktopApp: live inspector"]
   store -. later .-> cli["CLI (Appium)"]
@@ -34,10 +33,13 @@ flowchart LR
 ## Transport
 
 - WebSocket. Device = client, desktop = server (default port 8899).
-- Forwarded over `adb reverse` per device (`adb -s <serial> reverse tcp:8899 tcp:8899`). Multiple
-  devices/apps each open their own connection; the server distinguishes them by the `Hello` sent on
-  connect. Constraint: each device must be adb-reachable from the desktop machine.
-- Deferred: mDNS/wifi discovery (for devices not adb-connected) and iOS transport (usbmux/wifi).
+- Android: forwarded over `adb reverse` per device (`adb -s <serial> reverse tcp:8899 tcp:8899`).
+- iOS: there is no `adb reverse`. The Simulator shares the Mac's network stack, so `localhost:8899`
+  reaches the server directly; a physical device points `host` at the Mac's LAN IP. USB tunnelling
+  (usbmux/PeerTalk) is deferred.
+- Multiple devices/apps each open their own connection; the server distinguishes them by the `Hello`
+  sent on connect.
+- Deferred: mDNS/wifi discovery (for devices not adb-connected) and iOS USB tunnelling.
 
 ## Multi-session model
 
@@ -49,9 +51,24 @@ per-session flows, plus a merged view. The desktop groups by session in a sideba
 See [AGENTS.md](AGENTS.md) for the module dependency rules. `sdk-*` is intentionally isolated from
 `engine`/`shared`/`desktopApp` because it ships inside third-party apps.
 
-## iOS strategy (open)
+The device-side transport (`CaptureSink` + `WailoClient`) lives inside `sdk-android`. It used to be a
+separate multiplatform `core` module kept thin so iOS could share it; once iOS became native Swift
+(ADR-0010) that rationale disappeared, so `core` was folded into `sdk-android` (ADR-0011). `protocol`
+and `shared` remain Kotlin Multiplatform (they back the shared desktop UI); nothing device-side is KMP
+anymore.
 
-The interceptor is always platform-native (Android=OkHttp, iOS=URLProtocol/URLSession). Only `core`
-is potentially shareable. Because protobuf carries the contract cross-language, iOS can later be
-native Swift (if `core` stays thin) or a Kotlin/Native framework built from `core`. Decision deferred;
-see DECISIONS.md.
+## iOS strategy (resolved — ADR-0010)
+
+The interceptor is platform-native (Android=OkHttp, iOS=URLProtocol/URLSession). `sdk-ios` is a
+standalone **Swift** package, not a Kotlin/Native framework, so no Kotlin runtime ships inside host
+apps (invariant #3). Cross-language consistency is kept by the wire contract, not shared code:
+
+- `protocol/**/*.proto` is compiled to Swift by the Wire CLI (`./gradlew :protocol:generateSwiftProto`),
+  committed under `sdk-ios/Sources/WailoProtocol/generated`.
+- `WailoURLProtocol` captures URLSession traffic; it's installed via `URLProtocol.registerClass` plus a
+  `URLSessionConfiguration` swizzle so third-party sessions are caught too (ADR-0009).
+- A Swift `WailoClient` reimplements the buffer/reconnect loop over `URLSessionWebSocketTask`, emitting
+  the same `Envelope` frames as the Kotlin client.
+
+The transport logic is intentionally duplicated (Kotlin + Swift) to avoid Kotlin/Native; the protobuf
+schema is not. See ADR-0006 (the original open question) and ADR-0010 (the resolution) in DECISIONS.md.

@@ -1,0 +1,14 @@
+{
+  "pins" : [
+    {
+      "identity" : "wire",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/square/wire",
+      "state" : {
+        "revision" : "f4848d379f1548aef7685a07789e5f65782fe110",
+        "version" : "5.3.5"
+      }
+    }
+  ],
+  "version" : 2
+}

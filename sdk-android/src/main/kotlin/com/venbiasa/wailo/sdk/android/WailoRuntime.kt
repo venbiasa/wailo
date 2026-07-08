@@ -1,6 +1,5 @@
 package com.venbiasa.wailo.sdk.android
 
-import com.venbiasa.wailo.core.CaptureSink
 import okhttp3.OkHttpClient
 
 /**

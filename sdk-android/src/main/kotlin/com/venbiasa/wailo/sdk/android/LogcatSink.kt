@@ -1,7 +1,6 @@
 package com.venbiasa.wailo.sdk.android
 
 import android.util.Log
-import com.venbiasa.wailo.core.CaptureSink
 import com.venbiasa.wailo.protocol.HttpExchange
 import com.venbiasa.wailo.protocol.HttpRequest
 import com.venbiasa.wailo.protocol.HttpResponse

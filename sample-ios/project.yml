@@ -1,0 +1,32 @@
+# XcodeGen spec (source of truth; the .xcodeproj is generated and gitignored).
+# Regenerate with: cd sample-ios && xcodegen generate
+name: WailoSampleiOS
+options:
+  bundleIdPrefix: com.venbiasa.wailo
+  createIntermediateGroups: true
+  deploymentTarget:
+    iOS: "16.0"
+packages:
+  WailoSDK:
+    path: ../sdk-ios
+targets:
+  WailoSampleiOS:
+    type: application
+    platform: iOS
+    sources:
+      - Sources
+    dependencies:
+      - package: WailoSDK
+        product: WailoSDK
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.venbiasa.wailo.sampleios
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        SWIFT_VERSION: "5.0"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
+        # Simulator builds don't need signing; keeps CI/compile-only runs unsigned.
+        CODE_SIGNING_ALLOWED: NO

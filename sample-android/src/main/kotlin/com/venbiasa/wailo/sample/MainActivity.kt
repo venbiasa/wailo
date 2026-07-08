@@ -10,15 +10,15 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.MaterialTheme
+import androidx.compose.material.Button
 import androidx.compose.material.Surface
 import androidx.compose.material.Text
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.snapshots.SnapshotStateList
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
-import com.venbiasa.wailo.core.plus
+import com.venbiasa.wailo.sdk.android.plus
 import com.venbiasa.wailo.sdk.android.LogcatSink
 import com.venbiasa.wailo.sdk.android.Wailo
 import com.venbiasa.wailo.sdk.android.WailoRuntime
@@ -52,15 +52,22 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // Seed the process-global sink auto-instrumented clients report to (ADR-0009).
+        // Seed the process-global sink auto-instrumented clients report to.
         WailoRuntime.install(sink)
         setContent {
             val results = remember { mutableStateListOf<String>() }
-            LaunchedEffect(Unit) { runSampleTraffic(results) }
             MaterialTheme {
                 Surface(Modifier.fillMaxSize()) {
                     Column(Modifier.fillMaxSize().padding(16.dp)) {
                         Text("Wailo sample", style = MaterialTheme.typography.h6)
+                        // Fire on tap (parity with the iOS sample) so traffic can be re-sent and
+                        // watched streaming to the desktop, rather than firing once at launch.
+                        Button(
+                            onClick = { runSampleTraffic(results) },
+                            modifier = Modifier.padding(vertical = 8.dp),
+                        ) {
+                            Text("Send requests")
+                        }
                         LazyColumn(Modifier.fillMaxSize()) {
                             items(results) { line -> Text(line, style = MaterialTheme.typography.body2) }
                         }

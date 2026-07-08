@@ -10,7 +10,7 @@ import org.objectweb.asm.Opcodes
  * Hooking the *call site* (not OkHttp's own classes) is what lets a single visitor reach clients
  * built by third-party libraries: wherever anyone calls `build()`, the woven `hook` gets a chance to
  * add the interceptor. The inserted call is stack-neutral — it consumes the `Builder` on top of the
- * stack and returns the same `Builder` — so no frames or locals change (ADR-0009).
+ * stack and returns the same `Builder` — so no frames or locals change.
  *
  * [hookOwner] is injected so tests can retarget the woven call to a stand-in; production always uses
  * the real [WAILO_RUNTIME].

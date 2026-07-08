@@ -9,7 +9,7 @@ import org.gradle.api.Project
 
 /**
  * Applied by a host app to auto-capture OkHttp traffic — including third-party libraries — without
- * manual `Wailo.interceptor()` wiring (ADR-0009). Registers [WailoAsmClassVisitorFactory] over
+ * manual `Wailo.interceptor()` wiring. Registers [WailoAsmClassVisitorFactory] over
  * [InstrumentationScope.ALL] so both app code and dependency jars are rewritten.
  *
  * Scoped to the Android *application* plugin: `ALL`-scope instrumentation of dependencies is only

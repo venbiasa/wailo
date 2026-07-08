@@ -37,9 +37,12 @@ plugins {
 }
 
 include(":protocol")
-include(":core")
 include(":sdk-android")
 include(":engine")
 include(":shared")
 include(":desktopApp")
 include(":sample-android")
+// KMP consumer sample: shared Kotlin (Ktor) + Android app. Its iOS app is an Xcode project
+// (sample-kmp/iosApp), integrated at the Swift shell, so it is not a Gradle module.
+include(":sample-kmp:shared")
+include(":sample-kmp:androidApp")

@@ -13,20 +13,36 @@ local WebSocket to a Kotlin Multiplatform desktop app. Later: headless automatio
    Never hand-write DTOs that duplicate it on either the device or desktop side.
 2. `engine` is headless and UI-agnostic. UI, CLI, and MCP are frontends over `engine`; do not put
    Compose/UI code in `engine`, and do not make the desktop UI talk to the transport directly.
-3. The interceptor SDK (`sdk-android`, later `sdk-ios`) ships inside third-party apps. Keep it small
-   and dependency-light. Never make it depend on `engine`, `shared`, or `desktopApp`.
-4. `core` is the only shareable device-side logic (transport client, buffering, redaction). Keep its
-   public surface small and port-based so an iOS strategy stays open.
+3. The interceptor SDK (`sdk-android`, `sdk-ios`) ships inside third-party apps. Keep it small and
+   dependency-light. Never make it depend on `engine`, `shared`, or `desktopApp`. `sdk-ios` is native
+   Swift and must not embed a Kotlin/Native runtime (ADR-0010).
+4. The device-side transport/sink logic (WebSocket client, buffering, redaction) lives *inside*
+   `sdk-android` — the former `core` module was folded in (ADR-0011). `sdk-ios` reimplements the same
+   thin logic in Swift. There is no shared device-side Kotlin module; consistency across the two SDKs
+   is kept only by the `protocol` wire contract, never by shared code.
 
 ## Module dependency rules
 
 ```
-protocol  <- core <- sdk-android <- sample-android
+protocol  <- sdk-android <- sample-android
 protocol  <- engine <- desktopApp
 protocol  <- shared <- desktopApp
+protocol  -> (Wire Swift codegen) -> sdk-ios <- sample-ios
+sdk-android <- sample-kmp:androidApp -> sample-kmp:shared   (iOS app links sdk-ios + Shared.framework)
 ```
 
-Dependencies point rightward only. `sdk-*` must not reach `engine`/`shared`/`desktopApp`.
+Dependencies point rightward only. `sdk-*` must not reach `engine`/`shared`/`desktopApp`. `sdk-ios` is
+a standalone SwiftPM package (not a Gradle module): it depends only on Foundation + the Wire Swift
+runtime, with its protobuf types generated from `protocol` (see ADR-0010). `protocol` and `shared`
+stay Kotlin Multiplatform (the desktop UI is shared via `shared`); `sdk-android` and `engine` are
+single-target, since iOS no longer shares Kotlin (ADR-0010, ADR-0011).
+
+Samples are leaf consumers (never depended on): `sample-android` (native Android), `sample-ios`
+(a SwiftUI app + a `cli/` smoke harness, both on `sdk-ios`), and `sample-kmp` (KMP: a Wailo-free
+`sample-kmp:shared` Ktor module + an `androidApp` using `sdk-android` + the plugin + an `iosApp` Xcode
+shell using `sdk-ios`). Wailo is wired per-platform at each shell, never in `commonMain`; there is no
+`commonMain` Wailo API because `sdk-ios` is native Swift (ADR-0012). `sample-kmp:shared` is distinct
+from the desktop `shared` module.
 
 ## Build & verify
 
@@ -34,6 +50,15 @@ Dependencies point rightward only. `sdk-*` must not reach `engine`/`shared`/`des
 ./gradlew projects
 ./gradlew build
 ./gradlew :sample-android:assembleDebug
+# iOS SDK (SwiftPM, macOS host): regenerate protobuf, then build/test
+./gradlew :protocol:generateSwiftProto
+cd sdk-ios && swift test
+# iOS sample app (needs `brew install xcodegen`): generate project, compile for the Simulator SDK
+cd sample-ios && xcodegen generate && xcodebuild -scheme WailoSampleiOS -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' build CODE_SIGNING_ALLOWED=NO
+# iOS sample CLI harness (headless, no simulator): cd sample-ios/cli && swift build
+# KMP sample (Android): ./gradlew :sample-kmp:androidApp:assembleDebug
+# KMP sample (iOS framework): ./gradlew :sample-kmp:shared:linkDebugFrameworkIosSimulatorArm64
+#   then: cd sample-kmp/iosApp && xcodegen generate && xcodebuild -scheme WailoKmpSampleiOS -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' build CODE_SIGNING_ALLOWED=NO
 ```
 
 ## Conventions

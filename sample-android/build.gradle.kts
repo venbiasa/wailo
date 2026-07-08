@@ -6,7 +6,7 @@ plugins {
     alias(libs.plugins.composeMultiplatform)
     alias(libs.plugins.composeCompiler)
     // Auto-instruments OkHttp call sites so clients built without Wailo.interceptor() are still
-    // captured (ADR-0009 POC). Resolved from the wailo-gradle-plugin included build.
+    // captured (POC). Resolved from the wailo-gradle-plugin included build.
     id("com.venbiasa.wailo.instrumentation")
 }
 
