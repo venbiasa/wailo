@@ -24,7 +24,10 @@ compose.desktop {
 }
 
 dependencies {
-    // currentOs bundles runtime/foundation/ui/material (2) for the host platform.
+    // currentOs bundles the Compose desktop runtime + window toolkit for the host platform.
     implementation(compose.desktop.currentOs)
+    // engine = the headless query surface; shared = the Compose viewer (invariant #2: UI is a
+    // frontend over engine, and the two never talk to the transport directly).
     implementation(projects.engine)
+    implementation(projects.shared)
 }

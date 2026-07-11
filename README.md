@@ -87,7 +87,7 @@ val client = OkHttpClient.Builder()
 ```
 
 ```bash
-./gradlew :desktopApp:run                     # start the desktop receiver (live text list)
+./gradlew :desktopApp:run                     # start the desktop inspector (live list + detail)
 adb reverse tcp:8899 tcp:8899                 # route device localhost:8899 -> desktop
 ./gradlew :sample-android:installDebug
 adb shell am start -n com.venbiasa.wailo.sample/.MainActivity
