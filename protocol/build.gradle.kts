@@ -1,9 +1,13 @@
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+import org.jetbrains.kotlin.gradle.tasks.KotlinJvmCompile
 
 plugins {
     alias(libs.plugins.kotlinMultiplatform)
     alias(libs.plugins.androidKotlinMultiplatformLibrary)
     alias(libs.plugins.wire)
+    // Publish so :sdk-android's `api(projects.protocol)` resolves as a real Maven coordinate for
+    // external consumers. The KMP plugin registers the root + per-target publications itself.
+    `maven-publish`
 }
 
 kotlin {
@@ -13,9 +17,6 @@ kotlin {
         namespace = "com.venbiasa.wailo.protocol"
         compileSdk = libs.versions.android.compileSdk.get().toInt()
         minSdk = libs.versions.android.minSdk.get().toInt()
-        compilerOptions {
-            jvmTarget = JvmTarget.JVM_21
-        }
     }
 
     sourceSets {
@@ -26,10 +27,28 @@ kotlin {
     }
 }
 
+// AGP 8's KMP library plugin has no `androidLibrary { compilerOptions }` (that's AGP 9); pin the JVM
+// bytecode target for the jvm + android compilations at the task level to keep everything on 21.
+tasks.withType<KotlinJvmCompile>().configureEach {
+    compilerOptions {
+        jvmTarget = JvmTarget.JVM_21
+    }
+}
+
 wire {
     kotlin {}
     sourcePath {
         srcDir("src/commonMain/proto")
+    }
+}
+
+// Publish under the product name while the internal Gradle module stays :protocol. The KMP plugin
+// creates one publication per target, so rename the whole family: protocol -> wailo-protocol,
+// protocol-android -> wailo-protocol-android, protocol-jvm -> wailo-protocol-jvm. configureEach is
+// lazy, so it also catches the target publications AGP/KMP register during afterEvaluate.
+publishing {
+    publications.withType<MavenPublication>().configureEach {
+        artifactId = artifactId.replaceFirst(project.name, "wailo-protocol")
     }
 }
 

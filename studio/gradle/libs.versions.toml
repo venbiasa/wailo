@@ -1,0 +1,26 @@
+# Desktop-side (studio) toolchain: kept modern and decoupled from the consumer-pinned SDK build.
+# Only `wailo-protocol` crosses the boundary — consumed as a published binary from Maven Local —
+# so this build is free to move ahead of the SDK's Kotlin/Gradle/AGP pins. See DECISIONS.md ADR-0015.
+[versions]
+kotlin = "2.3.21"
+composeMultiplatform = "1.11.0"
+coroutines = "1.10.2"
+ktor = "3.4.3"
+# The published SDK artifact this build consumes; matches the root build's group/version.
+wailoProtocol = "0.1.0-SNAPSHOT"
+
+[libraries]
+kotlinx-coroutines-core = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core", version.ref = "coroutines" }
+ktor-server-core = { module = "io.ktor:ktor-server-core", version.ref = "ktor" }
+ktor-server-cio = { module = "io.ktor:ktor-server-cio", version.ref = "ktor" }
+ktor-server-websockets = { module = "io.ktor:ktor-server-websockets", version.ref = "ktor" }
+ktor-client-core = { module = "io.ktor:ktor-client-core", version.ref = "ktor" }
+ktor-client-cio = { module = "io.ktor:ktor-client-cio", version.ref = "ktor" }
+ktor-client-websockets = { module = "io.ktor:ktor-client-websockets", version.ref = "ktor" }
+wailo-protocol = { module = "com.venbiasa.wailo:wailo-protocol", version.ref = "wailoProtocol" }
+
+[plugins]
+kotlinMultiplatform = { id = "org.jetbrains.kotlin.multiplatform", version.ref = "kotlin" }
+kotlinJvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }
+composeMultiplatform = { id = "org.jetbrains.compose", version.ref = "composeMultiplatform" }
+composeCompiler = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }

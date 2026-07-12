@@ -1,8 +1,10 @@
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
-    // AGP 9 provides built-in Kotlin support; the kotlin-android plugin is no longer applied.
     alias(libs.plugins.androidLibrary)
+    // AGP 8 has no built-in Kotlin support, so apply kotlin-android to compile the SDK's Kotlin.
+    alias(libs.plugins.kotlinAndroid)
+    `maven-publish`
 }
 
 android {
@@ -17,11 +19,31 @@ android {
         sourceCompatibility = JavaVersion.VERSION_21
         targetCompatibility = JavaVersion.VERSION_21
     }
+
+    // Expose the release AAR (plus sources) as a publishable component. This creates the
+    // `release` software component consumed by the publication below.
+    publishing {
+        singleVariant("release") {
+            withSourcesJar()
+        }
+    }
 }
 
 kotlin {
     compilerOptions {
         jvmTarget = JvmTarget.JVM_21
+    }
+}
+
+publishing {
+    publications {
+        // The `release` component only exists once AGP has configured the variant.
+        register<MavenPublication>("release") {
+            afterEvaluate { from(components["release"]) }
+            // Published under the product name; the internal Gradle module stays :sdk-android.
+            // "sdk-android" is ambiguous as a bare coordinate/filename (which SDK?).
+            artifactId = "wailo-android"
+        }
     }
 }
 

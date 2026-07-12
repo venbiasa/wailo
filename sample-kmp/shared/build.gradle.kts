@@ -1,4 +1,5 @@
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+import org.jetbrains.kotlin.gradle.tasks.KotlinJvmCompile
 
 plugins {
     alias(libs.plugins.kotlinMultiplatform)
@@ -10,9 +11,6 @@ kotlin {
         namespace = "com.venbiasa.wailo.sample.kmp"
         compileSdk = libs.versions.android.compileSdk.get().toInt()
         minSdk = libs.versions.android.minSdk.get().toInt()
-        compilerOptions {
-            jvmTarget = JvmTarget.JVM_21
-        }
     }
 
     // A static framework the iOS app links; Swift calls SampleApi from it.
@@ -37,5 +35,13 @@ kotlin {
             // Ktor's Darwin engine sits on URLSession, captured by sdk-ios's URLProtocol swizzle.
             implementation(libs.ktor.client.darwin)
         }
+    }
+}
+
+// AGP 8's KMP library plugin has no `androidLibrary { compilerOptions }` (that's AGP 9); pin the JVM
+// bytecode target for the android compilation at the task level to keep it on 21.
+tasks.withType<KotlinJvmCompile>().configureEach {
+    compilerOptions {
+        jvmTarget = JvmTarget.JVM_21
     }
 }

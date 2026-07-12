@@ -1,6 +1,8 @@
 [versions]
-kotlin = "2.3.21"
-agp = "9.0.1"
+# Toolchain pinned to match the target consumer app so the SDK/plugin are consumable there
+# (Kotlin 2.2.21 ↔ Gradle 7.6.3–8.14 ↔ AGP 7.3.1–8.11.1). See DECISIONS.md.
+kotlin = "2.2.21"
+agp = "8.10.1"
 android-compileSdk = "36"
 android-minSdk = "24"
 android-targetSdk = "36"
@@ -8,7 +10,9 @@ composeMultiplatform = "1.11.0"
 androidx-activity = "1.13.0"
 androidx-lifecycle = "2.10.0"
 coroutines = "1.10.2"
-ktor = "3.4.3"
+# Ktor 3.3.x is the last line built on Kotlin 2.2; 3.4+ moved to Kotlin 2.3, whose Kotlin/Native klibs
+# can't be consumed by our Kotlin/Native 2.2.21 target (sample-kmp iOS). See ADR-0014.
+ktor = "3.3.3"
 wire = "5.3.5"
 okhttp = "4.12.0"
 asm = "9.9"

@@ -1,13 +1,14 @@
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
-    // AGP 9 provides built-in Kotlin support; the kotlin-android plugin is no longer applied.
     alias(libs.plugins.androidApplication)
+    // AGP 8 has no built-in Kotlin support, so apply kotlin-android to compile the app's Kotlin.
+    alias(libs.plugins.kotlinAndroid)
     alias(libs.plugins.composeMultiplatform)
     alias(libs.plugins.composeCompiler)
     // Auto-instruments OkHttp call sites so clients built without Wailo.interceptor() are still
     // captured (POC). Resolved from the wailo-gradle-plugin included build.
-    id("com.venbiasa.wailo.instrumentation")
+    id("com.venbiasa.wailo")
 }
 
 android {

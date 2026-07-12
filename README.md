@@ -24,6 +24,11 @@ Two boundaries keep the system decoupled:
 [App under test] -> Wailo SDK (Android/iOS) --(protobuf over WebSocket)--> [engine] -> desktop UI / CLI / MCP
 ```
 
+The repo is **two Gradle builds** joined only by `protocol`: the **SDK build** (repo root — `protocol`,
+`sdk-android`, the Gradle plugin, and the samples) is pinned to a conservative toolchain so it's consumable
+inside host apps, while the **`studio/` build** (`engine`, `shared`, `desktopApp`) runs a modern toolchain
+and consumes `protocol` as the published `wailo-protocol` artifact (ADR-0015).
+
 ## Modules
 
 | Module          | What it is                                                        |
@@ -32,9 +37,9 @@ Two boundaries keep the system decoupled:
 | `sdk-android`   | Android library; `WailoInterceptor` (OkHttp) + capture sinks + WS client - the injected SDK |
 | `wailo-gradle-plugin` | Build-time only; ASM plugin that auto-instruments OkHttp |
 | `sdk-ios`       | Swift package; `WailoURLProtocol` (URLSession) - the injected iOS SDK |
-| `engine`        | JVM library; WebSocket server + multi-session store + query API   |
-| `shared`        | KMP; Compose Multiplatform viewer UI + view models                |
-| `desktopApp`    | Compose Desktop entry point                                       |
+| `engine`        | JVM library; WebSocket server + multi-session store + query API — **studio build** |
+| `shared`        | JVM + Compose Multiplatform viewer UI + view models — **studio build** |
+| `desktopApp`    | Compose Desktop entry point — **studio build**                     |
 | `sample-android`| Sample app under test (Android), used for dogfooding/verification |
 | `sample-ios`    | Sample under test (iOS): a SwiftUI app (`app`) + a headless CLI harness (`cli`) |
 | `sample-kmp`    | KMP sample: shared Ktor code + Android app (`sdk-android`) + iOS app shell (`sdk-ios`) |
@@ -42,15 +47,23 @@ Two boundaries keep the system decoupled:
 ## Requirements
 
 - JDK 21 (the Android Studio JBR 21 works)
-- Android SDK (compileSdk 36)
-- Gradle is provided via the wrapper (`./gradlew`)
+- Android SDK (compileSdk 36) — for the SDK build; the `studio/` desktop build needs only JDK 21
+- Gradle is provided via the wrapper (`./gradlew`, plus `studio/gradlew` for the desktop build)
 
 ## Build
 
+Two Gradle builds (ADR-0015). The SDK build is at the repo root; the `studio/` desktop build consumes
+`protocol` as a published artifact, so publish it first.
+
 ```bash
-./gradlew projects        # list modules
-./gradlew build           # build everything
+# SDK build (repo root)
+./gradlew projects                       # list modules
+./gradlew build                          # protocol, sdk-android, samples, plugin
+./gradlew :protocol:publishToMavenLocal  # make wailo-protocol available to the studio build
 ./gradlew :sample-android:assembleDebug
+
+# studio build (desktop; modern toolchain)
+cd studio && ./gradlew build             # engine, shared, desktopApp
 ```
 
 ## Using the SDK (M1)
@@ -87,7 +100,7 @@ val client = OkHttpClient.Builder()
 ```
 
 ```bash
-./gradlew :desktopApp:run                     # start the desktop inspector (live list + detail)
+(cd studio && ./gradlew :desktopApp:run)      # start the desktop inspector (live list + detail)
 adb reverse tcp:8899 tcp:8899                 # route device localhost:8899 -> desktop
 ./gradlew :sample-android:installDebug
 adb shell am start -n com.venbiasa.wailo.sample/.MainActivity
@@ -106,7 +119,7 @@ every `OkHttpClient.Builder.build()` call site (app code *and* dependencies) to 
 ```kotlin
 // host app build.gradle.kts
 plugins {
-    id("com.venbiasa.wailo.instrumentation")
+    id("com.venbiasa.wailo")
 }
 ```
 
@@ -167,7 +180,7 @@ The **CLI harness** runs the identical `Wailo.start()` + request path headlessly
 is how it's smoke-tested end-to-end against the desktop:
 
 ```bash
-./gradlew :desktopApp:run                # start the desktop receiver
+(cd studio && ./gradlew :desktopApp:run) # start the desktop receiver
 cd sample-ios/cli && swift run wailo-sample-ios-cli
 ```
 

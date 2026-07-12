@@ -2,9 +2,11 @@ import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
     alias(libs.plugins.androidApplication)
+    // AGP 8 has no built-in Kotlin support, so apply kotlin-android to compile the app's Kotlin.
+    alias(libs.plugins.kotlinAndroid)
     // Rewrites OkHttp build() call sites across app code *and dependencies* (incl. Ktor's OkHttp
     // engine), so the shared module's traffic is captured with no Wailo code in commonMain.
-    id("com.venbiasa.wailo.instrumentation")
+    id("com.venbiasa.wailo")
 }
 
 android {

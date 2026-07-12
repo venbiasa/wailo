@@ -2,30 +2,25 @@ import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
     alias(libs.plugins.kotlinMultiplatform)
-    alias(libs.plugins.androidKotlinMultiplatformLibrary)
     alias(libs.plugins.composeMultiplatform)
     alias(libs.plugins.composeCompiler)
 }
 
 kotlin {
-    jvm()
-
-    androidLibrary {
-        namespace = "com.venbiasa.wailo.shared"
-        compileSdk = libs.versions.android.compileSdk.get().toInt()
-        minSdk = libs.versions.android.minSdk.get().toInt()
+    // JVM-only: the desktop viewer runs on the JVM, so there is no Android target here (dropping it
+    // keeps AGP out of the studio build entirely — ADR-0015). The expect/actual for the resize cursor
+    // now resolves against jvmMain alone.
+    jvm {
         compilerOptions {
             jvmTarget = JvmTarget.JVM_21
         }
-        // The Noto Sans font ships as a Compose multiplatform resource; the AGP KMP library
-        // plugin does not process resources unless opted in.
-        androidResources.enable = true
     }
 
     sourceSets {
         commonMain.dependencies {
             // HttpExchange is part of this module's public API (FlowEntry), so protocol is `api`.
-            api(projects.protocol)
+            // Consumed as the published wailo-protocol binary (ADR-0015), not a project dependency.
+            api(libs.wailo.protocol)
             // The `compose.*` accessors are used (rather than catalog GAVs) because the Compose
             // plugin resolves the correct multiplatform artifact/version for each; material3 and
             // components-resources have no plain `org.jetbrains.compose.*:*:<version>` coordinate.
@@ -35,8 +30,6 @@ kotlin {
             implementation(compose.ui)
             implementation(compose.components.resources)
         }
-        // Pure formatting logic lives in commonMain; tested from the JVM target so no Android
-        // host-test wiring is needed for what is a desktop-only UI today.
         jvmTest.dependencies {
             implementation(kotlin("test"))
         }

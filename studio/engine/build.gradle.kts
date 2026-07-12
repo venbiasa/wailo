@@ -17,7 +17,9 @@ kotlin {
 
 dependencies {
     // Exposed on the query API (CapturedExchange, StateFlow), so consumers see them.
-    api(projects.protocol)
+    // protocol crosses the SDK/studio build boundary as a published binary (ADR-0015), so it is the
+    // one dependency referenced by Maven coordinate rather than a type-safe project accessor.
+    api(libs.wailo.protocol)
     api(libs.kotlinx.coroutines.core)
 
     implementation(libs.ktor.server.core)

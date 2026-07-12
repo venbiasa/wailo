@@ -23,19 +23,26 @@ local WebSocket to a Kotlin Multiplatform desktop app. Later: headless automatio
 
 ## Module dependency rules
 
+Two Gradle builds, joined only by the published `protocol` artifact (ADR-0015):
+
 ```
-protocol  <- sdk-android <- sample-android
-protocol  <- engine <- desktopApp
-protocol  <- shared <- desktopApp
-protocol  -> (Wire Swift codegen) -> sdk-ios <- sample-ios
-sdk-android <- sample-kmp:androidApp -> sample-kmp:shared   (iOS app links sdk-ios + Shared.framework)
+SDK build (repo root, consumer-pinned — ADR-0014); publishes wailo-protocol, wailo-android, plugin:
+  protocol    <- sdk-android <- sample-android
+  sdk-android <- sample-kmp:androidApp -> sample-kmp:shared   (iOS app links sdk-ios + Shared.framework)
+  protocol    -> (Wire Swift codegen) -> sdk-ios <- sample-ios
+
+studio build (studio/, modern — ADR-0015); consumes wailo-protocol from Maven Local:
+  wailo-protocol <- engine <- desktopApp
+  wailo-protocol <- shared <- desktopApp
 ```
 
-Dependencies point rightward only. `sdk-*` must not reach `engine`/`shared`/`desktopApp`. `sdk-ios` is
-a standalone SwiftPM package (not a Gradle module): it depends only on Foundation + the Wire Swift
-runtime, with its protobuf types generated from `protocol` (see ADR-0010). `protocol` and `shared`
-stay Kotlin Multiplatform (the desktop UI is shared via `shared`); `sdk-android` and `engine` are
-single-target, since iOS no longer shares Kotlin (ADR-0010, ADR-0011).
+Dependencies point rightward only, and `sdk-*` must not reach `engine`/`shared`/`desktopApp` — now enforced
+structurally, since those live in the separate `studio/` build. `protocol` is the single seam: the `studio`
+build consumes it as the published `wailo-protocol` binary (via `libs.wailo.protocol`), never as a project.
+`sdk-ios` is a standalone SwiftPM package (not a Gradle module): it depends only on Foundation + the Wire
+Swift runtime, with its protobuf types generated from `protocol` (see ADR-0010). `protocol` stays Kotlin
+Multiplatform (jvm+android, for `sdk-android` and the iOS Swift codegen); `shared` is now JVM-only (its
+Android target was dropped, ADR-0015); `sdk-android` and `engine` are single-target.
 
 Samples are leaf consumers (never depended on): `sample-android` (native Android), `sample-ios`
 (a SwiftUI app + a `cli/` smoke harness, both on `sdk-ios`), and `sample-kmp` (KMP: a Wailo-free
@@ -47,8 +54,10 @@ from the desktop `shared` module.
 ## Build & verify
 
 ```bash
+# --- SDK build (repo root): protocol, sdk-android, samples, plugin ---
 ./gradlew projects
 ./gradlew build
+./gradlew :protocol:publishToMavenLocal    # required before building studio (which consumes wailo-protocol)
 ./gradlew :sample-android:assembleDebug
 # iOS SDK (SwiftPM, macOS host): regenerate protobuf, then build/test
 ./gradlew :protocol:generateSwiftProto
@@ -59,6 +68,10 @@ cd sample-ios && xcodegen generate && xcodebuild -scheme WailoSampleiOS -sdk iph
 # KMP sample (Android): ./gradlew :sample-kmp:androidApp:assembleDebug
 # KMP sample (iOS framework): ./gradlew :sample-kmp:shared:linkDebugFrameworkIosSimulatorArm64
 #   then: cd sample-kmp/iosApp && xcodegen generate && xcodebuild -scheme WailoKmpSampleiOS -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' build CODE_SIGNING_ALLOWED=NO
+
+# --- studio build (studio/): engine, shared, desktopApp on the modern toolchain ---
+cd studio && ./gradlew build               # consumes wailo-protocol from Maven Local
+cd studio && ./gradlew :desktopApp:run     # start the desktop inspector
 ```
 
 ## Conventions
@@ -67,14 +80,24 @@ cd sample-ios && xcodegen generate && xcodebuild -scheme WailoSampleiOS -sdk iph
   decisions a reader can't recover from the code. Never write comments/KDoc that restate what the
   code does or log what an edit changed; if a comment adds no intent, delete it.
 - Kotlin, 4-space indent, official code style (`kotlin.code.style=official`).
-- Versions live in `gradle/libs.versions.toml`; reference via `libs.*` / `libs.plugins.*`. Do not
-  hard-code versions in module build files.
-- Type-safe project accessors are enabled: depend on modules via `projects.<module>`.
-- Java/Kotlin target is 21 across modules.
+- Versions live in each build's version catalog — `gradle/libs.versions.toml` (SDK build) and
+  `studio/gradle/libs.versions.toml` (studio build); reference via `libs.*` / `libs.plugins.*`. Do not
+  hard-code versions in module build files. The two catalogs intentionally differ (ADR-0015).
+- Type-safe project accessors are enabled: depend on modules via `projects.<module>` — except `protocol`
+  from the `studio` build, which crosses the build boundary as the published `wailo-protocol` binary.
+- Java/Kotlin target is 21 across both builds.
 
-## Toolchain (see gradle/libs.versions.toml for exact versions)
+## Toolchain (two builds — see each build's gradle/libs.versions.toml for exact versions)
 
-Kotlin 2.3.x, AGP 9.x, Gradle 9.3.x, Compose Multiplatform 1.11.x, Ktor 3.4.x, Wire 5.x, compileSdk 36, minSdk 24.
+- **SDK build** (root) — Kotlin 2.2.21, AGP 8.10.1, Gradle 8.11.1, Ktor 3.3.x, Compose Multiplatform
+  1.11.x, Wire 5.x, compileSdk 36, minSdk 24, target 21. Pinned to match the target consumer app so the
+  published SDK + plugin are consumable there (ADR-0014). Fallout of the AGP-8 pin: Android modules apply
+  `kotlin-android` explicitly (no AGP-9 built-in Kotlin); KMP modules (`protocol`, `sample-kmp:shared`) set
+  the JVM target at the task level. Ktor stays 3.3.x because `sample-kmp:shared`'s iOS/native klibs must be
+  Kotlin-2.2 ABI.
+- **studio build** (`studio/`) — Kotlin 2.3.21, Gradle 9.3.1, Ktor 3.4.x, Compose Multiplatform 1.11.x,
+  target 21, **no AGP** (the desktop stack is pure JVM; `shared`'s Android target was dropped). Free to move
+  ahead of the SDK — it only consumes `protocol` as a published binary (ADR-0015).
 
 ## Build order
 
