@@ -29,7 +29,7 @@ class WailoClient(
     private val host: String = DEFAULT_HOST,
     private val port: Int = DEFAULT_PORT,
     bufferCapacity: Int = DEFAULT_BUFFER,
-) : CaptureSink {
+) : CaptureSink, AutoCloseable {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val outbox = Channel<HttpExchange>(bufferCapacity, BufferOverflow.DROP_OLDEST)
@@ -47,6 +47,9 @@ class WailoClient(
         scope.cancel()
         client.close()
     }
+
+    /** Lets [WailoRuntime.install] tear this client down when it is replaced by another sink. */
+    override fun close() = stop()
 
     private suspend fun connectLoop() {
         while (scope.isActive) {

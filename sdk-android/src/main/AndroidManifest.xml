@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <!-- Auto-installs the capture sink before Application.onCreate (debuggable builds only), so a
+             host needs no startup code. The ${applicationId} authority stays unique per consuming app. -->
+        <provider
+            android:name="com.venbiasa.wailo.sdk.android.WailoStartupProvider"
+            android:authorities="${applicationId}.wailo.startup"
+            android:exported="false" />
+    </application>
+</manifest>
