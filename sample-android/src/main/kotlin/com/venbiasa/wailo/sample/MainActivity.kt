@@ -4,9 +4,11 @@ import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.MaterialTheme
@@ -51,6 +53,7 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        enableEdgeToEdge()
         super.onCreate(savedInstanceState)
         // Seed the process-global sink auto-instrumented clients report to.
         WailoRuntime.install(sink)
@@ -58,7 +61,8 @@ class MainActivity : ComponentActivity() {
             val results = remember { mutableStateListOf<String>() }
             MaterialTheme {
                 Surface(Modifier.fillMaxSize()) {
-                    Column(Modifier.fillMaxSize().padding(16.dp)) {
+                    // Surface draws edge-to-edge; inset the content out of the system bars.
+                    Column(Modifier.fillMaxSize().safeDrawingPadding().padding(16.dp)) {
                         Text("Wailo sample", style = MaterialTheme.typography.h6)
                         // Fire on tap (parity with the iOS sample) so traffic can be re-sent and
                         // watched streaming to the desktop, rather than firing once at launch.
