@@ -137,7 +137,14 @@ private fun TableHeader(
     Box(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceContainer)) {
         Row(Modifier.horizontalScroll(hScroll).height(HeaderHeight)) {
             TrafficColumn.entries.forEach { column ->
-                HeaderCell(column, widths[column] ?: column.defaultWidth, onResize)
+                // The last column owns the leftover header space to the window edge, so it draws no
+                // trailing divider/handle — otherwise that gap reads as a phantom empty column.
+                HeaderCell(
+                    column = column,
+                    width = widths[column] ?: column.defaultWidth,
+                    onResize = onResize,
+                    resizable = column != TrafficColumn.entries.last(),
+                )
             }
         }
     }
@@ -148,6 +155,7 @@ private fun HeaderCell(
     column: TrafficColumn,
     width: Dp,
     onResize: (TrafficColumn, Float) -> Unit,
+    resizable: Boolean,
 ) {
     Box(Modifier.width(width).fillMaxHeight()) {
         Text(
@@ -160,18 +168,20 @@ private fun HeaderCell(
         )
         // A thin strip on the trailing edge; dragging it resizes this column, and hovering it shows
         // the horizontal resize cursor on desktop.
-        Box(
-            Modifier.align(Alignment.CenterEnd)
-                .width(ResizeHandleWidth)
-                .fillMaxHeight()
-                .draggable(
-                    orientation = Orientation.Horizontal,
-                    state = rememberDraggableState(onDelta = { onResize(column, it) }),
-                )
-                .resizeCursor(ResizeAxis.Horizontal),
-            contentAlignment = Alignment.Center,
-        ) {
-            Box(Modifier.width(1.dp).fillMaxHeight().background(MaterialTheme.colorScheme.outline))
+        if (resizable) {
+            Box(
+                Modifier.align(Alignment.CenterEnd)
+                    .width(ResizeHandleWidth)
+                    .fillMaxHeight()
+                    .draggable(
+                        orientation = Orientation.Horizontal,
+                        state = rememberDraggableState(onDelta = { onResize(column, it) }),
+                    )
+                    .resizeCursor(ResizeAxis.Horizontal),
+                contentAlignment = Alignment.Center,
+            ) {
+                Box(Modifier.width(1.dp).fillMaxHeight().background(MaterialTheme.colorScheme.outline))
+            }
         }
     }
 }
