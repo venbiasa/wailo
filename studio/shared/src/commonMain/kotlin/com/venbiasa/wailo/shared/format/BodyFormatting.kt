@@ -14,6 +14,24 @@ internal sealed interface BodyContent {
     data class Binary(val size: Int) : BodyContent
 }
 
+/** A way of rendering a body. The detail panel offers the applicable ones per response. */
+internal enum class PreviewKind { Json, Html, Xml, Form, Text, Image, Hex }
+
+/** Image container detected by magic bytes, independent of a possibly wrong/absent Content-Type. */
+internal enum class ImageFormat { Png, Jpeg, Gif, Webp, Bmp }
+
+/**
+ * The set of previewers that fit a body, best-first, plus the [default] to open with. Purely a
+ * classification of *what* the body is; deciding *how* to draw each kind is the UI's job. [imageFormat]
+ * is non-null only when image magic bytes were found (and the body wasn't truncated mid-capture).
+ */
+internal data class BodyAnalysis(
+    val isEmpty: Boolean,
+    val previewers: List<PreviewKind>,
+    val default: PreviewKind,
+    val imageFormat: ImageFormat?,
+)
+
 internal fun List<Header>.contentType(): String? =
     firstOrNull { it.name.equals("Content-Type", ignoreCase = true) }?.value_
 
@@ -29,6 +47,80 @@ internal fun bodyContent(body: ByteString, contentType: String?, maxTextChars: I
     val text = if (raw.length > maxTextChars) raw.substring(0, maxTextChars) else raw
     val pretty = if (isLikelyJson(contentType, text)) prettyPrintJson(text) else null
     return BodyContent.Text(pretty ?: text, json = pretty != null)
+}
+
+/**
+ * Classifies [body] into the previewers that fit it, best-first. Detection is intentionally cheap
+ * (content-type, magic bytes, and a short decoded prefix) so it can run on every selection change;
+ * the heavy work (pretty-printing, hex formatting, image decoding) is deferred to the chosen
+ * previewer. Hex is always offered as the last resort for a non-empty body, and text-shaped bodies
+ * keep a plain-Text fallback so a mis-sniff is never a dead end. A [truncated] body can't be a valid
+ * image, so image detection is skipped and it falls through to the byte/text path.
+ */
+internal fun analyzeBody(body: ByteString, contentType: String?, truncated: Boolean): BodyAnalysis {
+    if (body.size == 0) {
+        return BodyAnalysis(isEmpty = true, previewers = emptyList(), default = PreviewKind.Text, imageFormat = null)
+    }
+    val imageFormat = if (truncated) null else sniffImageFormat(body)
+    if (imageFormat != null) {
+        return BodyAnalysis(false, listOf(PreviewKind.Image, PreviewKind.Hex), PreviewKind.Image, imageFormat)
+    }
+    if (isBinaryContentType(contentType) || !isProbablyText(body)) {
+        return BodyAnalysis(false, listOf(PreviewKind.Hex), PreviewKind.Hex, null)
+    }
+    // Sniff a decoded prefix rather than the whole payload: shape checks only look at the leading
+    // characters, so a few KB is enough to distinguish JSON/HTML/XML from plain text.
+    val prefix = body.substring(0, minOf(body.size, 4096)).utf8()
+    val kind = when {
+        isFormContentType(contentType) -> PreviewKind.Form
+        isLikelyJson(contentType, prefix) -> PreviewKind.Json
+        isHtml(contentType, prefix) -> PreviewKind.Html
+        isXml(contentType, prefix) -> PreviewKind.Xml
+        else -> PreviewKind.Text
+    }
+    val previewers = when (kind) {
+        // JSON gets the interactive collapsible tree only — no Text/Hex toggle. The full raw bytes
+        // are still one click away on the Raw tab, so nothing is lost.
+        PreviewKind.Json -> listOf(PreviewKind.Json)
+        PreviewKind.Text -> listOf(PreviewKind.Text, PreviewKind.Hex)
+        else -> listOf(kind, PreviewKind.Text, PreviewKind.Hex)
+    }
+    return BodyAnalysis(false, previewers, kind, null)
+}
+
+/**
+ * Detects an image container from its leading magic bytes. This is the source of truth for the image
+ * previewer (not the Content-Type header), so a mislabeled or header-less image still previews.
+ */
+internal fun sniffImageFormat(body: ByteString): ImageFormat? {
+    if (body.size < 4) return null
+    fun b(i: Int): Int = body[i].toInt() and 0xFF
+    return when {
+        b(0) == 0x89 && b(1) == 0x50 && b(2) == 0x4E && b(3) == 0x47 -> ImageFormat.Png
+        b(0) == 0xFF && b(1) == 0xD8 && b(2) == 0xFF -> ImageFormat.Jpeg
+        b(0) == 0x47 && b(1) == 0x49 && b(2) == 0x46 -> ImageFormat.Gif
+        b(0) == 0x42 && b(1) == 0x4D -> ImageFormat.Bmp
+        body.size >= 12 && b(0) == 0x52 && b(1) == 0x49 && b(2) == 0x46 && b(3) == 0x46 &&
+            b(8) == 0x57 && b(9) == 0x45 && b(10) == 0x42 && b(11) == 0x50 -> ImageFormat.Webp
+        else -> null
+    }
+}
+
+private fun isFormContentType(contentType: String?): Boolean =
+    contentType?.lowercase()?.startsWith("application/x-www-form-urlencoded") == true
+
+private fun isHtml(contentType: String?, text: String): Boolean {
+    if (contentType?.lowercase()?.contains("html") == true) return true
+    val head = text.trimStart().lowercase()
+    return head.startsWith("<!doctype html") || head.startsWith("<html")
+}
+
+private fun isXml(contentType: String?, text: String): Boolean {
+    val ct = contentType?.lowercase()
+    if (ct != null && (ct.contains("xml") || ct.endsWith("+xml"))) return true
+    val head = text.trimStart()
+    // Reached only after the HTML check, so a leading '<' that isn't HTML reads as generic markup.
+    return head.startsWith("<?xml") || head.startsWith("<")
 }
 
 private fun isBinaryContentType(contentType: String?): Boolean {
@@ -137,4 +229,241 @@ internal fun prettyPrintJson(raw: String, indentUnit: String = "  "): String? {
         index++
     }
     return out.toString()
+}
+
+/** A parsed JSON value, preserving object key order for a faithful, collapsible tree view. */
+internal sealed interface JsonNode {
+    data class Obj(val entries: List<Entry>) : JsonNode
+    data class Arr(val items: List<JsonNode>) : JsonNode
+
+    /** A string with its escapes already decoded; the renderer re-escapes for display. */
+    data class Str(val value: String) : JsonNode
+
+    /** A number kept as its source text so precision/format survive round-tripping. */
+    data class Num(val text: String) : JsonNode
+    data class Bool(val value: Boolean) : JsonNode
+    data object Null : JsonNode
+
+    data class Entry(val key: String, val value: JsonNode)
+}
+
+/**
+ * Parses [text] into a [JsonNode] tree, or null if it isn't well-formed JSON (the caller then falls
+ * back to raw text). Hand-rolled to match the module's dependency-light stance — same reason
+ * [prettyPrintJson] is hand-rolled rather than pulling in a JSON library.
+ */
+internal fun parseJson(text: String): JsonNode? {
+    val parser = JsonParser(text)
+    return try {
+        parser.skipWhitespace()
+        val node = parser.parseValue()
+        parser.skipWhitespace()
+        if (parser.atEnd()) node else null
+    } catch (_: JsonParseException) {
+        null
+    }
+}
+
+private class JsonParseException : Exception()
+
+private class JsonParser(private val s: String) {
+    private var i = 0
+
+    fun atEnd(): Boolean = i >= s.length
+
+    fun skipWhitespace() {
+        while (i < s.length && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r')) i++
+    }
+
+    fun parseValue(): JsonNode {
+        skipWhitespace()
+        if (atEnd()) throw JsonParseException()
+        return when (s[i]) {
+            '{' -> parseObject()
+            '[' -> parseArray()
+            '"' -> JsonNode.Str(parseString())
+            't' -> { literal("true"); JsonNode.Bool(true) }
+            'f' -> { literal("false"); JsonNode.Bool(false) }
+            'n' -> { literal("null"); JsonNode.Null }
+            else -> parseNumber()
+        }
+    }
+
+    private fun parseObject(): JsonNode {
+        i++ // consume '{'
+        skipWhitespace()
+        val entries = ArrayList<JsonNode.Entry>()
+        if (!atEnd() && s[i] == '}') {
+            i++
+            return JsonNode.Obj(entries)
+        }
+        while (true) {
+            skipWhitespace()
+            if (atEnd() || s[i] != '"') throw JsonParseException()
+            val key = parseString()
+            skipWhitespace()
+            if (atEnd() || s[i] != ':') throw JsonParseException()
+            i++
+            entries.add(JsonNode.Entry(key, parseValue()))
+            skipWhitespace()
+            if (atEnd()) throw JsonParseException()
+            when (s[i++]) {
+                ',' -> Unit
+                '}' -> return JsonNode.Obj(entries)
+                else -> throw JsonParseException()
+            }
+        }
+    }
+
+    private fun parseArray(): JsonNode {
+        i++ // consume '['
+        skipWhitespace()
+        val items = ArrayList<JsonNode>()
+        if (!atEnd() && s[i] == ']') {
+            i++
+            return JsonNode.Arr(items)
+        }
+        while (true) {
+            items.add(parseValue())
+            skipWhitespace()
+            if (atEnd()) throw JsonParseException()
+            when (s[i++]) {
+                ',' -> Unit
+                ']' -> return JsonNode.Arr(items)
+                else -> throw JsonParseException()
+            }
+        }
+    }
+
+    private fun parseString(): String {
+        i++ // consume opening quote
+        val sb = StringBuilder()
+        while (true) {
+            if (atEnd()) throw JsonParseException()
+            when (val c = s[i++]) {
+                '"' -> return sb.toString()
+                '\\' -> {
+                    if (atEnd()) throw JsonParseException()
+                    when (val esc = s[i++]) {
+                        '"' -> sb.append('"')
+                        '\\' -> sb.append('\\')
+                        '/' -> sb.append('/')
+                        'b' -> sb.append('\b')
+                        'f' -> sb.append('\u000C')
+                        'n' -> sb.append('\n')
+                        'r' -> sb.append('\r')
+                        't' -> sb.append('\t')
+                        'u' -> {
+                            if (i + 4 > s.length) throw JsonParseException()
+                            val code = s.substring(i, i + 4).toIntOrNull(16) ?: throw JsonParseException()
+                            sb.append(code.toChar())
+                            i += 4
+                        }
+                        else -> throw JsonParseException()
+                    }
+                }
+                else -> sb.append(c)
+            }
+        }
+    }
+
+    private fun parseNumber(): JsonNode {
+        val start = i
+        if (!atEnd() && s[i] == '-') i++
+        when {
+            atEnd() -> throw JsonParseException()
+            s[i] == '0' -> i++
+            s[i] in '1'..'9' -> while (!atEnd() && s[i] in '0'..'9') i++
+            else -> throw JsonParseException()
+        }
+        if (!atEnd() && s[i] == '.') {
+            i++
+            if (atEnd() || s[i] !in '0'..'9') throw JsonParseException()
+            while (!atEnd() && s[i] in '0'..'9') i++
+        }
+        if (!atEnd() && (s[i] == 'e' || s[i] == 'E')) {
+            i++
+            if (!atEnd() && (s[i] == '+' || s[i] == '-')) i++
+            if (atEnd() || s[i] !in '0'..'9') throw JsonParseException()
+            while (!atEnd() && s[i] in '0'..'9') i++
+        }
+        return JsonNode.Num(s.substring(start, i))
+    }
+
+    private fun literal(word: String) {
+        if (i + word.length > s.length || s.substring(i, i + word.length) != word) throw JsonParseException()
+        i += word.length
+    }
+}
+
+/**
+ * Parses an `application/x-www-form-urlencoded` body into ordered name/value pairs, percent- and
+ * `+`-decoded. Order is preserved (forms are positional) and a key without `=` yields an empty value.
+ */
+internal fun parseFormUrlEncoded(text: String): List<Pair<String, String>> =
+    text.split('&').mapNotNull { pair ->
+        if (pair.isEmpty()) return@mapNotNull null
+        val eq = pair.indexOf('=')
+        if (eq < 0) {
+            formDecode(pair) to ""
+        } else {
+            formDecode(pair.substring(0, eq)) to formDecode(pair.substring(eq + 1))
+        }
+    }
+
+// Percent-decodes a single form token: `+` -> space, `%XX` -> that byte, other chars pass through as
+// their UTF-8 bytes; the accumulated bytes are then read back as UTF-8 (so multi-byte escapes join).
+private fun formDecode(token: String): String {
+    if ('%' !in token && '+' !in token) return token
+    val bytes = ArrayList<Byte>(token.length)
+    var i = 0
+    while (i < token.length) {
+        val c = token[i]
+        when {
+            c == '+' -> {
+                bytes.add(0x20)
+                i++
+            }
+            c == '%' && i + 2 < token.length && token[i + 1].isHexDigit() && token[i + 2].isHexDigit() -> {
+                bytes.add(((token[i + 1].hexValue() shl 4) or token[i + 2].hexValue()).toByte())
+                i += 3
+            }
+            else -> {
+                val next = if (c.isHighSurrogate() && i + 1 < token.length) i + 2 else i + 1
+                token.substring(i, next).encodeToByteArray().forEach { bytes.add(it) }
+                i = next
+            }
+        }
+    }
+    return bytes.toByteArray().decodeToString()
+}
+
+private fun Char.isHexDigit(): Boolean = this in '0'..'9' || this in 'a'..'f' || this in 'A'..'F'
+
+private fun Char.hexValue(): Int = when (this) {
+    in '0'..'9' -> this - '0'
+    in 'a'..'f' -> this - 'a' + 10
+    else -> this - 'A' + 10
+}
+
+/**
+ * Renders one 16-byte row of a hex dump: `offset  hex bytes  ascii`, with non-printable bytes shown
+ * as `.`. [limit] caps the readable range so a windowed viewer never reads past what it means to show.
+ */
+internal fun hexDumpLine(body: ByteString, start: Int, limit: Int = body.size): String {
+    val end = minOf(start + 16, limit)
+    val sb = StringBuilder()
+    sb.append(start.toString(16).padStart(8, '0')).append("  ")
+    for (col in 0 until 16) {
+        val i = start + col
+        if (i < end) sb.append((body[i].toInt() and 0xFF).toString(16).padStart(2, '0')) else sb.append("  ")
+        sb.append(' ')
+        if (col == 7) sb.append(' ')
+    }
+    sb.append(' ')
+    for (i in start until end) {
+        val byte = body[i].toInt() and 0xFF
+        sb.append(if (byte in 0x20..0x7E) byte.toChar() else '.')
+    }
+    return sb.toString()
 }

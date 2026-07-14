@@ -271,13 +271,20 @@ private fun MessagePane(
             trailingLabel = caption.uppercase(),
         )
         Box(Modifier.weight(1f).fillMaxWidth()) {
-            SelectionContainer {
-                Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
-                    when (tab) {
-                        MessageTab.Headers -> HeadersContent(headers)
-                        MessageTab.Body -> BodyView(body, headers.contentType(), declaredSize, truncated)
-                        MessageTab.Auth -> AuthContent(headers)
-                        MessageTab.Raw -> RawContent(startLine, headers, body, declaredSize, truncated)
+            // The Body tab owns its own scrolling: its previewers include a lazy hex dump and a
+            // centered image, neither of which can live inside the shared vertical scroll the
+            // text-based tabs use.
+            if (tab == MessageTab.Body) {
+                BodyPreview(body, headers.contentType(), declaredSize, truncated, Modifier.fillMaxSize())
+            } else {
+                SelectionContainer {
+                    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
+                        when (tab) {
+                            MessageTab.Headers -> HeadersContent(headers)
+                            MessageTab.Auth -> AuthContent(headers)
+                            MessageTab.Raw -> RawContent(startLine, headers, body, declaredSize, truncated)
+                            MessageTab.Body -> Unit
+                        }
                     }
                 }
             }
@@ -355,43 +362,4 @@ private fun RawContent(
         color = MaterialTheme.colorScheme.onSurface,
         softWrap = false,
     )
-}
-
-@Composable
-private fun BodyView(body: ByteString, contentType: String?, declaredSize: Long, truncated: Boolean) {
-    val content = remember(body, contentType) { bodyContent(body, contentType) }
-    when (content) {
-        BodyContent.Empty -> MutedText("No body")
-        is BodyContent.Binary -> MutedText("⟨ binary • ${formatBytes(content.size.toLong())} ⟩")
-        is BodyContent.Text -> {
-            if (content.json) {
-                Text("JSON", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Spacer(Modifier.height(4.dp))
-            }
-            if (truncated) {
-                MutedText("(truncated during capture • declared ${formatBytes(declaredSize)})")
-                Spacer(Modifier.height(4.dp))
-            }
-            Text(
-                content.text,
-                modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-                style = monoSmall(),
-                color = MaterialTheme.colorScheme.onSurface,
-                softWrap = false,
-            )
-        }
-    }
-}
-
-@Composable
-private fun KeyValueRow(key: String, value: String) {
-    Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-        Text(key, Modifier.width(200.dp), style = monoLabel(), color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Text(value, Modifier.weight(1f), style = monoSmall(), color = MaterialTheme.colorScheme.onSurface)
-    }
-}
-
-@Composable
-private fun MutedText(text: String) {
-    Text(text, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
 }

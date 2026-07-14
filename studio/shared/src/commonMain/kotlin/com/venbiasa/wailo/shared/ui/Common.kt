@@ -1,10 +1,15 @@
 package com.venbiasa.wailo.shared.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.remember
@@ -60,3 +65,18 @@ internal fun monoSmall(): TextStyle =
 @Composable
 internal fun monoLabel(): TextStyle =
     MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace)
+
+// A monospaced key/value line: fixed-width key gutter, value takes the rest. Shared by the detail
+// panel's header/auth views and the form-body previewer.
+@Composable
+internal fun KeyValueRow(key: String, value: String) {
+    Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        Text(key, Modifier.width(200.dp), style = monoLabel(), color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(value, Modifier.weight(1f), style = monoSmall(), color = MaterialTheme.colorScheme.onSurface)
+    }
+}
+
+@Composable
+internal fun MutedText(text: String, modifier: Modifier = Modifier) {
+    Text(text, modifier, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+}
