@@ -2,6 +2,10 @@ package com.venbiasa.wailo.shared
 
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Density
+import com.venbiasa.wailo.shared.theme.TextScale
 import com.venbiasa.wailo.shared.theme.WailoTheme
 import com.venbiasa.wailo.shared.ui.WailoViewer
 
@@ -10,15 +14,22 @@ import com.venbiasa.wailo.shared.ui.WailoViewer
  *
  * Stateless over its inputs — the host ([com.venbiasa.wailo.desktop]) owns the engine and maps
  * captured rows into [entries]. [zoneOffsetMillis] converts each exchange's epoch timestamp to the
- * host's local wall clock (kept out of commonMain, which has no `java.time`).
+ * host's local wall clock (kept out of commonMain, which has no `java.time`). [textScale] is the
+ * host-owned text-size multiplier (Cmd +/-); it rides on `fontScale` so only `sp` text resizes.
  */
 @Composable
 fun WailoApp(
     entries: List<FlowEntry>,
     zoneOffsetMillis: Int = 0,
     darkTheme: Boolean = isSystemInDarkTheme(),
+    textScale: Float = TextScale.Default,
 ) {
     WailoTheme(darkTheme = darkTheme) {
-        WailoViewer(entries = entries, zoneOffsetMillis = zoneOffsetMillis)
+        val density = LocalDensity.current
+        CompositionLocalProvider(
+            LocalDensity provides Density(density.density, density.fontScale * textScale),
+        ) {
+            WailoViewer(entries = entries, zoneOffsetMillis = zoneOffsetMillis)
+        }
     }
 }

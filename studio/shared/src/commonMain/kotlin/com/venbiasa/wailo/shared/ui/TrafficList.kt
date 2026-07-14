@@ -22,9 +22,9 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -50,6 +50,7 @@ import com.venbiasa.wailo.shared.format.formatClockTime
 import com.venbiasa.wailo.shared.format.statusKind
 import com.venbiasa.wailo.shared.format.statusText
 import com.venbiasa.wailo.shared.resources.Res
+import com.venbiasa.wailo.shared.resources.ic_arrow_downward
 import com.venbiasa.wailo.shared.resources.ic_check
 import kotlinx.coroutines.launch
 import org.jetbrains.compose.resources.vectorResource
@@ -276,20 +277,24 @@ private fun CellText(text: String, style: TextStyle, color: Color) {
 
 private fun durationText(durationMs: Long): String = if (durationMs > 0) "$durationMs ms" else "—"
 
+// The M3-Expressive Small/Medium/Large extended-FAB variants are still `internal` in the pinned
+// Compose Multiplatform (material3 1.11.0-alpha07), so this uses the baseline ExtendedFloatingActionButton
+// — the same 56.dp height the "small extended FAB" replaces. Colors track the theme's accent rather than
+// the FAB default (primaryContainer), which this grayscale scheme never defines and would otherwise fall
+// back to the Material baseline purple.
 @Composable
 private fun JumpToLatest(modifier: Modifier, onClick: () -> Unit) {
-    Surface(
+    ExtendedFloatingActionButton(
         onClick = onClick,
         modifier = modifier,
-        color = MaterialTheme.colorScheme.primary,
+        containerColor = MaterialTheme.colorScheme.primary,
         contentColor = MaterialTheme.colorScheme.onPrimary,
-        shadowElevation = 4.dp,
-        shape = MaterialTheme.shapes.small,
-    ) {
-        Text(
-            "Jump to latest  ↓",
-            style = MaterialTheme.typography.labelLarge,
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
-        )
-    }
+        text = { Text("Jump to latest") },
+        icon = {
+            Icon(
+                imageVector = vectorResource(Res.drawable.ic_arrow_downward),
+                contentDescription = null,
+            )
+        },
+    )
 }

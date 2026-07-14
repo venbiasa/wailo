@@ -86,6 +86,11 @@ cd studio && ./gradlew :desktopApp:run     # start the desktop inspector
 - Type-safe project accessors are enabled: depend on modules via `projects.<module>` — except `protocol`
   from the `studio` build, which crosses the build boundary as the published `wailo-protocol` binary.
 - Java/Kotlin target is 21 across both builds.
+- Dependency injection, when a graph actually warrants one, uses **Koin Annotations** (KSP-generated,
+  compile-time-verified) — not the runtime DSL — so the object graph is type-safe at build time. Don't
+  pull the framework in for a trivial graph: a single binding stays a plain factory/`object` (e.g.
+  `createKeyValueStore` / `TextScaleStore`). Introducing Koin is a new dependency + KSP toolchain, so it
+  needs an ADR and catalog entries when the graph grows enough to justify it.
 
 ## Toolchain (two builds — see each build's gradle/libs.versions.toml for exact versions)
 

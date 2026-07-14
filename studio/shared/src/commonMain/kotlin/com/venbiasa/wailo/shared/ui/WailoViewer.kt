@@ -36,9 +36,9 @@ internal fun WailoViewer(entries: List<FlowEntry>, zoneOffsetMillis: Int) {
 
     Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
         BoxWithConstraints(Modifier.fillMaxSize()) {
-            val minDetail = 140.dp
+            val minDetail = 180.dp
             val maxDetail = (maxHeight - 160.dp).coerceAtLeast(minDetail)
-            var detailHeight by remember { mutableStateOf(300.dp) }
+            var detailHeight by remember { mutableStateOf(360.dp) }
             val density = LocalDensity.current
 
             Column(Modifier.fillMaxSize()) {
@@ -60,7 +60,6 @@ internal fun WailoViewer(entries: List<FlowEntry>, zoneOffsetMillis: Int) {
                     DetailPanel(
                         entry = selected,
                         modifier = Modifier.fillMaxWidth().height(detailHeight.coerceIn(minDetail, maxDetail)),
-                        zoneOffsetMillis = zoneOffsetMillis,
                         onClose = { selectedId = null },
                     )
                 }
