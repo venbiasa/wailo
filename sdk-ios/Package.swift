@@ -11,7 +11,11 @@ let package = Package(
         .macOS(.v10_15),
     ],
     products: [
-        .library(name: "WailoSDK", targets: ["WailoSDK"]),
+        // Dynamic on purpose: the WailoAutoStart `+load` hook must be present in a loaded image to fire
+        // before `main`. A static product could dead-strip an unreferenced `+load` (the classic Firebase
+        // `-ObjC` footgun); a dynamic image is always loaded, so zero-install auto-start is reliable with
+        // no host build flags — the iOS analog of Android's manifest-merged WailoStartupProvider (ADR-0009).
+        .library(name: "WailoSDK", type: .dynamic, targets: ["WailoSDK", "WailoAutoStart"]),
     ],
     dependencies: [
         // Pinned to the same Wire version as gradle/libs.versions.toml so the generated code and
@@ -30,6 +34,13 @@ let package = Package(
                 // ProtoEncoder lives in the Wire runtime; the transport encodes Envelopes with it.
                 .product(name: "Wire", package: "wire"),
             ]
+        ),
+        // Objective-C `+load` hook that auto-starts capture before `main`. Separate target because a
+        // SwiftPM target is single-language; it reaches the Swift entry point by runtime name lookup, so
+        // it needs no headers from WailoSDK (the dependency is only for build/link ordering).
+        .target(
+            name: "WailoAutoStart",
+            dependencies: ["WailoSDK"]
         ),
         .testTarget(
             name: "WailoSDKTests",

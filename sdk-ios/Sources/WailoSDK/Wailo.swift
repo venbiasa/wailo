@@ -36,6 +36,10 @@ public enum Wailo {
         alsoLogToConsole: Bool = true,
         instrumentSharedConfigurations: Bool = true
     ) {
+        // Idempotent: cleanly replace any prior client (e.g. the `+load` auto-start default) instead of
+        // leaking a second live WebSocket — so "auto default + explicit customize" is one session, not two.
+        client?.stop()
+
         let hello = Hello(device_name: deviceName, app_id: appId, platform: platform)
         let webSocket = WailoClient(hello: hello, host: host, port: port)
         let sink: CaptureSink = alsoLogToConsole ? webSocket + ConsoleSink() : webSocket

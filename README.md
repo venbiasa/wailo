@@ -137,21 +137,20 @@ The `sample-android` app demonstrates both paths.
 ## iOS (`sdk-ios`)
 
 The iOS SDK is a standalone Swift package that captures `URLSession` traffic via a `URLProtocol` and
-streams the same protobuf `Envelope`s to the desktop. Add it and start it once at launch:
+streams the same protobuf `Envelope`s to the desktop. It **auto-starts** — just add the package; a `+load`
+hook arms capture before `main`, so no startup code is needed (the iOS analog of Android's startup provider,
+ADR-0017):
 
 ```swift
 // Package.swift
 .package(path: "../sdk-ios")            // or a git URL once published
-
-// App / AppDelegate, as early as possible
-import WailoSDK
-
-Wailo.start(appId: Bundle.main.bundleIdentifier ?? "app", deviceName: "iPhone")
 ```
 
-`URLSession.shared` is captured immediately; sessions built by third-party libraries are captured too,
-because `start()` swizzles `URLSessionConfiguration.default`/`.ephemeral` (ADR-0009). For a session you
-build before `start()`, call `Wailo.instrument(configuration)`.
+`URLSession.shared` and sessions built by third-party libraries are captured with no wiring, because the
+hook swizzles `URLSessionConfiguration.default`/`.ephemeral` (ADR-0009), defaulting to `localhost:8899`.
+To customize (host/port, device name) call `Wailo.start(...)` once at launch — it's idempotent and cleanly
+replaces the auto-installed default. For a session built before capture is armed, call
+`Wailo.instrument(configuration)`.
 
 **Reaching the desktop (iOS has no `adb reverse`).** The Simulator shares the Mac's network stack, so
 the default `localhost:8899` reaches the desktop engine with no forwarding. For a physical device, pass
