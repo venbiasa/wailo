@@ -27,7 +27,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import com.venbiasa.wailo.shared.theme.LocalWailoColors
 
 /**
  * One tab in an [UnderlineTabs] group. [icon] is optional and purely decorative — selection never
@@ -104,7 +103,7 @@ internal fun <T> UnderlineTabs(
                     trailingLabel,
                     Modifier.padding(start = 8.dp, end = 14.dp),
                     style = MaterialTheme.typography.labelSmall,
-                    color = LocalWailoColors.current.onSurfaceDisabled,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
         }

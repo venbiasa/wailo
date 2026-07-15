@@ -16,12 +16,14 @@ import com.venbiasa.wailo.shared.ui.WailoViewer
  * captured rows into [entries]. [zoneOffsetMillis] converts each exchange's epoch timestamp to the
  * host's local wall clock (kept out of commonMain, which has no `java.time`). [textScale] is the
  * host-owned text-size multiplier (Cmd +/-); it rides on `fontScale` so only `sp` text resizes.
+ * [darkTheme] and [onToggleDarkTheme] are likewise host-owned so the choice can persist across launches.
  */
 @Composable
 fun WailoApp(
     entries: List<FlowEntry>,
     zoneOffsetMillis: Int = 0,
     darkTheme: Boolean = isSystemInDarkTheme(),
+    onToggleDarkTheme: () -> Unit = {},
     textScale: Float = TextScale.Default,
 ) {
     WailoTheme(darkTheme = darkTheme) {
@@ -29,7 +31,12 @@ fun WailoApp(
         CompositionLocalProvider(
             LocalDensity provides Density(density.density, density.fontScale * textScale),
         ) {
-            WailoViewer(entries = entries, zoneOffsetMillis = zoneOffsetMillis)
+            WailoViewer(
+                entries = entries,
+                zoneOffsetMillis = zoneOffsetMillis,
+                darkTheme = darkTheme,
+                onToggleDarkTheme = onToggleDarkTheme,
+            )
         }
     }
 }

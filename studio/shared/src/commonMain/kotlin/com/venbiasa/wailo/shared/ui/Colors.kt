@@ -15,6 +15,6 @@ internal fun statusColor(kind: StatusKind): Color {
         StatusKind.ClientError -> colors.warning
         StatusKind.ServerError -> MaterialTheme.colorScheme.error
         StatusKind.Failed -> MaterialTheme.colorScheme.error
-        StatusKind.Pending -> colors.onSurfaceDisabled
+        StatusKind.Pending -> MaterialTheme.colorScheme.onSurfaceVariant
     }
 }

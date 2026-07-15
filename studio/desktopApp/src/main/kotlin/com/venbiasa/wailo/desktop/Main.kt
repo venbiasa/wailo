@@ -1,5 +1,6 @@
 package com.venbiasa.wailo.desktop
 
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -39,6 +40,15 @@ fun main() = application {
         TextScaleStore.save(next)
     }
 
+    // Dark/light appearance, toggled from the top bar. Seeded from the OS on first run, then the
+    // explicit choice is persisted so it survives restarts (host-owned, like the text scale above).
+    val systemDark = isSystemInDarkTheme()
+    var darkTheme by remember { mutableStateOf(ThemeStore.load(default = systemDark)) }
+    val setDarkTheme = { next: Boolean ->
+        darkTheme = next
+        ThemeStore.save(next)
+    }
+
     Window(
         onCloseRequest = ::exitApplication,
         title = "Wailo",
@@ -64,6 +74,12 @@ fun main() = application {
             }
         },
     ) {
-        WailoApp(entries = entries, zoneOffsetMillis = zoneOffsetMillis, textScale = textScale)
+        WailoApp(
+            entries = entries,
+            zoneOffsetMillis = zoneOffsetMillis,
+            darkTheme = darkTheme,
+            onToggleDarkTheme = { setDarkTheme(!darkTheme) },
+            textScale = textScale,
+        )
     }
 }

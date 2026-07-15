@@ -146,7 +146,7 @@ private fun urlAnnotated(url: String): AnnotatedString {
         urlSegments(url).forEach { segment ->
             val color = when (segment.part) {
                 UrlPart.Scheme -> MaterialTheme.colorScheme.onSurfaceVariant
-                UrlPart.Separator -> wailo.onSurfaceDisabled
+                UrlPart.Separator -> MaterialTheme.colorScheme.onSurfaceVariant
                 UrlPart.Host -> MaterialTheme.colorScheme.onSurface
                 UrlPart.Port -> MaterialTheme.colorScheme.onSurfaceVariant
                 UrlPart.Path -> wailo.info

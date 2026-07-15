@@ -80,6 +80,10 @@ cd studio && ./gradlew :desktopApp:run     # start the desktop inspector
   decisions a reader can't recover from the code. Never write comments/KDoc that restate what the
   code does or log what an edit changed; if a comment adds no intent, delete it.
 - Kotlin, 4-space indent, official code style (`kotlin.code.style=official`).
+- UI is theme-first: every new screen/component must work in **both light and dark**. Pull colors from
+  `MaterialTheme.colorScheme` or the `WailoColors` CompositionLocal (never hard-code), add new colors as
+  `tokens.json` entries for both schemes (the `studio` `theme/*.kt` are generated — DO NOT EDIT), keep icons
+  tint-driven (mono vector drawables), and smoke-check both via the top-bar toggle. See ADR-0013/0016.
 - Versions live in each build's version catalog — `gradle/libs.versions.toml` (SDK build) and
   `studio/gradle/libs.versions.toml` (studio build); reference via `libs.*` / `libs.plugins.*`. Do not
   hard-code versions in module build files. The two catalogs intentionally differ (ADR-0015).

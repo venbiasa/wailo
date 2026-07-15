@@ -9,15 +9,17 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.DisableSelection
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
@@ -141,34 +143,61 @@ private fun JsonTreePreview(body: ByteString) {
     val collapsed = remember(body) { mutableStateMapOf<String, Boolean>() }
     val lines by remember(root) { derivedStateOf { flattenJson(root, collapsed) } }
     val style = monoSmall()
+    // Width of the number gutter tracks the highest visible line number; monospace keeps digits aligned.
+    val gutterDigits = lines.size.coerceAtLeast(1).toString().length
     SelectionContainer(Modifier.fillMaxSize()) {
         LazyColumn(Modifier.fillMaxSize().padding(vertical = 8.dp)) {
-            items(lines, key = { it.id }) { line ->
-                JsonLineRow(line, style) { path -> collapsed[path] = !(collapsed[path] ?: false) }
+            itemsIndexed(lines, key = { _, line -> line.id }) { index, line ->
+                JsonLineRow(line, index + 1, gutterDigits, style) { path ->
+                    collapsed[path] = !(collapsed[path] ?: false)
+                }
             }
         }
     }
 }
 
 @Composable
-private fun JsonLineRow(line: JsonLine, style: TextStyle, onToggle: (String) -> Unit) {
+private fun JsonLineRow(
+    line: JsonLine,
+    lineNumber: Int,
+    gutterDigits: Int,
+    style: TextStyle,
+    onToggle: (String) -> Unit,
+) {
     val wailo = LocalWailoColors.current
-    val punctuation = wailo.onSurfaceDisabled
+    val punctuation = MaterialTheme.colorScheme.onSurfaceVariant
     val keyColor = MaterialTheme.colorScheme.onSurface
     val expanded = line.content is JsonLineContent.Open
     val expandable = expanded || line.content is JsonLineContent.Collapsed
     val togglePath = line.content.togglePath
 
-    var rowModifier = Modifier.fillMaxWidth()
-    if (togglePath != null) rowModifier = rowModifier.clickable { onToggle(togglePath) }
-    rowModifier = rowModifier.padding(start = 12.dp + (line.depth * 14).dp, end = 16.dp, top = 1.dp, bottom = 1.dp)
-
-    Row(rowModifier, verticalAlignment = Alignment.CenterVertically) {
-        // A fixed slot keeps non-expandable rows aligned under their expandable siblings.
-        Box(Modifier.width(14.dp), contentAlignment = Alignment.Center) {
-            if (expandable) DisclosureTriangle(expanded, punctuation)
+    Row(
+        Modifier.fillMaxWidth().padding(end = 16.dp, top = 1.dp, bottom = 1.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        // The number gutter and the fold arrow sit together on the left and are excluded from selection,
+        // so copying a range yields only the JSON text (indentation included), never the line numbers.
+        // The arrow is the sole toggle target; clicking the line itself does nothing, keeping text selectable.
+        DisableSelection {
+            // Pad with a non-breaking space (not a normal one): the shrink-wrapped gutter would trim
+            // regular leading spaces, jagging the digits and the arrows beside them. NBSP is one
+            // monospace cell wide and is never trimmed. It's out of selection, so it never gets copied.
+            Text(
+                lineNumber.toString().padStart(gutterDigits, '\u00A0'),
+                Modifier.padding(start = 12.dp),
+                style = style,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            val arrowModifier =
+                if (togglePath != null) Modifier.fillMaxHeight().width(20.dp).clickable { onToggle(togglePath) }
+                else Modifier.width(20.dp)
+            Box(arrowModifier, contentAlignment = Alignment.Center) {
+                if (expandable) DisclosureTriangle(expanded, punctuation)
+            }
         }
-        Text(jsonLineText(line, keyColor, wailo, punctuation), style = style)
+        // weight(1f) gives the line a real width: Compose Desktop collapses a shrink-wrapped Text's
+        // leading spaces during intrinsic measurement, so the indentation only shows once it fills width.
+        Text(jsonLineText(line, keyColor, wailo, punctuation), Modifier.weight(1f), style = style)
     }
 }
 
@@ -257,6 +286,8 @@ private fun jsonLineText(
     wailo: WailoColors,
     punctuation: Color,
 ): AnnotatedString = buildAnnotatedString {
+    // Indentation is real space characters (not layout padding) so a copied selection stays indented.
+    if (line.depth > 0) append("  ".repeat(line.depth))
     if (line.key != null) {
         withStyle(SpanStyle(color = keyColor)) { append("\"${escapeForDisplay(line.key)}\"") }
         withStyle(SpanStyle(color = punctuation)) { append(": ") }
