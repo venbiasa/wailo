@@ -56,6 +56,22 @@ fun main() = application {
         ThemeStore.save(next)
     }
 
+    // Bookmarked hosts, host-owned and persisted so they survive restarts (like the theme and text
+    // scale above). `shared` gets the list plus add/remove callbacks and stays stateless (ADR-0013).
+    var bookmarks by remember { mutableStateOf(BookmarkStore.load()) }
+    val addBookmark = { host: String ->
+        if (host.isNotBlank() && host !in bookmarks) {
+            bookmarks = bookmarks + host
+            BookmarkStore.save(bookmarks)
+        }
+    }
+    val removeBookmark = { host: String ->
+        if (host in bookmarks) {
+            bookmarks = bookmarks - host
+            BookmarkStore.save(bookmarks)
+        }
+    }
+
     Window(
         onCloseRequest = ::exitApplication,
         title = "Wailo",
@@ -91,6 +107,9 @@ fun main() = application {
             capturing = capturing,
             onToggleCapture = { engine.setCapturing(!capturing) },
             onClear = engine::clear,
+            bookmarks = bookmarks,
+            onAddBookmark = addBookmark,
+            onRemoveBookmark = removeBookmark,
         )
     }
 }
@@ -98,7 +117,7 @@ fun main() = application {
 /**
  * The host's primary LAN IPv4 — the address a device on the same network dials to reach the capture
  * server. We ask the OS which local interface routes toward a public IP via a UDP "connect" (which
- * sends nothing), so we get the active interface the way Proxyman does, instead of the first
+ * sends nothing), so we get the active outbound interface, instead of the first
  * enumerated site-local address — which is often a VPN/Docker/utun/bridge IP. Falls back to
  * "localhost" when there is no route (fully offline), which still covers the emulator/simulator case.
  */

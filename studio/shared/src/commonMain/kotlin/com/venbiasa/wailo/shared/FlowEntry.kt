@@ -11,7 +11,7 @@ import com.venbiasa.wailo.protocol.HttpExchange
  * at the `desktopApp` boundary. [id] is the exchange's UUID and is stable across engine emissions,
  * which is what keeps the list's `key`-based recomposition cheap.
  *
- * [edited] backs the list's Edited column — whether an interception/edit rule (Proxyman-style)
+ * [edited] backs the list's Edited column — whether an interception/edit rule
  * altered this exchange. Editing isn't implemented yet, so it defaults false everywhere today; the
  * host will set it once request/response rewriting lands, without further UI changes.
  */

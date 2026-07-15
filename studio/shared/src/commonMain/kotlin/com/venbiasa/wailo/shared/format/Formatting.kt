@@ -193,6 +193,14 @@ internal fun urlSegments(url: String): List<UrlSegment> {
     return out
 }
 
+/**
+ * The request URL's host without any port (empty when the URL has no recognizable authority). This
+ * is both the bookmark key and the traffic filter's comparison value, so both sides derive the host
+ * the same way via [urlSegments] and can never disagree.
+ */
+internal fun requestHost(url: String): String =
+    urlSegments(url).firstOrNull { it.part == UrlPart.Host }?.text ?: ""
+
 /** Human-readable byte size (`—` for empty/unknown, `340 B`, `1.2 KB`, `3.4 MB`, …). */
 internal fun formatBytes(bytes: Long): String {
     if (bytes <= 0) return "—"

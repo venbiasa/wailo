@@ -286,7 +286,7 @@ Append-only. Newest at the bottom. Each entry: context, decision, consequences.
   in `:shared:jvmTest`). Realizes the "richer viewer lands in `shared` at M3" promise from ADR-0008 and
   **supersedes that ADR's interim plain-text list**, which is now removed.
 - Context: the first real inspector UI — a live, tailing request list (newest at the bottom, ordered by
-  time) over a Proxyman-style detail panel. ADR-0008 left `shared` a placeholder and rendered a throwaway
+  time) over a request/response detail panel. ADR-0008 left `shared` a placeholder and rendered a throwaway
   text list in `desktopApp`. This turns `shared` into the actual viewer and `desktopApp` back into a thin
   host, per ADR-0003 (UI is a frontend over the headless `engine`).
 - Decision:

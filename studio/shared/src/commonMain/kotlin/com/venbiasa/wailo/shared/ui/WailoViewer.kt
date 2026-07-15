@@ -23,6 +23,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -32,6 +33,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import com.venbiasa.wailo.shared.FlowEntry
+import com.venbiasa.wailo.shared.format.requestHost
 import com.venbiasa.wailo.shared.resources.Res
 import com.venbiasa.wailo.shared.resources.ic_dark_mode
 import com.venbiasa.wailo.shared.resources.ic_delete
@@ -51,9 +53,26 @@ internal fun WailoViewer(
     capturing: Boolean,
     onToggleCapture: () -> Unit,
     onClear: () -> Unit,
+    bookmarks: List<String>,
+    onAddBookmark: (String) -> Unit,
+    onRemoveBookmark: (String) -> Unit,
 ) {
     var selectedId by remember { mutableStateOf<String?>(null) }
+    // Resolve the open detail against the full list, not the filtered one, so switching bookmarks
+    // never closes a detail panel whose row is currently filtered out.
     val selected = remember(entries, selectedId) { entries.firstOrNull { it.id == selectedId } }
+
+    // The active host filter is transient view state (like the selection above), not persisted: the
+    // app opens showing all traffic. `null` means "All".
+    var activeHost by remember { mutableStateOf<String?>(null) }
+    // Drop the filter if its host stops being a bookmark (removed via a row or chip menu).
+    LaunchedEffect(bookmarks) {
+        if (activeHost != null && activeHost !in bookmarks) activeHost = null
+    }
+    val visibleEntries = remember(entries, activeHost) {
+        val host = activeHost
+        if (host == null) entries else entries.filter { requestHost(it.exchange.request?.url ?: "") == host }
+    }
 
     Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
         BoxWithConstraints(Modifier.fillMaxSize()) {
@@ -72,12 +91,26 @@ internal fun WailoViewer(
                     onToggleDarkTheme = onToggleDarkTheme,
                 )
                 RowDivider()
+                // The bookmark bar only exists once there is something to show, so an empty setup
+                // costs no vertical space and reads exactly like the pre-bookmark viewer.
+                if (bookmarks.isNotEmpty()) {
+                    BookmarkBar(
+                        bookmarks = bookmarks,
+                        activeHost = activeHost,
+                        onSelect = { activeHost = it },
+                        onRemove = onRemoveBookmark,
+                    )
+                    RowDivider()
+                }
                 Box(Modifier.weight(1f).fillMaxWidth()) {
                     TrafficList(
-                        entries = entries,
+                        entries = visibleEntries,
                         selectedId = selectedId,
                         onSelect = { selectedId = it },
                         zoneOffsetMillis = zoneOffsetMillis,
+                        bookmarks = bookmarks,
+                        onAddBookmark = onAddBookmark,
+                        onRemoveBookmark = onRemoveBookmark,
                     )
                 }
                 if (selected != null) {

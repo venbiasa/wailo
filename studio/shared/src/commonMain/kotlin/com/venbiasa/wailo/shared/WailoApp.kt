@@ -10,7 +10,7 @@ import com.venbiasa.wailo.shared.theme.WailoTheme
 import com.venbiasa.wailo.shared.ui.WailoViewer
 
 /**
- * Root of the desktop inspector: a live, tailing request list over a Proxyman-style detail panel.
+ * Root of the desktop inspector: a live, tailing request list over a request/response detail panel.
  *
  * Stateless over its inputs — the host ([com.venbiasa.wailo.desktop]) owns the engine and maps
  * captured rows into [entries]. [zoneOffsetMillis] converts each exchange's epoch timestamp to the
@@ -19,7 +19,8 @@ import com.venbiasa.wailo.shared.ui.WailoViewer
  * [darkTheme] and [onToggleDarkTheme] are likewise host-owned so the choice can persist across launches.
  * [listenAddress] is where the capture server accepts device connections; [capturing] reflects whether
  * traffic is being recorded, and [onToggleCapture]/[onClear] drive the top bar (the engine lives in the
- * host, not here).
+ * host, not here). [bookmarks] are the persisted, host-owned bookmarked hosts; [onAddBookmark]/
+ * [onRemoveBookmark] let the viewer mutate that set (the host owns its persistence, ADR-0013).
  */
 @Composable
 fun WailoApp(
@@ -32,6 +33,9 @@ fun WailoApp(
     capturing: Boolean = true,
     onToggleCapture: () -> Unit = {},
     onClear: () -> Unit = {},
+    bookmarks: List<String> = emptyList(),
+    onAddBookmark: (String) -> Unit = {},
+    onRemoveBookmark: (String) -> Unit = {},
 ) {
     WailoTheme(darkTheme = darkTheme) {
         val density = LocalDensity.current
@@ -47,6 +51,9 @@ fun WailoApp(
                 capturing = capturing,
                 onToggleCapture = onToggleCapture,
                 onClear = onClear,
+                bookmarks = bookmarks,
+                onAddBookmark = onAddBookmark,
+                onRemoveBookmark = onRemoveBookmark,
             )
         }
     }

@@ -22,6 +22,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.material3.FloatingActionButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SmallFloatingActionButton
@@ -47,6 +48,7 @@ import com.venbiasa.wailo.shared.FlowEntry
 import com.venbiasa.wailo.shared.format.codeText
 import com.venbiasa.wailo.shared.format.formatBytes
 import com.venbiasa.wailo.shared.format.formatClockTime
+import com.venbiasa.wailo.shared.format.requestHost
 import com.venbiasa.wailo.shared.format.statusKind
 import com.venbiasa.wailo.shared.format.statusText
 import com.venbiasa.wailo.shared.resources.Res
@@ -66,6 +68,9 @@ internal fun TrafficList(
     selectedId: String?,
     onSelect: (String) -> Unit,
     zoneOffsetMillis: Int,
+    bookmarks: List<String>,
+    onAddBookmark: (String) -> Unit,
+    onRemoveBookmark: (String) -> Unit,
 ) {
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
@@ -113,6 +118,9 @@ internal fun TrafficList(
                         selected = entry.id == selectedId,
                         onClick = { onSelect(entry.id) },
                         zoneOffsetMillis = zoneOffsetMillis,
+                        bookmarks = bookmarks,
+                        onAddBookmark = onAddBookmark,
+                        onRemoveBookmark = onRemoveBookmark,
                     )
                     RowDivider()
                 }
@@ -195,6 +203,9 @@ private fun TrafficRow(
     selected: Boolean,
     onClick: () -> Unit,
     zoneOffsetMillis: Int,
+    bookmarks: List<String>,
+    onAddBookmark: (String) -> Unit,
+    onRemoveBookmark: (String) -> Unit,
 ) {
     val exchange = entry.exchange
     val request = exchange.request
@@ -204,51 +215,68 @@ private fun TrafficRow(
     val hasError = exchange.error.isNotEmpty()
     val kind = statusKind(code, hasError)
 
-    Box(
-        Modifier.fillMaxWidth()
-            .background(if (selected) MaterialTheme.colorScheme.surfaceVariant else Color.Transparent)
-            .clickable(onClick = onClick),
-    ) {
-        Row(Modifier.horizontalScroll(hScroll)) {
-            Cell(TrafficColumn.Method, widths) {
-                CellText(method.uppercase(), monoSmall(), MaterialTheme.colorScheme.onSurface)
-            }
-            Cell(TrafficColumn.Url, widths) {
-                CellText(request?.url ?: "", MaterialTheme.typography.bodySmall, MaterialTheme.colorScheme.onSurface)
-            }
-            Cell(TrafficColumn.Status, widths) {
-                CellText(statusText(kind), MaterialTheme.typography.bodySmall, statusColor(kind))
-            }
-            Cell(TrafficColumn.Code, widths) {
-                CellText(codeText(code), monoSmall(), MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-            Cell(TrafficColumn.Client, widths) {
-                CellText(entry.appId, MaterialTheme.typography.bodySmall, MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-            Cell(TrafficColumn.Timestamp, widths) {
-                CellText(
-                    formatClockTime(exchange.started_at_epoch_ms + zoneOffsetMillis),
-                    monoSmall(),
-                    MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            Cell(TrafficColumn.Duration, widths) {
-                CellText(durationText(exchange.duration_ms), monoSmall(), MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-            Cell(TrafficColumn.Request, widths) {
-                CellText(formatBytes(request?.body_size ?: 0L), monoSmall(), MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-            Cell(TrafficColumn.Response, widths) {
-                CellText(formatBytes(response?.body_size ?: 0L), monoSmall(), MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-            Cell(TrafficColumn.Edited, widths) {
-                if (entry.edited) {
-                    Icon(
-                        imageVector = vectorResource(Res.drawable.ic_check),
-                        contentDescription = "Edited",
-                        tint = MaterialTheme.colorScheme.onSurface,
-                        modifier = Modifier.size(16.dp),
+    // Right-click toggles this row's host as a bookmark; a row whose URL has no parseable host gets no
+    // action, so its context menu is empty (a plain passthrough). The single "Bookmark" entry carries a
+    // tick once saved (and reserves the slot when not), so the label never shifts as it toggles.
+    val host = remember(request?.url) { requestHost(request?.url ?: "") }
+    val bookmarked = host in bookmarks
+    val actions = if (host.isEmpty()) {
+        emptyList()
+    } else {
+        listOf(
+            ContextMenuAction("Bookmark", checked = bookmarked) {
+                if (bookmarked) onRemoveBookmark(host) else onAddBookmark(host)
+            },
+        )
+    }
+
+    ContextMenuHost(actions) {
+        Box(
+            Modifier.fillMaxWidth()
+                .background(if (selected) MaterialTheme.colorScheme.surfaceVariant else Color.Transparent)
+                .clickable(onClick = onClick),
+        ) {
+            Row(Modifier.horizontalScroll(hScroll)) {
+                Cell(TrafficColumn.Method, widths) {
+                    CellText(method.uppercase(), monoSmall(), MaterialTheme.colorScheme.onSurface)
+                }
+                Cell(TrafficColumn.Url, widths) {
+                    CellText(request?.url ?: "", MaterialTheme.typography.bodySmall, MaterialTheme.colorScheme.onSurface)
+                }
+                Cell(TrafficColumn.Status, widths) {
+                    CellText(statusText(kind), MaterialTheme.typography.bodySmall, statusColor(kind))
+                }
+                Cell(TrafficColumn.Code, widths) {
+                    CellText(codeText(code), monoSmall(), MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Cell(TrafficColumn.Client, widths) {
+                    CellText(entry.appId, MaterialTheme.typography.bodySmall, MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Cell(TrafficColumn.Timestamp, widths) {
+                    CellText(
+                        formatClockTime(exchange.started_at_epoch_ms + zoneOffsetMillis),
+                        monoSmall(),
+                        MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                }
+                Cell(TrafficColumn.Duration, widths) {
+                    CellText(durationText(exchange.duration_ms), monoSmall(), MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Cell(TrafficColumn.Request, widths) {
+                    CellText(formatBytes(request?.body_size ?: 0L), monoSmall(), MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Cell(TrafficColumn.Response, widths) {
+                    CellText(formatBytes(response?.body_size ?: 0L), monoSmall(), MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Cell(TrafficColumn.Edited, widths) {
+                    if (entry.edited) {
+                        Icon(
+                            imageVector = vectorResource(Res.drawable.ic_check),
+                            contentDescription = "Edited",
+                            tint = MaterialTheme.colorScheme.onSurface,
+                            modifier = Modifier.size(16.dp),
+                        )
+                    }
                 }
             }
         }
@@ -286,6 +314,13 @@ private fun JumpToLatest(modifier: Modifier, onClick: () -> Unit) {
         modifier = modifier,
         containerColor = MaterialTheme.colorScheme.primary,
         contentColor = MaterialTheme.colorScheme.onPrimary,
+        // The default 6.dp shadow reads as too heavy floating over the table; keep it subtle.
+        elevation = FloatingActionButtonDefaults.elevation(
+            defaultElevation = 2.dp,
+            pressedElevation = 2.dp,
+            focusedElevation = 2.dp,
+            hoveredElevation = 3.dp,
+        ),
     ) {
         Icon(
             imageVector = vectorResource(Res.drawable.ic_arrow_downward),
