@@ -40,10 +40,12 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.LinkAnnotation
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.withLink
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import com.venbiasa.wailo.shared.format.ImageFormat
@@ -177,7 +179,8 @@ private fun JsonLineRow(
     ) {
         // The number gutter and the fold arrow sit together on the left and are excluded from selection,
         // so copying a range yields only the JSON text (indentation included), never the line numbers.
-        // The arrow is the sole toggle target; clicking the line itself does nothing, keeping text selectable.
+        // Toggling is done by the arrow or, on a collapsed row, the "…" placeholder (a text link); clicking
+        // anywhere else on the line does nothing, keeping the JSON text selectable.
         DisableSelection {
             // Pad with a non-breaking space (not a normal one): the shrink-wrapped gutter would trim
             // regular leading spaces, jagging the digits and the arrows beside them. NBSP is one
@@ -197,7 +200,7 @@ private fun JsonLineRow(
         }
         // weight(1f) gives the line a real width: Compose Desktop collapses a shrink-wrapped Text's
         // leading spaces during intrinsic measurement, so the indentation only shows once it fills width.
-        Text(jsonLineText(line, keyColor, wailo, punctuation), Modifier.weight(1f), style = style)
+        Text(jsonLineText(line, keyColor, wailo, punctuation, onToggle), Modifier.weight(1f), style = style)
     }
 }
 
@@ -285,6 +288,7 @@ private fun jsonLineText(
     keyColor: Color,
     wailo: WailoColors,
     punctuation: Color,
+    onToggle: (String) -> Unit,
 ): AnnotatedString = buildAnnotatedString {
     // Indentation is real space characters (not layout padding) so a copied selection stays indented.
     if (line.depth > 0) append("  ".repeat(line.depth))
@@ -297,8 +301,19 @@ private fun jsonLineText(
         is JsonLineContent.Close -> withStyle(SpanStyle(color = punctuation)) { append(content.bracket.toString()) }
         is JsonLineContent.EmptyContainer ->
             withStyle(SpanStyle(color = punctuation)) { append("${content.open}${content.close}") }
-        is JsonLineContent.Collapsed ->
-            withStyle(SpanStyle(color = punctuation)) { append("${content.open} … ${content.close}") }
+        is JsonLineContent.Collapsed -> withStyle(SpanStyle(color = punctuation)) {
+            append("${content.open} ")
+            // Make the "…" a click target too, so a folded node can be reopened by clicking the placeholder
+            // itself and not only the arrow in the gutter. A text link stays clickable inside the surrounding
+            // SelectionContainer, so the rest of the row is still selectable.
+            withLink(
+                LinkAnnotation.Clickable(
+                    tag = content.path,
+                    linkInteractionListener = { onToggle(content.path) },
+                ),
+            ) { append("…") }
+            append(" ${content.close}")
+        }
         is JsonLineContent.Value -> appendJsonValue(content.node, wailo, punctuation)
     }
     if (line.trailingComma) withStyle(SpanStyle(color = punctuation)) { append(",") }
