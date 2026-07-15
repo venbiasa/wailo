@@ -17,6 +17,9 @@ import com.venbiasa.wailo.shared.ui.WailoViewer
  * host's local wall clock (kept out of commonMain, which has no `java.time`). [textScale] is the
  * host-owned text-size multiplier (Cmd +/-); it rides on `fontScale` so only `sp` text resizes.
  * [darkTheme] and [onToggleDarkTheme] are likewise host-owned so the choice can persist across launches.
+ * [listenAddress] is where the capture server accepts device connections; [capturing] reflects whether
+ * traffic is being recorded, and [onToggleCapture]/[onClear] drive the top bar (the engine lives in the
+ * host, not here).
  */
 @Composable
 fun WailoApp(
@@ -25,6 +28,10 @@ fun WailoApp(
     darkTheme: Boolean = isSystemInDarkTheme(),
     onToggleDarkTheme: () -> Unit = {},
     textScale: Float = TextScale.Default,
+    listenAddress: String = "",
+    capturing: Boolean = true,
+    onToggleCapture: () -> Unit = {},
+    onClear: () -> Unit = {},
 ) {
     WailoTheme(darkTheme = darkTheme) {
         val density = LocalDensity.current
@@ -36,6 +43,10 @@ fun WailoApp(
                 zoneOffsetMillis = zoneOffsetMillis,
                 darkTheme = darkTheme,
                 onToggleDarkTheme = onToggleDarkTheme,
+                listenAddress = listenAddress,
+                capturing = capturing,
+                onToggleCapture = onToggleCapture,
+                onClear = onClear,
             )
         }
     }

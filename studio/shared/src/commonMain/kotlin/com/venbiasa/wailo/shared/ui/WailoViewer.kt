@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -33,7 +34,11 @@ import androidx.compose.ui.unit.dp
 import com.venbiasa.wailo.shared.FlowEntry
 import com.venbiasa.wailo.shared.resources.Res
 import com.venbiasa.wailo.shared.resources.ic_dark_mode
+import com.venbiasa.wailo.shared.resources.ic_delete
 import com.venbiasa.wailo.shared.resources.ic_light_mode
+import com.venbiasa.wailo.shared.resources.ic_pause
+import com.venbiasa.wailo.shared.resources.ic_play_arrow
+import com.venbiasa.wailo.shared.theme.LocalWailoColors
 import org.jetbrains.compose.resources.vectorResource
 
 @Composable
@@ -42,6 +47,10 @@ internal fun WailoViewer(
     zoneOffsetMillis: Int,
     darkTheme: Boolean,
     onToggleDarkTheme: () -> Unit,
+    listenAddress: String,
+    capturing: Boolean,
+    onToggleCapture: () -> Unit,
+    onClear: () -> Unit,
 ) {
     var selectedId by remember { mutableStateOf<String?>(null) }
     val selected = remember(entries, selectedId) { entries.firstOrNull { it.id == selectedId } }
@@ -54,7 +63,14 @@ internal fun WailoViewer(
             val density = LocalDensity.current
 
             Column(Modifier.fillMaxSize()) {
-                TopBar(count = entries.size, darkTheme = darkTheme, onToggleDarkTheme = onToggleDarkTheme)
+                TopBar(
+                    listenAddress = listenAddress,
+                    capturing = capturing,
+                    onToggleCapture = onToggleCapture,
+                    onClear = onClear,
+                    darkTheme = darkTheme,
+                    onToggleDarkTheme = onToggleDarkTheme,
+                )
                 RowDivider()
                 Box(Modifier.weight(1f).fillMaxWidth()) {
                     TrafficList(
@@ -81,17 +97,50 @@ internal fun WailoViewer(
 }
 
 @Composable
-private fun TopBar(count: Int, darkTheme: Boolean, onToggleDarkTheme: () -> Unit) {
+private fun TopBar(
+    listenAddress: String,
+    capturing: Boolean,
+    onToggleCapture: () -> Unit,
+    onClear: () -> Unit,
+    darkTheme: Boolean,
+    onToggleDarkTheme: () -> Unit,
+) {
     Row(
         Modifier.fillMaxWidth()
             .background(MaterialTheme.colorScheme.surfaceContainer)
-            .padding(start = 16.dp, end = 8.dp, top = 4.dp, bottom = 4.dp),
+            .padding(horizontal = 8.dp, vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text("Wailo", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onSurface)
-        Spacer(Modifier.width(12.dp))
+        // Pause/resume recording; the icon shows the action, not the current state. The server keeps
+        // listening while paused — only new exchanges are dropped.
+        IconButton(onClick = onToggleCapture, modifier = Modifier.size(36.dp)) {
+            Icon(
+                imageVector = vectorResource(if (capturing) Res.drawable.ic_pause else Res.drawable.ic_play_arrow),
+                contentDescription = if (capturing) "Pause capturing" else "Resume capturing",
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(18.dp),
+            )
+        }
+        IconButton(onClick = onClear, modifier = Modifier.size(36.dp)) {
+            Icon(
+                imageVector = vectorResource(Res.drawable.ic_delete),
+                contentDescription = "Clear captured traffic",
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(18.dp),
+            )
+        }
+        Spacer(Modifier.width(8.dp))
+        // The address a device should dial, prefixed by a recording dot: green while capturing, muted
+        // when paused, so the dot always agrees with the pause/resume button.
+        Box(
+            Modifier.size(8.dp).background(
+                color = if (capturing) LocalWailoColors.current.success else MaterialTheme.colorScheme.onSurfaceVariant,
+                shape = CircleShape,
+            ),
+        )
+        Spacer(Modifier.width(6.dp))
         Text(
-            "$count captured",
+            listenAddress,
             style = MaterialTheme.typography.labelMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )

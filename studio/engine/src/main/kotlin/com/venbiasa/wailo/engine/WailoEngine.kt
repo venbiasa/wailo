@@ -31,11 +31,16 @@ data class CapturedExchange(
  * (desktop UI now; CLI/MCP later). UI-agnostic by design — no Compose here.
  */
 class WailoEngine(
-    private val port: Int = DEFAULT_PORT,
+    val port: Int = DEFAULT_PORT,
     private val maxRetained: Int = DEFAULT_MAX_RETAINED,
 ) {
     private val _exchanges = MutableStateFlow<List<CapturedExchange>>(emptyList())
     val exchanges: StateFlow<List<CapturedExchange>> = _exchanges.asStateFlow()
+
+    private val _capturing = MutableStateFlow(true)
+
+    /** Whether new exchanges are being recorded. Paused keeps the server up but drops incoming traffic. */
+    val capturing: StateFlow<Boolean> = _capturing.asStateFlow()
 
     private var server: EmbeddedServer<*, *>? = null
 
@@ -62,7 +67,18 @@ class WailoEngine(
         server = null
     }
 
+    /** Pause/resume recording. Devices stay connected either way; paused just drops incoming traffic. */
+    fun setCapturing(enabled: Boolean) {
+        _capturing.value = enabled
+    }
+
+    /** Drop all captured exchanges. Recording state is unchanged. */
+    fun clear() {
+        _exchanges.value = emptyList()
+    }
+
     private fun record(hello: Hello?, exchange: HttpExchange) {
+        if (!_capturing.value) return
         val row = CapturedExchange(
             deviceName = hello?.device_name ?: "unknown",
             appId = hello?.app_id ?: "unknown",

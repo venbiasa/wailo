@@ -17,11 +17,18 @@ import com.venbiasa.wailo.engine.WailoEngine
 import com.venbiasa.wailo.shared.FlowEntry
 import com.venbiasa.wailo.shared.WailoApp
 import com.venbiasa.wailo.shared.theme.TextScale
+import java.net.DatagramSocket
+import java.net.InetAddress
 import java.util.TimeZone
 
 fun main() = application {
     val engine = remember { WailoEngine().also(WailoEngine::start) }
     val rows by engine.exchanges.collectAsState()
+    val capturing by engine.capturing.collectAsState()
+
+    // The address devices should dial. The server binds every interface; we surface the host's LAN
+    // IPv4 (not the wildcard) so a physical device knows where to point, falling back to localhost.
+    val listenAddress = remember { "${resolveLanAddress()}:${engine.port}" }
 
     // Map the engine's rows into the viewer's model at this boundary — `shared` must not depend on
     // `engine` (module firewall), so the two `Captured*` types are bridged here rather than shared.
@@ -80,6 +87,24 @@ fun main() = application {
             darkTheme = darkTheme,
             onToggleDarkTheme = { setDarkTheme(!darkTheme) },
             textScale = textScale,
+            listenAddress = listenAddress,
+            capturing = capturing,
+            onToggleCapture = { engine.setCapturing(!capturing) },
+            onClear = engine::clear,
         )
     }
 }
+
+/**
+ * The host's primary LAN IPv4 — the address a device on the same network dials to reach the capture
+ * server. We ask the OS which local interface routes toward a public IP via a UDP "connect" (which
+ * sends nothing), so we get the active interface the way Proxyman does, instead of the first
+ * enumerated site-local address — which is often a VPN/Docker/utun/bridge IP. Falls back to
+ * "localhost" when there is no route (fully offline), which still covers the emulator/simulator case.
+ */
+private fun resolveLanAddress(): String = runCatching {
+    DatagramSocket().use { socket ->
+        socket.connect(InetAddress.getByName("8.8.8.8"), 53)
+        socket.localAddress?.hostAddress
+    }
+}.getOrNull()?.takeUnless { it.isBlank() || it == "0.0.0.0" } ?: "localhost"
