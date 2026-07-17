@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package com.venbiasa.wailo.protocol;
 
-// Capture model only; transport framing (envelope, hello) is added in M2.
+// Captured traffic (device -> desktop) plus the Map Local rule messages the desktop pushes back.
 
 message HttpExchange {
   string id = 1;
@@ -12,6 +12,8 @@ message HttpExchange {
   HttpResponse response = 5;
   // Set only on failure before any response (not for HTTP error statuses).
   string error = 6;
+  // True when a Map Local (or future rewrite) rule produced this response instead of the network.
+  bool edited = 7;
 }
 
 message HttpRequest {
@@ -36,4 +38,55 @@ message HttpResponse {
 message Header {
   string name = 1;
   string value = 2;
+}
+
+// --- Map Local (desktop <-> device control channel) ---
+
+// The active Map Local rules, as match-metadata only — no response bodies (ADR-0019). Sent as a
+// snapshot: each push replaces the device's set entirely (idempotent), so there is no add/remove
+// delta. [epoch] is a monotonic version the desktop owns; the device echoes it in a RuleAck so the
+// desktop can detect a lost push and re-push (anti-entropy). The device applies every snapshot it
+// receives regardless of epoch — epoch is only for ack-matching/retry — so a desktop restart that
+// resets the counter is harmless.
+message RuleSet {
+  repeated MapLocalRule rules = 1;
+  uint64 epoch = 2;
+}
+
+// How to *match* a request. Deliberately carries no response body: the device caches only this
+// metadata and fetches the body lazily on a match (BodyRequest/BodyResponse), so large fixtures
+// never sit resident in the app's memory (ADR-0019).
+message MapLocalRule {
+  string id = 1;
+  bool enabled = 2;
+  // Wildcard match against the full request URL; `*` matches any run of characters.
+  string url_pattern = 3;
+  // HTTP methods this rule applies to; empty means any method.
+  repeated string methods = 4;
+}
+
+// device -> desktop: confirms the device applied the snapshot at [epoch]. Lets the desktop track how
+// far each connection is synced and re-push if a snapshot was silently lost.
+message RuleAck {
+  uint64 epoch = 1;
+}
+
+// device -> desktop: a matched request asking the authority for the response to serve. [correlation_id]
+// pairs it with the BodyResponse; [rule_id] is the matched rule; [url]/[method] are passed for logging
+// and future per-request logic.
+message BodyRequest {
+  string correlation_id = 1;
+  string rule_id = 2;
+  string url = 3;
+  string method = 4;
+}
+
+// desktop -> device: the response for a BodyRequest, read fresh from the file. [found] is false when
+// the rule is gone/disabled or the file can't be read; the device then falls open to the real network.
+message BodyResponse {
+  string correlation_id = 1;
+  bool found = 2;
+  int32 code = 3;
+  repeated Header headers = 4;
+  bytes body = 5;
 }

@@ -21,6 +21,8 @@ import com.venbiasa.wailo.shared.ui.WailoViewer
  * traffic is being recorded, and [onToggleCapture]/[onClear] drive the top bar (the engine lives in the
  * host, not here). [bookmarks] are the persisted, host-owned bookmarked hosts; [onAddBookmark]/
  * [onRemoveBookmark] let the viewer mutate that set (the host owns its persistence, ADR-0013).
+ * [onOpenMapLocal] opens the Map Local rules window from the nav rail; [onMapLocalFromUrl] does the
+ * same seeded from a traffic row's URL. The host owns that window and the rules' persistence.
  */
 @Composable
 fun WailoApp(
@@ -36,6 +38,8 @@ fun WailoApp(
     bookmarks: List<String> = emptyList(),
     onAddBookmark: (String) -> Unit = {},
     onRemoveBookmark: (String) -> Unit = {},
+    onOpenMapLocal: () -> Unit = {},
+    onMapLocalFromUrl: (String) -> Unit = {},
 ) {
     WailoTheme(darkTheme = darkTheme) {
         val density = LocalDensity.current
@@ -54,6 +58,8 @@ fun WailoApp(
                 bookmarks = bookmarks,
                 onAddBookmark = onAddBookmark,
                 onRemoveBookmark = onRemoveBookmark,
+                onOpenMapLocal = onOpenMapLocal,
+                onMapLocalFromUrl = onMapLocalFromUrl,
             )
         }
     }

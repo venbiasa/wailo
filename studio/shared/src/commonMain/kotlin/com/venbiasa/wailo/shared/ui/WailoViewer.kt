@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -56,7 +57,12 @@ internal fun WailoViewer(
     bookmarks: List<String>,
     onAddBookmark: (String) -> Unit,
     onRemoveBookmark: (String) -> Unit,
+    onOpenMapLocal: () -> Unit,
+    onMapLocalFromUrl: (String) -> Unit,
 ) {
+    // The rail is a launcher, not content routing (Map Local opens its own window), so its collapsed
+    // state is transient view state like the selection/filter below.
+    var railCollapsed by remember { mutableStateOf(false) }
     var selectedId by remember { mutableStateOf<String?>(null) }
     // Resolve the open detail against the full list, not the filtered one, so switching bookmarks
     // never closes a detail panel whose row is currently filtered out.
@@ -75,54 +81,63 @@ internal fun WailoViewer(
     }
 
     Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-        BoxWithConstraints(Modifier.fillMaxSize()) {
-            val minDetail = 180.dp
-            val maxDetail = (maxHeight - 160.dp).coerceAtLeast(minDetail)
-            var detailHeight by remember { mutableStateOf(360.dp) }
-            val density = LocalDensity.current
+        Row(Modifier.fillMaxSize()) {
+            NavRail(
+                collapsed = railCollapsed,
+                onToggleCollapsed = { railCollapsed = !railCollapsed },
+                onOpenMapLocal = onOpenMapLocal,
+            )
+            ColumnDivider()
+            BoxWithConstraints(Modifier.weight(1f).fillMaxHeight()) {
+                val minDetail = 180.dp
+                val maxDetail = (maxHeight - 160.dp).coerceAtLeast(minDetail)
+                var detailHeight by remember { mutableStateOf(360.dp) }
+                val density = LocalDensity.current
 
-            Column(Modifier.fillMaxSize()) {
-                TopBar(
-                    listenAddress = listenAddress,
-                    capturing = capturing,
-                    onToggleCapture = onToggleCapture,
-                    onClear = onClear,
-                    darkTheme = darkTheme,
-                    onToggleDarkTheme = onToggleDarkTheme,
-                )
-                RowDivider()
-                // The bookmark bar only exists once there is something to show, so an empty setup
-                // costs no vertical space and reads exactly like the pre-bookmark viewer.
-                if (bookmarks.isNotEmpty()) {
-                    BookmarkBar(
-                        bookmarks = bookmarks,
-                        activeHost = activeHost,
-                        onSelect = { activeHost = it },
-                        onRemove = onRemoveBookmark,
+                Column(Modifier.fillMaxSize()) {
+                    TopBar(
+                        listenAddress = listenAddress,
+                        capturing = capturing,
+                        onToggleCapture = onToggleCapture,
+                        onClear = onClear,
+                        darkTheme = darkTheme,
+                        onToggleDarkTheme = onToggleDarkTheme,
                     )
                     RowDivider()
-                }
-                Box(Modifier.weight(1f).fillMaxWidth()) {
-                    TrafficList(
-                        entries = visibleEntries,
-                        selectedId = selectedId,
-                        onSelect = { selectedId = it },
-                        zoneOffsetMillis = zoneOffsetMillis,
-                        bookmarks = bookmarks,
-                        onAddBookmark = onAddBookmark,
-                        onRemoveBookmark = onRemoveBookmark,
-                    )
-                }
-                if (selected != null) {
-                    DragHandle { deltaPx ->
-                        val deltaDp = with(density) { deltaPx.toDp() }
-                        detailHeight = (detailHeight - deltaDp).coerceIn(minDetail, maxDetail)
+                    // The bookmark bar only exists once there is something to show, so an empty setup
+                    // costs no vertical space and reads exactly like the pre-bookmark viewer.
+                    if (bookmarks.isNotEmpty()) {
+                        BookmarkBar(
+                            bookmarks = bookmarks,
+                            activeHost = activeHost,
+                            onSelect = { activeHost = it },
+                            onRemove = onRemoveBookmark,
+                        )
+                        RowDivider()
                     }
-                    DetailPanel(
-                        entry = selected,
-                        modifier = Modifier.fillMaxWidth().height(detailHeight.coerceIn(minDetail, maxDetail)),
-                        onClose = { selectedId = null },
-                    )
+                    Box(Modifier.weight(1f).fillMaxWidth()) {
+                        TrafficList(
+                            entries = visibleEntries,
+                            selectedId = selectedId,
+                            onSelect = { selectedId = it },
+                            zoneOffsetMillis = zoneOffsetMillis,
+                            bookmarks = bookmarks,
+                            onAddBookmark = onAddBookmark,
+                            onRemoveBookmark = onRemoveBookmark,
+                            onMapLocalFromUrl = onMapLocalFromUrl,
+                        )
+                    }
+                    if (selected != null) {
+                        DragHandle { deltaPx ->
+                            val deltaDp = with(density) { deltaPx.toDp() }
+                            detailHeight = (detailHeight - deltaDp).coerceIn(minDetail, maxDetail)
+                        }
+                        DetailPanel(
+                            entry = selected,
+                            modifier = Modifier.fillMaxWidth().height(detailHeight.coerceIn(minDetail, maxDetail)),
+                            onClose = { selectedId = null },
+                        )
+                    }
                 }
             }
         }

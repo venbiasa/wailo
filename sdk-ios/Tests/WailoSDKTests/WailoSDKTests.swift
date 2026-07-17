@@ -12,7 +12,8 @@ final class WailoSDKTests: XCTestCase {
             id: "abc",
             started_at_epoch_ms: 1_000,
             duration_ms: 42,
-            error: ""
+            error: "",
+            edited: false
         ) {
             $0.request = HttpRequest(
                 method: "GET",
@@ -58,7 +59,7 @@ final class WailoSDKTests: XCTestCase {
         let a = CountingSink()
         let b = CountingSink()
         let sink = a + b
-        sink.onExchange(HttpExchange(id: "1", started_at_epoch_ms: 0, duration_ms: 0, error: ""))
+        sink.onExchange(HttpExchange(id: "1", started_at_epoch_ms: 0, duration_ms: 0, error: "", edited: false))
         XCTAssertEqual(a.count, 1)
         XCTAssertEqual(b.count, 1)
     }

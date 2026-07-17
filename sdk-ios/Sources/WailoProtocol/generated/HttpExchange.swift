@@ -3,7 +3,7 @@
 import Wire
 
 /**
- * Capture model only; transport framing (envelope, hello) is added in M2.
+ * Captured traffic (device -> desktop) plus the Map Local rule messages the desktop pushes back.
  */
 public struct HttpExchange {
 
@@ -16,6 +16,10 @@ public struct HttpExchange {
      * Set only on failure before any response (not for HTTP error statuses).
      */
     public var error: String
+    /**
+     * True when a Map Local (or future rewrite) rule produced this response instead of the network.
+     */
+    public var edited: Bool
     public var unknownFields: UnknownFields = .init()
 
     public init(
@@ -23,12 +27,14 @@ public struct HttpExchange {
         started_at_epoch_ms: Int64,
         duration_ms: Int64,
         error: String,
+        edited: Bool,
         configure: (inout Self) -> Swift.Void = { _ in }
     ) {
         self.id = id
         self.started_at_epoch_ms = started_at_epoch_ms
         self.duration_ms = duration_ms
         self.error = error
+        self.edited = edited
         configure(&self)
     }
 
@@ -64,6 +70,7 @@ extension HttpExchange : Proto3Codable {
         var request: HttpRequest? = nil
         var response: HttpResponse? = nil
         var error: String = ""
+        var edited: Bool = false
 
         let token = try protoReader.beginMessage()
         while let tag = try protoReader.nextTag(token: token) {
@@ -74,6 +81,7 @@ extension HttpExchange : Proto3Codable {
             case 4: request = try protoReader.decode(HttpRequest.self)
             case 5: response = try protoReader.decode(HttpResponse.self)
             case 6: error = try protoReader.decode(String.self)
+            case 7: edited = try protoReader.decode(Bool.self)
             default: try protoReader.readUnknownField(tag: tag)
             }
         }
@@ -85,6 +93,7 @@ extension HttpExchange : Proto3Codable {
         self.request = request
         self.response = response
         self.error = error
+        self.edited = edited
     }
 
     public func encode(to protoWriter: ProtoWriter) throws {
@@ -94,6 +103,7 @@ extension HttpExchange : Proto3Codable {
         try protoWriter.encode(tag: 4, value: self.request)
         try protoWriter.encode(tag: 5, value: self.response)
         try protoWriter.encode(tag: 6, value: self.error)
+        try protoWriter.encode(tag: 7, value: self.edited)
         try protoWriter.writeUnknownFields(unknownFields)
     }
 
@@ -110,6 +120,7 @@ extension HttpExchange : Codable {
         self.request = try container.decodeIfPresent(HttpRequest.self, forKey: "request")
         self.response = try container.decodeIfPresent(HttpResponse.self, forKey: "response")
         self.error = try container.decode(String.self, forKey: "error")
+        self.edited = try container.decode(Bool.self, forKey: "edited")
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -130,6 +141,9 @@ extension HttpExchange : Codable {
         try container.encodeIfPresent(self.response, forKey: "response")
         if includeDefaults || !self.error.isEmpty {
             try container.encode(self.error, forKey: "error")
+        }
+        if includeDefaults || self.edited != false {
+            try container.encode(self.edited, forKey: "edited")
         }
     }
 

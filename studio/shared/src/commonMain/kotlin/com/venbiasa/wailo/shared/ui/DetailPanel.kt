@@ -181,6 +181,7 @@ private fun RequestResponseSplit(exchange: HttpExchange, modifier: Modifier) {
                 declaredSize = request?.body_size ?: 0L,
                 truncated = request?.body_truncated == true,
                 notice = "No request captured.",
+                showAuth = true,
                 modifier = Modifier.weight(leftFraction).fillMaxHeight(),
             )
             PaneResizeHandle { deltaPx ->
@@ -199,6 +200,9 @@ private fun RequestResponseSplit(exchange: HttpExchange, modifier: Modifier) {
                 } else {
                     "No response captured yet."
                 },
+                // Auth is a request-side concern (credentials the client sends); the response only
+                // echoes Set-Cookie/challenge headers, which read fine under Headers.
+                showAuth = false,
                 modifier = Modifier.weight(1f - leftFraction).fillMaxHeight(),
             )
         }
@@ -247,6 +251,7 @@ private fun MessagePane(
     declaredSize: Long,
     truncated: Boolean,
     notice: String,
+    showAuth: Boolean,
     modifier: Modifier,
 ) {
     Column(modifier) {
@@ -262,9 +267,12 @@ private fun MessagePane(
             return@Column
         }
 
+        val tabs = remember(showAuth) {
+            MessageTab.entries.filter { showAuth || it != MessageTab.Auth }
+        }
         var tab by remember { mutableStateOf(MessageTab.Headers) }
         UnderlineTabs(
-            items = MessageTab.entries.map { TabItem(it, it.label) },
+            items = tabs.map { TabItem(it, it.label) },
             selected = tab,
             onSelect = { tab = it },
             modifier = Modifier.fillMaxWidth(),

@@ -3,8 +3,11 @@
 import Wire
 
 /**
- * One Envelope per WebSocket frame. The client opens with a Hello, then streams
- * exchanges; the server keys sessions off that Hello.
+ * One Envelope per WebSocket frame. Device -> desktop: the client opens with a Hello, then streams
+ * exchanges, plus a RuleAck after applying rules and a BodyRequest when a Map Local rule matches.
+ * Desktop -> device: pushes a RuleSet (match-metadata) right after the Hello and whenever rules change,
+ * and replies to a BodyRequest with a BodyResponse (ADR-0019). The receiver keys on which oneof field
+ * is set; new kinds are a oneof extension (ADR-0008), so this stays backward-compatible.
  */
 public struct Envelope {
 
@@ -55,6 +58,10 @@ extension Envelope : Proto3Codable {
             switch tag {
             case 1: message = .hello(try protoReader.decode(Hello.self))
             case 2: message = .exchange(try protoReader.decode(HttpExchange.self))
+            case 3: message = .rule_set(try protoReader.decode(RuleSet.self))
+            case 4: message = .rule_ack(try protoReader.decode(RuleAck.self))
+            case 5: message = .body_request(try protoReader.decode(BodyRequest.self))
+            case 6: message = .body_response(try protoReader.decode(BodyResponse.self))
             default: try protoReader.readUnknownField(tag: tag)
             }
         }
@@ -81,6 +88,22 @@ extension Envelope : Codable {
             self.message = .hello(hello)
         } else if let exchange = try container.decodeIfPresent(HttpExchange.self, forKey: "exchange") {
             self.message = .exchange(exchange)
+        } else if let rule_set = try container.decodeIfPresent(RuleSet.self, forKey: "ruleSet") {
+            self.message = .rule_set(rule_set)
+        } else if let rule_set = try container.decodeIfPresent(RuleSet.self, forKey: "rule_set") {
+            self.message = .rule_set(rule_set)
+        } else if let rule_ack = try container.decodeIfPresent(RuleAck.self, forKey: "ruleAck") {
+            self.message = .rule_ack(rule_ack)
+        } else if let rule_ack = try container.decodeIfPresent(RuleAck.self, forKey: "rule_ack") {
+            self.message = .rule_ack(rule_ack)
+        } else if let body_request = try container.decodeIfPresent(BodyRequest.self, forKey: "bodyRequest") {
+            self.message = .body_request(body_request)
+        } else if let body_request = try container.decodeIfPresent(BodyRequest.self, forKey: "body_request") {
+            self.message = .body_request(body_request)
+        } else if let body_response = try container.decodeIfPresent(BodyResponse.self, forKey: "bodyResponse") {
+            self.message = .body_response(body_response)
+        } else if let body_response = try container.decodeIfPresent(BodyResponse.self, forKey: "body_response") {
+            self.message = .body_response(body_response)
         } else {
             self.message = nil
         }
@@ -88,10 +111,15 @@ extension Envelope : Codable {
 
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: StringLiteralCodingKeys.self)
+        let preferCamelCase = encoder.protoKeyNameEncodingStrategy == .camelCase
 
         switch self.message {
         case .hello(let hello): try container.encode(hello, forKey: "hello")
         case .exchange(let exchange): try container.encode(exchange, forKey: "exchange")
+        case .rule_set(let rule_set): try container.encode(rule_set, forKey: preferCamelCase ? "ruleSet" : "rule_set")
+        case .rule_ack(let rule_ack): try container.encode(rule_ack, forKey: preferCamelCase ? "ruleAck" : "rule_ack")
+        case .body_request(let body_request): try container.encode(body_request, forKey: preferCamelCase ? "bodyRequest" : "body_request")
+        case .body_response(let body_response): try container.encode(body_response, forKey: preferCamelCase ? "bodyResponse" : "body_response")
         case Optional.none: break
         }
     }
@@ -108,11 +136,19 @@ extension Envelope {
 
         case hello(Hello)
         case exchange(HttpExchange)
+        case rule_set(RuleSet)
+        case rule_ack(RuleAck)
+        case body_request(BodyRequest)
+        case body_response(BodyResponse)
 
         fileprivate func encode(to protoWriter: ProtoWriter) throws {
             switch self {
             case .hello(let hello): try protoWriter.encode(tag: 1, value: hello)
             case .exchange(let exchange): try protoWriter.encode(tag: 2, value: exchange)
+            case .rule_set(let rule_set): try protoWriter.encode(tag: 3, value: rule_set)
+            case .rule_ack(let rule_ack): try protoWriter.encode(tag: 4, value: rule_ack)
+            case .body_request(let body_request): try protoWriter.encode(tag: 5, value: body_request)
+            case .body_response(let body_response): try protoWriter.encode(tag: 6, value: body_response)
             }
         }
 

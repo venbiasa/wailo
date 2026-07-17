@@ -45,6 +45,7 @@ public enum Wailo {
         let sink: CaptureSink = alsoLogToConsole ? webSocket + ConsoleSink() : webSocket
 
         WailoURLProtocol.sink = sink
+        WailoURLProtocol.bodyFetcher = webSocket
         WailoURLProtocol.maxBodyBytes = maxBodyBytes
         URLProtocol.registerClass(WailoURLProtocol.self)
         if instrumentSharedConfigurations {
@@ -64,6 +65,7 @@ public enum Wailo {
         client?.stop()
         client = nil
         WailoURLProtocol.sink = nil
+        WailoURLProtocol.bodyFetcher = nil
     }
 
     public static func defaultDeviceName() -> String {

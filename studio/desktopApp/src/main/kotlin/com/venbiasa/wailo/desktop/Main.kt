@@ -1,26 +1,50 @@
 package com.venbiasa.wailo.desktop
 
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.isMetaPressed
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Density
+import androidx.compose.ui.unit.DpSize
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.WindowPlacement
+import androidx.compose.ui.window.WindowPosition
 import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.application
+import androidx.compose.ui.window.rememberWindowState
+import com.venbiasa.wailo.engine.MapLocalBodyProvider
 import com.venbiasa.wailo.engine.WailoEngine
 import com.venbiasa.wailo.shared.FlowEntry
+import com.venbiasa.wailo.shared.MapLocalRuleDef
 import com.venbiasa.wailo.shared.WailoApp
 import com.venbiasa.wailo.shared.theme.TextScale
+import com.venbiasa.wailo.shared.theme.WailoTheme
+import com.venbiasa.wailo.shared.ui.MapLocalManager
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.FlowPreview
+import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.withContext
+import java.awt.FileDialog
+import java.awt.Frame
 import java.net.DatagramSocket
 import java.net.InetAddress
 import java.util.TimeZone
+import kotlin.time.Duration.Companion.milliseconds
 
+// debounce (used below to coalesce window resize/move writes) is still a coroutines preview API.
+@OptIn(FlowPreview::class)
 fun main() = application {
     val engine = remember { WailoEngine().also(WailoEngine::start) }
     val rows by engine.exchanges.collectAsState()
@@ -33,7 +57,7 @@ fun main() = application {
     // Map the engine's rows into the viewer's model at this boundary — `shared` must not depend on
     // `engine` (module firewall), so the two `Captured*` types are bridged here rather than shared.
     val entries = remember(rows) {
-        rows.map { FlowEntry(it.deviceName, it.appId, it.platform, it.exchange) }
+        rows.map { FlowEntry(it.deviceName, it.appId, it.platform, it.exchange, edited = it.exchange.edited) }
     }
     // The viewer formats timestamps in commonMain (no java.time), so pass the host's zone offset.
     val zoneOffsetMillis = remember { TimeZone.getDefault().getOffset(System.currentTimeMillis()) }
@@ -72,8 +96,70 @@ fun main() = application {
         }
     }
 
+    // Map Local rules: host-owned and persisted (like bookmarks). `shared` gets the definitions plus
+    // upsert/remove callbacks and stays stateless; the host is the only side that reads files and talks
+    // to the engine. The window and its optional pre-filled draft are hoisted here so the rail button
+    // and the per-row "Map Local…" action both open the same window.
+    var mapLocalRules by remember { mutableStateOf(MapLocalStore.load()) }
+    var showMapLocal by remember { mutableStateOf(false) }
+    var mapLocalDraft by remember { mutableStateOf<MapLocalRuleDef?>(null) }
+    val upsertRule = { rule: MapLocalRuleDef ->
+        mapLocalRules = if (mapLocalRules.any { it.id == rule.id }) {
+            mapLocalRules.map { if (it.id == rule.id) rule else it }
+        } else {
+            mapLocalRules + rule
+        }
+        MapLocalStore.save(mapLocalRules)
+    }
+    val removeRule = { id: String ->
+        mapLocalRules = mapLocalRules.filterNot { it.id == id }
+        MapLocalStore.save(mapLocalRules)
+    }
+    // The engine (running on non-UI threads) resolves a matched rule's body through this seam; Compose
+    // state can't be read off the composition, so bridge the current defs through an AtomicReference the
+    // rule effect keeps fresh. Files are read on demand, on the IO dispatcher (ADR-0019).
+    val ruleDefsRef = remember { java.util.concurrent.atomic.AtomicReference(mapLocalRules) }
+    LaunchedEffect(Unit) {
+        engine.bodyProvider = MapLocalBodyProvider { ruleId, _, _ ->
+            withContext(Dispatchers.IO) { serveBody(ruleId, ruleDefsRef.get()) }
+        }
+    }
+    // Push the match-metadata snapshot (no file reads here) on first composition and every edit; a save
+    // re-pushes the whole set, and the engine re-pushes to any device that hasn't acked it.
+    LaunchedEffect(mapLocalRules) {
+        ruleDefsRef.set(mapLocalRules)
+        engine.updateRules(compileRules(mapLocalRules))
+    }
+    // Kept for the whole session so reopening the window remembers its last size/position.
+    val mapLocalWindowState = rememberWindowState(size = DpSize(760.dp, 560.dp))
+
+    // Window geometry survives restarts (host concern, like the theme/scale/bookmarks above). Seeded
+    // from the last floating size/position; first run falls back to Compose's default size and lets
+    // the OS place the window.
+    val windowState = rememberWindowState(
+        size = WindowStateStore.loadSize(DpSize(800.dp, 600.dp)),
+        position = WindowStateStore.loadPosition(),
+    )
+    // Persist continuously (so a crash/force-quit still remembers), but only while Floating so a
+    // maximized/fullscreen window never overwrites the saved floating geometry. Debounced so a
+    // drag-resize doesn't hammer prefs every frame.
+    LaunchedEffect(windowState) {
+        snapshotFlow { Triple(windowState.size, windowState.position, windowState.placement) }
+            .filter { (_, _, placement) -> placement == WindowPlacement.Floating }
+            .debounce(300.milliseconds)
+            .collect { (size, position, _) -> WindowStateStore.save(size, position) }
+    }
+
     Window(
-        onCloseRequest = ::exitApplication,
+        // Capture the final geometry on close too, in case the last move/resize landed inside the
+        // debounce window and never flushed.
+        onCloseRequest = {
+            if (windowState.placement == WindowPlacement.Floating) {
+                WindowStateStore.save(windowState.size, windowState.position)
+            }
+            exitApplication()
+        },
+        state = windowState,
         title = "Wailo",
         // Preview so the shortcut wins even when a child (e.g. a text field) holds focus. Cmd+= and
         // Cmd++ share the Equals key on most layouts; NumPad variants are handled for full keyboards.
@@ -110,8 +196,55 @@ fun main() = application {
             bookmarks = bookmarks,
             onAddBookmark = addBookmark,
             onRemoveBookmark = removeBookmark,
+            onOpenMapLocal = {
+                mapLocalDraft = null
+                showMapLocal = true
+            },
+            onMapLocalFromUrl = { url ->
+                mapLocalDraft = MapLocalRuleDef(id = MapLocalRuleDef.newId(), urlPattern = MapLocalRuleDef.patternFor(url))
+                showMapLocal = true
+            },
         )
     }
+
+    // The Map Local manager lives in its own resizable window (per the locked UI decision). It carries
+    // its own theme + text-scale wrapper because it's a separate Compose window, not a child of the
+    // main viewer.
+    if (showMapLocal) {
+        Window(
+            onCloseRequest = { showMapLocal = false },
+            state = mapLocalWindowState,
+            title = "Wailo — Map Local",
+        ) {
+            WailoTheme(darkTheme = darkTheme) {
+                val density = LocalDensity.current
+                CompositionLocalProvider(
+                    LocalDensity provides Density(density.density, density.fontScale * textScale),
+                ) {
+                    MapLocalManager(
+                        rules = mapLocalRules,
+                        initialDraft = mapLocalDraft,
+                        onUpsert = upsertRule,
+                        onRemove = removeRule,
+                        onPickFile = ::chooseLocalFile,
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Opens the OS-native file chooser and returns the absolute path, or null if cancelled. Uses AWT's
+ * [FileDialog] (rather than Swing's JFileChooser) so it's the real native picker on macOS. Modal by
+ * design: it's invoked from a button click and blocks only that interaction.
+ */
+private fun chooseLocalFile(): String? {
+    val dialog = FileDialog(null as Frame?, "Choose local file", FileDialog.LOAD)
+    dialog.isVisible = true
+    val directory = dialog.directory
+    val file = dialog.file
+    return if (directory != null && file != null) directory + file else null
 }
 
 /**

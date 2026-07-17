@@ -1,32 +1,46 @@
 package com.venbiasa.wailo.engine
 
+import com.venbiasa.wailo.protocol.BodyRequest
+import com.venbiasa.wailo.protocol.BodyResponse
 import com.venbiasa.wailo.protocol.Envelope
+import com.venbiasa.wailo.protocol.Header
 import com.venbiasa.wailo.protocol.Hello
 import com.venbiasa.wailo.protocol.HttpExchange
 import com.venbiasa.wailo.protocol.HttpRequest
 import com.venbiasa.wailo.protocol.HttpResponse
+import com.venbiasa.wailo.protocol.MapLocalRule
+import com.venbiasa.wailo.protocol.RuleAck
+import com.venbiasa.wailo.protocol.RuleSet
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.cio.CIO
 import io.ktor.client.plugins.websocket.WebSockets
 import io.ktor.client.plugins.websocket.webSocket
 import io.ktor.websocket.Frame
+import io.ktor.websocket.readBytes
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
+import kotlin.test.assertTrue
 
 /** Framed Envelopes from a real WebSocket client are decoded by the engine and published on its
- * StateFlow — the server half of the M2 wire path (client half lives in sdk-android). */
+ * StateFlow — the server half of the M2 wire path (client half lives in sdk-android). Also covers the
+ * reverse control channel (Map Local): versioned rule pushes + acks and the body-fetch RPC (ADR-0019). */
 class WailoEngineLoopbackTest {
 
     private val port = 18899
-    private val engine = WailoEngine(port = port)
+    // Small ack-retry so the anti-entropy re-push is observable quickly in tests.
+    private val engine = WailoEngine(port = port, ackRetryMs = 300)
     private val client = HttpClient(CIO) { install(WebSockets) }
 
     @AfterTest
     fun tearDown() {
         client.close()
+        engine.bodyProvider = null
         engine.stop()
     }
 
@@ -49,6 +63,136 @@ class WailoEngineLoopbackTest {
         assertEquals(200, row.exchange.response?.code)
     }
 
+    @Test
+    fun connectedClientReceivesRuleSnapshotWithEpoch() = runBlocking {
+        engine.start()
+        // Rules set before the client connects must be delivered on connect (the reverse of the
+        // capture path: this is the desktop -> device control channel).
+        engine.updateRules(listOf(RULE))
+
+        val received = withTimeoutOrNull(5_000) {
+            var snapshot: RuleSet? = null
+            client.webSocket(host = "localhost", port = port, path = "/") {
+                send(Frame.Binary(true, Envelope(hello = HELLO).encode()))
+                for (frame in incoming) {
+                    if (frame !is Frame.Binary) continue
+                    Envelope.ADAPTER.decode(frame.readBytes()).rule_set?.let {
+                        snapshot = it
+                        return@webSocket
+                    }
+                }
+            }
+            snapshot
+        }
+
+        assertNotNull(received)
+        assertEquals(1, received.rules.size)
+        assertEquals("https://example.com/*", received.rules.first().url_pattern)
+        // A snapshot is versioned so the device can ack it; every update stamps a fresh, non-zero epoch.
+        assertTrue(received.epoch > 0)
+    }
+
+    @Test
+    fun unackedSnapshotIsRepushed() = runBlocking {
+        engine.start()
+        engine.updateRules(listOf(RULE))
+
+        // Never ack: the engine must keep re-pushing the snapshot (anti-entropy), so we see it more
+        // than once — the initial push plus at least one reconcile.
+        var pushes = 0
+        client.webSocket(host = "localhost", port = port, path = "/") {
+            send(Frame.Binary(true, Envelope(hello = HELLO).encode()))
+            withTimeoutOrNull(1_500) {
+                for (frame in incoming) {
+                    if (frame !is Frame.Binary) continue
+                    Envelope.ADAPTER.decode(frame.readBytes()).rule_set?.let { pushes++ }
+                }
+            }
+        }
+        assertTrue(pushes >= 2, "an unacked snapshot must be re-pushed; saw $pushes push(es)")
+    }
+
+    @Test
+    fun ackedSnapshotIsNotRepushed() = runBlocking {
+        engine.start()
+        engine.updateRules(listOf(RULE))
+
+        // Ack the first snapshot; the engine must then stop re-pushing, so no further rule_set arrives.
+        var extraAfterAck = 0
+        client.webSocket(host = "localhost", port = port, path = "/") {
+            send(Frame.Binary(true, Envelope(hello = HELLO).encode()))
+            var acked = false
+            withTimeoutOrNull(1_500) {
+                for (frame in incoming) {
+                    if (frame !is Frame.Binary) continue
+                    Envelope.ADAPTER.decode(frame.readBytes()).rule_set?.let { snapshot ->
+                        if (acked) {
+                            extraAfterAck++
+                        } else {
+                            send(Frame.Binary(true, Envelope(rule_ack = RuleAck(epoch = snapshot.epoch)).encode()))
+                            acked = true
+                        }
+                    }
+                }
+            }
+        }
+        assertEquals(0, extraAfterAck, "an acked snapshot must not be re-pushed")
+    }
+
+    @Test
+    fun bodyRequestIsAnsweredByProvider() = runBlocking {
+        engine.start()
+        engine.bodyProvider = MapLocalBodyProvider { ruleId, _, _ ->
+            if (ruleId == "r1") {
+                ServedBody(
+                    code = 201,
+                    headers = listOf(Header(name = "Content-Type", value_ = "text/plain")),
+                    body = "mapped!".toByteArray(),
+                )
+            } else {
+                null
+            }
+        }
+
+        val response = fetchBodyResponse(BodyRequest(correlation_id = "c1", rule_id = "r1", url = "https://x/y", method = "GET"))
+
+        assertNotNull(response)
+        assertEquals("c1", response.correlation_id)
+        assertTrue(response.found)
+        assertEquals(201, response.code)
+        assertEquals("mapped!", response.body.utf8())
+        assertEquals("Content-Type", response.headers.first().name)
+    }
+
+    @Test
+    fun bodyRequestWithoutProviderIsNotFound() = runBlocking {
+        engine.start()
+        engine.bodyProvider = null
+
+        val response = fetchBodyResponse(BodyRequest(correlation_id = "c2", rule_id = "whatever", url = "https://x/y", method = "GET"))
+
+        assertNotNull(response)
+        assertEquals("c2", response.correlation_id)
+        assertFalse(response.found)
+    }
+
+    // Opens a connection, sends [request], and returns the first BodyResponse the engine sends back.
+    private suspend fun fetchBodyResponse(request: BodyRequest): BodyResponse? = withTimeoutOrNull(5_000) {
+        var out: BodyResponse? = null
+        client.webSocket(host = "localhost", port = port, path = "/") {
+            send(Frame.Binary(true, Envelope(hello = HELLO).encode()))
+            send(Frame.Binary(true, Envelope(body_request = request).encode()))
+            for (frame in incoming) {
+                if (frame !is Frame.Binary) continue
+                Envelope.ADAPTER.decode(frame.readBytes()).body_response?.let {
+                    out = it
+                    return@webSocket
+                }
+            }
+        }
+        out
+    }
+
     private fun awaitFirstRow(timeoutMs: Long): List<CapturedExchange> {
         val deadline = System.currentTimeMillis() + timeoutMs
         while (System.currentTimeMillis() < deadline) {
@@ -67,6 +211,11 @@ class WailoEngineLoopbackTest {
             duration_ms = 7,
             request = HttpRequest(method = "GET", url = "https://example.com/ping"),
             response = HttpResponse(code = 200, message = "OK"),
+        )
+        val RULE = MapLocalRule(
+            id = "r1",
+            enabled = true,
+            url_pattern = "https://example.com/*",
         )
     }
 }

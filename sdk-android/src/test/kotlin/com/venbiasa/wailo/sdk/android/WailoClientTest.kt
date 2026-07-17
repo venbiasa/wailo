@@ -12,6 +12,7 @@ import io.ktor.server.websocket.webSocket
 import io.ktor.websocket.Frame
 import io.ktor.websocket.readBytes
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
@@ -49,6 +50,45 @@ class WailoClientTest {
             val exchange = withTimeout(5_000) { received.receive() }
             assertEquals("com.test", hello.hello?.app_id)
             assertEquals("e1", exchange.exchange?.id)
+        } finally {
+            client.stop()
+            server.stop(0, 0)
+        }
+    }
+
+    /** The desktop isn't up when the client starts: the connect loop must keep retrying so a
+     * buffered exchange is still delivered once the server appears. */
+    @Test
+    fun retriesUntilServerIsUp() = runBlocking {
+        val received = Channel<Envelope>(capacity = 16)
+        val port = 18989
+
+        val client = WailoClient(
+            hello = Hello(device_name = "test", app_id = "com.test", platform = "android"),
+            host = "localhost",
+            port = port,
+        ).also { it.start() }
+        // Enqueued before any server exists; must survive the failed attempts and the reconnect wait.
+        client.onExchange(HttpExchange(id = "late", started_at_epoch_ms = 1, duration_ms = 2))
+
+        // Let the client fail at least one connect attempt before the server comes up.
+        delay(500)
+        val server = embeddedServer(CIO, port = port) {
+            install(WebSockets)
+            routing {
+                webSocket("/") {
+                    for (frame in incoming) {
+                        if (frame is Frame.Binary) received.trySend(Envelope.ADAPTER.decode(frame.readBytes()))
+                    }
+                }
+            }
+        }.also { it.start(wait = false) }
+
+        try {
+            val hello = withTimeout(10_000) { received.receive() }
+            val exchange = withTimeout(10_000) { received.receive() }
+            assertEquals("com.test", hello.hello?.app_id)
+            assertEquals("late", exchange.exchange?.id)
         } finally {
             client.stop()
             server.stop(0, 0)

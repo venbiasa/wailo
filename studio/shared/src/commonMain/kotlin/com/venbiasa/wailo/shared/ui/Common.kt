@@ -4,6 +4,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -55,6 +56,11 @@ internal fun rememberColumnWidths(): SnapshotStateMap<TrafficColumn, Dp> = remem
 @Composable
 internal fun RowDivider(color: Color = MaterialTheme.colorScheme.outlineVariant) {
     Box(Modifier.fillMaxWidth().height(1.dp).background(color))
+}
+
+@Composable
+internal fun ColumnDivider(color: Color = MaterialTheme.colorScheme.outlineVariant) {
+    Box(Modifier.fillMaxHeight().width(1.dp).background(color))
 }
 
 // Monospace styles keep the numeric columns and payloads tabular; chrome/text stays Noto Sans.

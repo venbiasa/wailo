@@ -496,3 +496,101 @@ Append-only. Newest at the bottom. Each entry: context, decision, consequences.
   - Verified by machine: `swift build` (links the dylib incl. `WailoAutoStart.m`), `swift test` (4 pass),
     `xcodebuild -resolvePackageDependencies` on the target consumer app. Live pre-`main` capture with no host code is a manual
     smoke check under the repo's two-tier verification.
+
+## ADR-0018: Device-side WebSocket reconnection is self-healing (delegate + generation + ping keepalive); OS reachability deferred
+
+- Status: Accepted and built. `swift test` green (adds `testReconnectsWhenServerStartsLate` and
+  `testReconnectsAfterServerDrops`); `:sdk-android:testDebugUnitTest` green (adds `retriesUntilServerIsUp`).
+- Context: ADR-0008/0010 specified "a background loop drains and auto-reconnects", but the two device ports
+  diverged in how robustly they actually recover. Android's Ktor loop re-runs on *every* connection outcome
+  (refused, dropped, closed), so it keeps retrying. The Swift port scheduled the next attempt *only* inside
+  `handleDisconnect()`, which ran *only* when `URLSessionWebSocketTask` delivered a `send`/`receive` failure
+  callback. `URLSessionWebSocketTask` does not guarantee those handlers fire on every failure — notably a
+  connection that never establishes (desktop not up) or a silently dropped idle link — so a single missed
+  callback left iOS "waiting" with no retry ever scheduled: it would not reconnect when the network came
+  back. Separately, neither port detected a silently half-open *idle* socket (no traffic to fail on), and
+  neither reacts to OS connectivity changes, so recovery was at best a blind poll.
+- Decision:
+  - iOS (`sdk-ios` `WailoClient`): make the transport `URLSession` carry a delegate and route
+    `urlSession(_:task:didCompleteWithError:)` / `didCloseWith` into the same disconnect path. That delegate
+    signal fires even when the `send`/`receive` handlers don't, so a failed or never-established attempt
+    still schedules a retry — the fix that makes reconnection impossible to wedge. Guard every callback with
+    a monotonic `generation` epoch (bumped on connect *and* disconnect) so a late/duplicate signal is a
+    no-op and each disconnect retries exactly once. Add a `sendPing` keepalive while connected to provoke a
+    failure (and reconnect) on a dead idle link. `stop()` calls `invalidateAndCancel()` on the session to
+    break the delegate retain cycle — otherwise a replaced client (e.g. a second `Wailo.start`) leaks a live
+    WebSocket.
+  - Android (`sdk-android` `WailoClient`): set the Ktor client `pingIntervalMillis` so a dead idle link is
+    actively probed, and consume `incoming` as the "await close" signal so a ping/pong timeout, drop, or
+    server close ends the session block and the existing loop reconnects — draining `outbox` alone never
+    observes an idle drop. Requeue the in-flight exchange when a send fails, so a mid-send drop doesn't lose
+    it across the reconnect.
+  - Keep the existing fixed ~2s reconnect backoff on both; the ping interval is ~20s.
+- Alternatives considered:
+  - **OS reachability monitoring** (`NWPathMonitor` on iOS, `ConnectivityManager` on Android) for an
+    *instant* reconnect the moment connectivity returns. Deferred: the self-healing retry already recovers
+    without it, and the Android side would add an `ACCESS_NETWORK_STATE` permission to a library that ships
+    inside third-party apps (invariant #3) — an imposition that warrants its own decision. `NWPathMonitor`
+    needs no permission and can be added on iOS alone later.
+  - **Exponential backoff**: unnecessary at a 2s interval to a single localhost/LAN peer; revisit only if it
+    ever hammers a busy network.
+- Consequences:
+  - Both device SDKs now reliably reconnect after the desktop starts late, quits, or the link drops or goes
+    idle — no app restart — and this is proven by machine (loopback reconnect tests), not just by
+    inspection.
+  - The two ports stay aligned on the wire contract but differ in mechanism (URLSession delegate + ping vs.
+    Ktor pinger + `incoming`), the accepted device-side duplication of ADR-0010/0011.
+  - Recovery latency is still bounded by the 2s poll (plus up to the ping interval to notice a *silent* idle
+    drop), not instant; closing that gap is the deferred reachability follow-up above.
+
+## ADR-0019: Map Local — device caches match-metadata only, fetches bodies lazily; rules are versioned + acked (anti-entropy)
+
+- Status: Accepted; building. Supersedes the initial Map Local behavior (a `RuleSet` snapshot with response
+  bodies inlined and cached whole on the device — that feature shipped without its own ADR; this records the
+  model going forward).
+- Context: The first Map Local cut pushed a `RuleSet` where each rule carried its response *bytes* inline, and
+  the device cached the whole set (connection-scoped after the disconnect-clear change). Two problems drove a
+  redesign: (1) **memory** — inlining bodies means the device holds every mapped file resident in RAM for the
+  whole session, which is bad for large fixtures or many rules and fights invariant #3 (the SDK ships inside
+  third-party apps; keep it light); (2) **silent desync** — pushes are fire-and-forget with no ack, so a push
+  lost on a still-alive link leaves the device stale and the desktop unaware, with no repair until the next
+  edit or reconnect. Query-the-desktop-per-request was considered and rejected: it taxes *all* traffic (even
+  the ~99% that never match) with a round-trip, couples every request's latency to the desktop, and risks
+  OkHttp dispatcher-thread exhaustion on Android. Map Local is automated (no human in the loop), so the match
+  decision should stay local and instant; only the (occasional) matched body needs the authority.
+- Decision:
+  - **Device caches match-metadata only** (`MapLocalRule` = id, enabled, url_pattern, methods). Response bodies
+    are never stored on the device. Cache stays connection-scoped (cleared on disconnect, ADR follows the
+    existing device behavior).
+  - **Lazy body fetch on match**: the device matches locally, then fetches the response (code, headers, body)
+    from the desktop via a request-scoped RPC — `BodyRequest`/`BodyResponse` keyed by a `correlation_id`,
+    with a device-side pending map. The request suspends until the reply arrives (event-driven on iOS
+    `URLProtocol`; async/timeout on Android to avoid blocking OkHttp threads). Bodies live in device memory
+    only for the life of that one request, and are always fresh (authority-sourced).
+  - **Fail-open**: if the fetch can't complete (not connected, timeout, `found=false`, or a disconnect
+    mid-fetch), the device makes its own real network call. We are not a proxy — the SDK always owns the real
+    request — so a desktop hiccup degrades to live traffic, never a hung/failed request.
+  - **Anti-entropy sync for the metadata**: `RuleSet` carries a monotonic `epoch` owned by the desktop. The
+    device applies each snapshot as a full replace (unconditionally) and returns `RuleAck{epoch}`. The desktop
+    tracks per-session `ackedEpoch` and re-pushes on a timer while a session is behind, so a lost push
+    self-repairs; a reconnect re-syncs from scratch. `epoch` never gates application (only ack-matching, retry,
+    and future sync-status display), so a desktop restart resetting the counter is harmless.
+  - **Engine stays headless**: body resolution is a UI-agnostic `MapLocalBodyProvider` seam the desktop
+    supplies (it reads the file for a given rule id). The engine never learns file paths and never reads the
+    filesystem itself.
+- Alternatives considered:
+  - **Query-per-request availability** (no cache): rejected for the whole-traffic latency/thread cost above.
+  - **Inline bodies in the snapshot** (the initial model): rejected for memory + bandwidth (holds all fixtures
+    resident; re-pushes all bytes on every edit).
+  - **No ack, reconnect-only repair**: leaves the silent-push-loss window open until the next edit/disconnect.
+- Consequences:
+  - The socket becomes bidirectional request/reply: versioned rule pushes + `RuleAck` + a `BodyRequest`/
+    `BodyResponse` correlation channel. This is the same correlation/pending-map machinery breakpoints will
+    need — built once here.
+  - Device Map Local memory is now ~O(rule count × small metadata), independent of fixture size; a matched
+    request pays one device↔desktop round-trip (only on matches).
+  - **Android does not yet apply rules** (it ignores inbound frames); when it does, it must mirror this model
+    — metadata cache, lazy fetch, fail-open, ack — since consistency across the two SDKs is kept only by the
+    wire contract (invariant #4), never by shared device code.
+  - Desync is now both self-repairing (ack + retry + reconnect) and observable (the desktop knows each
+    device's `ackedEpoch` vs the current `epoch`), enabling a future "rules out of sync" indicator.

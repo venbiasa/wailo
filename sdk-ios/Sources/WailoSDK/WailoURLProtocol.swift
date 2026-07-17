@@ -1,8 +1,28 @@
 import Foundation
 import WailoProtocol
 
-/// A `URLProtocol` that copies every URLSession HTTP(S) exchange into a `CaptureSink` without
-/// altering the real request/response. The iOS analog of the OkHttp `WailoInterceptor`.
+/// The response a matched Map Local rule resolves to, fetched from the desktop on demand (ADR-0019).
+/// Bodies are never cached on the device — this exists only for the life of the one request it answers.
+struct WailoMappedResponse {
+    let code: Int
+    let headers: [Header]
+    let body: Data
+}
+
+/// Resolves a matched rule to its response by asking the desktop (the authority) for the bytes. The
+/// interceptor caches only match-metadata, so this round-trips the body per match. `completion` is
+/// called with nil when the fetch can't complete (not connected, timeout, rule gone), and the
+/// interceptor then falls open to the real network. `WailoClient` is the implementation.
+protocol WailoBodyFetcher: AnyObject {
+    func fetchBody(ruleId: String, url: String, method: String, completion: @escaping (WailoMappedResponse?) -> Void)
+}
+
+/// A `URLProtocol` that copies every URLSession HTTP(S) exchange into a `CaptureSink`. It normally
+/// leaves the real request/response untouched, but first checks the Map Local match-metadata the
+/// desktop has pushed: on a match it fetches the response from the desktop (never a cached body —
+/// ADR-0019) and answers with it, flagging the exchange `edited`. If that fetch fails for any reason it
+/// falls open to the real network, so a desktop hiccup never hangs or fails the request. The iOS analog
+/// of the OkHttp `WailoInterceptor`.
 ///
 /// URLProtocol instances are created by Foundation, so there is no constructor to hand a sink to —
 /// the sink is process-global (`Wailo.start` sets it), mirroring `WailoRuntime` on Android.
@@ -14,6 +34,7 @@ public final class WailoURLProtocol: URLProtocol {
     // Set once at startup by `Wailo.start`. Written before any capture begins and only read after,
     // so plain statics are safe here.
     nonisolated(unsafe) static var sink: CaptureSink?
+    nonisolated(unsafe) static var bodyFetcher: WailoBodyFetcher?
     nonisolated(unsafe) static var maxBodyBytes = 256 * 1024
 
     private lazy var session = URLSession(configuration: .ephemeral)
@@ -21,6 +42,9 @@ public final class WailoURLProtocol: URLProtocol {
     private var replayTask: URLSessionDataTask?
     private var startedAtEpochMs: Int64 = 0
     private var startNanos: UInt64 = 0
+    // Set when Foundation cancels this load, so a body-fetch that resolves afterward doesn't deliver to
+    // a torn-down protocol. Best-effort (read off the client queue), which is enough to avoid late work.
+    private var stopped = false
 
     override public class func canInit(with request: URLRequest) -> Bool {
         guard sink != nil else { return false }
@@ -37,6 +61,34 @@ public final class WailoURLProtocol: URLProtocol {
         startedAtEpochMs = Int64(Date().timeIntervalSince1970 * 1000)
         startNanos = DispatchTime.now().uptimeNanoseconds
 
+        // Map Local: match locally (metadata only), then fetch the body from the desktop and serve it.
+        // Any failure (no fetcher, not connected, timeout, rule gone) falls open to the real network.
+        if let url = request.url?.absoluteString,
+           let rule = WailoRuleStore.shared.match(url: url, method: request.httpMethod ?? "GET"),
+           let fetcher = WailoURLProtocol.bodyFetcher {
+            fetcher.fetchBody(ruleId: rule.id, url: url, method: request.httpMethod ?? "GET") { [weak self] mapped in
+                guard let self, !self.stopped else { return }
+                if let mapped {
+                    self.serveMapped(mapped)
+                } else {
+                    self.proceedToNetwork()
+                }
+            }
+            return
+        }
+
+        proceedToNetwork()
+    }
+
+    override public func stopLoading() {
+        stopped = true
+        replayTask?.cancel()
+        replayTask = nil
+    }
+
+    /// Runs the real request (the normal, unmapped path). Marks the replay so `canInit` skips it,
+    /// avoiding an infinite intercept loop, and forwards the result back to the caller via `finish`.
+    private func proceedToNetwork() {
         guard let replay = (request as NSURLRequest).mutableCopy() as? NSMutableURLRequest else {
             client?.urlProtocol(self, didFailWithError: URLError(.unknown))
             return
@@ -49,9 +101,26 @@ public final class WailoURLProtocol: URLProtocol {
         replayTask?.resume()
     }
 
-    override public func stopLoading() {
-        replayTask?.cancel()
-        replayTask = nil
+    /// Answers the request from a Map Local rule instead of the network: hands the desktop-supplied
+    /// status, headers, and body back to the caller, then mirrors the exchange into the sink flagged
+    /// `edited`. No replay task is created, so no request ever leaves the device.
+    private func serveMapped(_ mapped: WailoMappedResponse) {
+        let body = mapped.body
+        let status = mapped.code == 0 ? 200 : mapped.code
+        var headerFields: [String: String] = [:]
+        for header in mapped.headers { headerFields[header.name] = header.value }
+        let response = HTTPURLResponse(
+            url: request.url ?? URL(string: "about:blank")!,
+            statusCode: status,
+            httpVersion: "HTTP/1.1",
+            headerFields: headerFields
+        )
+        if let response {
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        }
+        client?.urlProtocol(self, didLoad: body)
+        client?.urlProtocolDidFinishLoading(self)
+        emit(response: response, body: body, error: nil, edited: true)
     }
 
     /// Forwards the real result back to the caller, then mirrors a copy into the sink.
@@ -71,7 +140,7 @@ public final class WailoURLProtocol: URLProtocol {
         emit(response: response, body: data, error: nil)
     }
 
-    private func emit(response: URLResponse?, body: Data?, error: Error?) {
+    private func emit(response: URLResponse?, body: Data?, error: Error?, edited: Bool = false) {
         guard let sink = WailoURLProtocol.sink else { return }
         let durationMs = Int64((DispatchTime.now().uptimeNanoseconds &- startNanos) / 1_000_000)
         let capturedRequest = captureRequest()
@@ -82,7 +151,8 @@ public final class WailoURLProtocol: URLProtocol {
             id: UUID().uuidString,
             started_at_epoch_ms: startedAtEpochMs,
             duration_ms: durationMs,
-            error: error.map { ($0 as NSError).localizedDescription } ?? ""
+            error: error.map { ($0 as NSError).localizedDescription } ?? "",
+            edited: edited
         ) {
             $0.request = capturedRequest
             $0.response = capturedResponse

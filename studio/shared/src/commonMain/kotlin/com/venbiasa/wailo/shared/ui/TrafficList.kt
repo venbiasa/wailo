@@ -71,6 +71,7 @@ internal fun TrafficList(
     bookmarks: List<String>,
     onAddBookmark: (String) -> Unit,
     onRemoveBookmark: (String) -> Unit,
+    onMapLocalFromUrl: (String) -> Unit,
 ) {
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
@@ -121,6 +122,7 @@ internal fun TrafficList(
                         bookmarks = bookmarks,
                         onAddBookmark = onAddBookmark,
                         onRemoveBookmark = onRemoveBookmark,
+                        onMapLocalFromUrl = onMapLocalFromUrl,
                     )
                     RowDivider()
                 }
@@ -206,6 +208,7 @@ private fun TrafficRow(
     bookmarks: List<String>,
     onAddBookmark: (String) -> Unit,
     onRemoveBookmark: (String) -> Unit,
+    onMapLocalFromUrl: (String) -> Unit,
 ) {
     val exchange = entry.exchange
     val request = exchange.request
@@ -215,19 +218,24 @@ private fun TrafficRow(
     val hasError = exchange.error.isNotEmpty()
     val kind = statusKind(code, hasError)
 
-    // Right-click toggles this row's host as a bookmark; a row whose URL has no parseable host gets no
-    // action, so its context menu is empty (a plain passthrough). The single "Bookmark" entry carries a
-    // tick once saved (and reserves the slot when not), so the label never shifts as it toggles.
-    val host = remember(request?.url) { requestHost(request?.url ?: "") }
+    // Right-click offers bookmarking this row's host (a tick once saved; the slot is reserved when not,
+    // so the label never shifts as it toggles) and mapping its URL to a local file. A row with no
+    // parseable host skips the bookmark entry; one with no URL skips Map Local — an all-empty list is a
+    // plain passthrough (no menu).
+    val url = request?.url ?: ""
+    val host = remember(url) { requestHost(url) }
     val bookmarked = host in bookmarks
-    val actions = if (host.isEmpty()) {
-        emptyList()
-    } else {
-        listOf(
-            ContextMenuAction("Bookmark", checked = bookmarked) {
-                if (bookmarked) onRemoveBookmark(host) else onAddBookmark(host)
-            },
-        )
+    val actions = buildList {
+        if (host.isNotEmpty()) {
+            add(
+                ContextMenuAction("Bookmark", checked = bookmarked) {
+                    if (bookmarked) onRemoveBookmark(host) else onAddBookmark(host)
+                },
+            )
+        }
+        if (url.isNotEmpty()) {
+            add(ContextMenuAction("Map Local\u2026") { onMapLocalFromUrl(url) })
+        }
     }
 
     ContextMenuHost(actions) {

@@ -2,43 +2,66 @@ import Foundation
 import WailoProtocol
 import Wire
 
-/// Streams captured exchanges to the desktop over a WebSocket. The Swift port of `core.WailoClient`:
+/// Streams captured exchanges to the desktop over a WebSocket, and drives the Map Local control channel
+/// back down the same socket (ADR-0019): it caches the desktop's match-metadata snapshots (dropping them
+/// whenever the connection is lost, so the desktop stays the single source of truth), acknowledges each
+/// snapshot's epoch so a lost push can be re-sent, and — as the `WailoBodyFetcher` — fetches a matched
+/// rule's body on demand rather than caching bodies. The Swift port of `core.WailoClient`:
 /// `onExchange` only enqueues; a background loop drains the buffer and reconnects whenever the
 /// desktop isn't up yet. On overflow the oldest is dropped so a slow/absent desktop never blocks or
 /// grows memory without bound in the host app.
 ///
+/// Reconnection is deliberately hard to wedge. `URLSessionWebSocketTask` does not guarantee that the
+/// `send`/`receive` completion handlers fire on every failure (notably a connection that never
+/// establishes, or a silently dropped idle link), so relying on them alone can leave the client
+/// "waiting" forever with no retry ever scheduled. To close that gap, every way a connection can end
+/// -- a failed `send`/`receive`, the `URLSessionTaskDelegate` completion, a server close, or a
+/// ping/pong timeout -- funnels through `handleDisconnect`, which always schedules the next attempt.
+///
 /// State is confined to a private serial queue, so the class is safe to call from any thread.
-final class WailoClient: CaptureSink, @unchecked Sendable {
+final class WailoClient: NSObject, CaptureSink, WailoBodyFetcher, URLSessionWebSocketDelegate, @unchecked Sendable {
 
     private let hello: Hello
     private let url: URL
     private let bufferCapacity: Int
     private let reconnectDelay: TimeInterval
+    private let pingInterval: TimeInterval
+    private let bodyTimeout: TimeInterval
 
     private let queue = DispatchQueue(label: "com.venbiasa.wailo.client")
-    private let session: URLSession = {
-        // The transport's own session must never be intercepted. ws:// is skipped by the protocol's
-        // scheme check anyway, but keep the interceptor off this config as defense in depth.
-        URLSession(configuration: .ephemeral)
-    }()
+    // Built on first connect so it can carry `self` as delegate; torn down in `stop()`. Its config
+    // strips the interceptor (see `transportConfiguration`) so the client can't capture its own socket.
+    private var session: URLSession?
 
     private var task: URLSessionWebSocketTask?
     private var buffer: [HttpExchange] = []
+    // In-flight Map Local body fetches, keyed by correlation id (queue-confined). Each completion is
+    // called exactly once — by the matching BodyResponse, a timeout, or a disconnect drain (fail-open).
+    private var pending: [String: (WailoMappedResponse?) -> Void] = [:]
     private var started = false
     private var connected = false
     private var sending = false
+    // Bumped on every connect and every disconnect. Callbacks capture the generation of the attempt
+    // that armed them and no-op once it moves, so a late/duplicate failure signal can't fire a second
+    // reconnect and each disconnect retries exactly once.
+    private var generation = 0
 
     init(
         hello: Hello,
         host: String,
         port: Int,
         bufferCapacity: Int = 512,
-        reconnectDelay: TimeInterval = 2.0
+        reconnectDelay: TimeInterval = 2.0,
+        pingInterval: TimeInterval = 20.0,
+        bodyTimeout: TimeInterval = 10.0
     ) {
         self.hello = hello
         self.url = URL(string: "ws://\(host):\(port)/")!
         self.bufferCapacity = bufferCapacity
         self.reconnectDelay = reconnectDelay
+        self.pingInterval = pingInterval
+        self.bodyTimeout = bodyTimeout
+        super.init()
     }
 
     func start() {
@@ -64,36 +87,149 @@ final class WailoClient: CaptureSink, @unchecked Sendable {
         queue.async {
             self.started = false
             self.connected = false
+            self.dropCachedRules()
+            self.drainPending()
+            self.generation += 1
             self.task?.cancel(with: .goingAway, reason: nil)
             self.task = nil
+            // Break the session's strong hold on this delegate; otherwise a replaced client (e.g. a
+            // second `Wailo.start`) would leak a still-live WebSocket.
+            self.session?.invalidateAndCancel()
+            self.session = nil
         }
     }
+
+    #if DEBUG
+    /// Test-support: stop, then block until the serial queue has drained the teardown. Since a
+    /// client's reconnect loop now clears the process-global `WailoRuleStore` on every disconnect, a
+    /// client left churning by one test could wipe rules a later test just set (the store is shared).
+    /// Draining guarantees all of this client's store mutations happen before the owning test returns;
+    /// after `stop()` no further clear is scheduled (reconnect no-ops once `started` is false).
+    func stopAndWaitForTeardown() {
+        stop()
+        queue.sync {}
+    }
+    #endif
 
     // MARK: - queue-confined
 
     private func connect() {
         guard started, task == nil else { return }
+        generation += 1
+        let gen = generation
+        let session = self.session ?? URLSession(configuration: transportConfiguration(), delegate: self, delegateQueue: nil)
+        self.session = session
         let task = session.webSocketTask(with: url)
         self.task = task
         task.resume()
-        listen(task)
-        // Open with Hello; success flips `connected` and drains whatever is buffered.
-        send(Envelope { $0.message = .hello(hello) }, isHandshake: true)
+        listen(task, gen)
+        // Open with Hello; success flips `connected`, starts the keepalive, and drains the buffer.
+        send(Envelope { $0.message = .hello(hello) }, isHandshake: true, gen: gen)
     }
 
-    /// Receives (and discards) frames purely to observe connection failure and trigger reconnect.
-    private func listen(_ task: URLSessionWebSocketTask) {
+    /// A config that can't intercept this transport's own socket. `.ephemeral` is one of the getters
+    /// `Wailo.start` swizzles to inject `WailoURLProtocol`, and a `ws://` upgrade reaches the
+    /// `URLProtocol` layer as `http(s)://` — so the scheme check can't skip it. Without stripping the
+    /// interceptor here, the client would capture and replay its own handshake, wedging reconnects.
+    private func transportConfiguration() -> URLSessionConfiguration {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = (configuration.protocolClasses ?? []).filter { $0 != WailoURLProtocol.self }
+        return configuration
+    }
+
+    /// Receives frames to observe connection failure (triggering reconnect) and to drive the Map Local
+    /// control channel (rule snapshots and body-fetch replies) the desktop sends back down this socket.
+    private func listen(_ task: URLSessionWebSocketTask, _ gen: Int) {
         task.receive { [weak self] result in
             guard let self else { return }
             self.queue.async {
-                guard task === self.task else { return }
+                guard gen == self.generation else { return }
                 switch result {
-                case .success:
-                    self.listen(task)
+                case let .success(message):
+                    self.handleIncoming(message)
+                    self.listen(task, gen)
                 case .failure:
-                    self.handleDisconnect()
+                    self.handleDisconnect(gen)
                 }
             }
+        }
+    }
+
+    /// Desktop -> device control frames: a RuleSet snapshot (apply wholesale, then ack its epoch so a
+    /// lost push self-repairs) or a BodyResponse (resolve the matching in-flight fetch). Anything else
+    /// is ignored. Runs on the queue via `listen`.
+    private func handleIncoming(_ message: URLSessionWebSocketTask.Message) {
+        guard case let .data(data) = message,
+              let envelope = try? ProtoDecoder().decode(Envelope.self, from: data)
+        else { return }
+        switch envelope.message {
+        case let .rule_set(ruleSet)?:
+            WailoRuleStore.shared.replace(ruleSet.rules)
+            sendControl(Envelope { $0.message = .rule_ack(RuleAck(epoch: ruleSet.epoch)) })
+        case let .body_response(response)?:
+            resolvePending(response)
+        default:
+            break
+        }
+    }
+
+    /// Drop the cached Map Local snapshot. The desktop is the source of truth for the rules, so once
+    /// the connection is gone there is no authority for them: matching must fall back to pass-through
+    /// until a reconnect re-pushes the current set. Idempotent — every failed reconnect lands here.
+    private func dropCachedRules() {
+        WailoRuleStore.shared.replace([])
+    }
+
+    // MARK: - Map Local body fetch (WailoBodyFetcher)
+
+    /// Ask the desktop for a matched rule's response. Fails open (completion(nil)) when the socket is
+    /// down, and arms a timeout so a lost/slow reply can't hang the request forever. Safe to call from
+    /// the interceptor on any thread; the pending map and send are marshaled onto the queue.
+    func fetchBody(ruleId: String, url: String, method: String, completion: @escaping (WailoMappedResponse?) -> Void) {
+        queue.async {
+            guard self.task != nil else { completion(nil); return }
+            let correlationId = UUID().uuidString
+            self.pending[correlationId] = completion
+            self.sendControl(Envelope {
+                $0.message = .body_request(BodyRequest(
+                    correlation_id: correlationId,
+                    rule_id: ruleId,
+                    url: url,
+                    method: method
+                ))
+            })
+            self.queue.asyncAfter(deadline: .now() + self.bodyTimeout) { [weak self] in
+                guard let self else { return }
+                if let timedOut = self.pending.removeValue(forKey: correlationId) { timedOut(nil) }
+            }
+        }
+    }
+
+    private func resolvePending(_ response: BodyResponse) {
+        guard let completion = pending.removeValue(forKey: response.correlation_id) else { return }
+        if response.found {
+            completion(WailoMappedResponse(code: Int(response.code), headers: response.headers, body: response.body))
+        } else {
+            completion(nil)
+        }
+    }
+
+    /// Fail open every in-flight fetch: with the socket gone there is no authority to answer, so each
+    /// matched request falls back to the real network instead of hanging until its timeout.
+    private func drainPending() {
+        let waiting = pending.values
+        pending.removeAll()
+        for completion in waiting { completion(nil) }
+    }
+
+    /// Send a control frame (ack / body request) without touching the exchange pump's send state. A
+    /// send failure funnels into the same reconnect path as everything else.
+    private func sendControl(_ envelope: Envelope) {
+        guard let task, let data = try? ProtoEncoder().encode(envelope) else { return }
+        let gen = generation
+        task.send(.data(data)) { [weak self] error in
+            guard let self, error != nil else { return }
+            self.queue.async { if gen == self.generation { self.handleDisconnect(gen) } }
         }
     }
 
@@ -101,10 +237,10 @@ final class WailoClient: CaptureSink, @unchecked Sendable {
         guard connected, !sending, task != nil, !buffer.isEmpty else { return }
         sending = true
         let next = buffer.removeFirst()
-        send(Envelope { $0.message = .exchange(next) }, isHandshake: false)
+        send(Envelope { $0.message = .exchange(next) }, isHandshake: false, gen: generation)
     }
 
-    private func send(_ envelope: Envelope, isHandshake: Bool) {
+    private func send(_ envelope: Envelope, isHandshake: Bool, gen: Int) {
         guard let task else { return }
         let data: Data
         do {
@@ -116,13 +252,14 @@ final class WailoClient: CaptureSink, @unchecked Sendable {
         task.send(.data(data)) { [weak self] error in
             guard let self else { return }
             self.queue.async {
-                guard task === self.task else { return }
+                guard gen == self.generation else { return }
                 if error != nil {
-                    self.handleDisconnect()
+                    self.handleDisconnect(gen)
                     return
                 }
                 if isHandshake {
                     self.connected = true
+                    self.schedulePing(gen)
                 } else {
                     self.sending = false
                 }
@@ -131,15 +268,66 @@ final class WailoClient: CaptureSink, @unchecked Sendable {
         }
     }
 
-    private func handleDisconnect() {
+    /// Active liveness probe. A silently dropped idle link (no FIN/RST) never fails `receive`, so
+    /// without this the socket could sit "connected" forever; a failed ping forces a reconnect.
+    private func schedulePing(_ gen: Int) {
+        queue.asyncAfter(deadline: .now() + pingInterval) { [weak self] in
+            guard let self, gen == self.generation, let task = self.task else { return }
+            task.sendPing { [weak self] error in
+                guard let self else { return }
+                self.queue.async {
+                    guard gen == self.generation else { return }
+                    if error != nil {
+                        self.handleDisconnect(gen)
+                    } else {
+                        self.schedulePing(gen)
+                    }
+                }
+            }
+        }
+    }
+
+    private func handleDisconnect(_ gen: Int) {
+        // Only the first failure signal for this attempt acts; bumping the generation makes every
+        // other in-flight callback (another send/receive, the delegate, the pinger) a no-op, so
+        // exactly one reconnect is scheduled.
+        guard gen == generation else { return }
+        generation += 1
         connected = false
         sending = false
+        dropCachedRules()
+        drainPending()
         task?.cancel(with: .abnormalClosure, reason: nil)
         task = nil
         guard started else { return }
         // Desktop unreachable; back off and retry. Buffered exchanges wait (drop-oldest on overflow).
         queue.asyncAfter(deadline: .now() + reconnectDelay) { [weak self] in
             self?.connect()
+        }
+    }
+
+    // MARK: - URLSessionTaskDelegate / URLSessionWebSocketDelegate
+
+    /// The authoritative "task finished" signal, and the reason reconnect can't wedge: it fires even
+    /// when the `send`/`receive` handlers don't (e.g. a connection that is refused or never
+    /// establishes), so a failed attempt still schedules a retry.
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        queue.async {
+            guard task === self.task else { return }
+            self.handleDisconnect(self.generation)
+        }
+    }
+
+    /// A clean server-side close (e.g. the desktop app quitting) also drives a reconnect.
+    func urlSession(
+        _ session: URLSession,
+        webSocketTask: URLSessionWebSocketTask,
+        didCloseWith closeCode: URLSessionWebSocketTask.CloseCode,
+        reason: Data?
+    ) {
+        queue.async {
+            guard webSocketTask === self.task else { return }
+            self.handleDisconnect(self.generation)
         }
     }
 }
