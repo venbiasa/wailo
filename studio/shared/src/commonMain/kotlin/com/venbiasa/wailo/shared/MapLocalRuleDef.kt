@@ -3,36 +3,41 @@ package com.venbiasa.wailo.shared
 import kotlin.random.Random
 
 /**
+ * One response header a Map Local rule serves back. A named type (not a raw pair) so the editor and
+ * store read clearly; the host materializes these into the wire `Header`s at serve time.
+ */
+data class MapLocalHeader(val name: String, val value: String)
+
+/**
  * A Map Local rule as the desktop authors it: match a request, answer it with the contents of a
  * local file. This is the UI/host-facing definition — it holds the file *path*, not its bytes. The
  * host reads the file and compiles this into the protocol `MapLocalRule` (bytes inlined) before
  * pushing it to devices, so `shared` never touches the filesystem or the wire types.
  *
  * [urlPattern] is a wildcard match against the full request URL (`*` matches any run of characters).
- * [methods] restricts the rule to those HTTP methods; empty means any. [statusCode] and
- * [contentType] shape the synthesized response; a blank [contentType] is inferred from the file
- * extension by the host.
+ * [method] restricts the rule to that single HTTP method; blank means any. [statusCode] and [headers]
+ * shape the synthesized response; [headers] carries Content-Type (there is no separate field for it) —
+ * if none is set the host infers Content-Type from the file extension, and it always sets Content-Length
+ * from the served bytes, so a hand-entered length is ignored.
+ *
+ * A rule serves its body one of two ways ([inline]): when false, from the user's own file at
+ * [filePath] (read fresh per request, so external edits are picked up); when true, from a body
+ * authored in the desktop's editor, which the host persists to an app-managed file keyed by [id].
+ * Either way the served bytes come from a file on disk at request time (ADR-0019 unchanged); the flag
+ * only tells the UI which surface to show and the host where the bytes live.
  */
 data class MapLocalRuleDef(
     val id: String,
     val enabled: Boolean = true,
     val urlPattern: String = "",
-    val methods: List<String> = emptyList(),
+    val method: String = "",
     val filePath: String = "",
     val statusCode: Int = 200,
-    val contentType: String = "",
+    val headers: List<MapLocalHeader> = emptyList(),
+    val inline: Boolean = false,
 ) {
     companion object {
         /** A stable, unique id for a freshly authored rule (no java.* so commonMain stays portable). */
         fun newId(): String = "rule-" + Random.nextLong().toULong().toString(16).padStart(16, '0')
-
-        /**
-         * A sensible starting pattern when mapping a specific captured URL: drop the query string and
-         * append `*`, so the rule matches the endpoint regardless of its (usually varying) query.
-         */
-        fun patternFor(url: String): String {
-            val base = url.substringBefore('?').ifBlank { url }
-            return if (base.endsWith('*')) base else "$base*"
-        }
     }
 }

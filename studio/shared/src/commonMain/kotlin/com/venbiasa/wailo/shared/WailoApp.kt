@@ -21,8 +21,10 @@ import com.venbiasa.wailo.shared.ui.WailoViewer
  * traffic is being recorded, and [onToggleCapture]/[onClear] drive the top bar (the engine lives in the
  * host, not here). [bookmarks] are the persisted, host-owned bookmarked hosts; [onAddBookmark]/
  * [onRemoveBookmark] let the viewer mutate that set (the host owns its persistence, ADR-0013).
- * [onOpenMapLocal] opens the Map Local rules window from the nav rail; [onMapLocalFromUrl] does the
- * same seeded from a traffic row's URL. The host owns that window and the rules' persistence.
+ * [mapLocalRules] are the host-owned, persisted Map Local rules the right-side tool panel renders
+ * (ADR-0021); [onUpsertRule]/[onRemoveRule] mutate them, and [onLoadMapLocalBody]/[onSaveMapLocalBody]
+ * read/persist a rule's authored body (the host owns all file IO). The panel's open state and any
+ * row-seeded draft are the viewer's own transient state.
  */
 @Composable
 fun WailoApp(
@@ -38,8 +40,11 @@ fun WailoApp(
     bookmarks: List<String> = emptyList(),
     onAddBookmark: (String) -> Unit = {},
     onRemoveBookmark: (String) -> Unit = {},
-    onOpenMapLocal: () -> Unit = {},
-    onMapLocalFromUrl: (String) -> Unit = {},
+    mapLocalRules: List<MapLocalRuleDef> = emptyList(),
+    onUpsertRule: (MapLocalRuleDef) -> Unit = {},
+    onRemoveRule: (String) -> Unit = {},
+    onLoadMapLocalBody: suspend (MapLocalRuleDef) -> String = { "" },
+    onSaveMapLocalBody: suspend (MapLocalRuleDef, String) -> Unit = { _, _ -> },
 ) {
     WailoTheme(darkTheme = darkTheme) {
         val density = LocalDensity.current
@@ -58,8 +63,11 @@ fun WailoApp(
                 bookmarks = bookmarks,
                 onAddBookmark = onAddBookmark,
                 onRemoveBookmark = onRemoveBookmark,
-                onOpenMapLocal = onOpenMapLocal,
-                onMapLocalFromUrl = onMapLocalFromUrl,
+                mapLocalRules = mapLocalRules,
+                onUpsertRule = onUpsertRule,
+                onRemoveRule = onRemoveRule,
+                onLoadMapLocalBody = onLoadMapLocalBody,
+                onSaveMapLocalBody = onSaveMapLocalBody,
             )
         }
     }

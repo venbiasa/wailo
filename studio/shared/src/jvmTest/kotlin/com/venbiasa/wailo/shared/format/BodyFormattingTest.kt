@@ -234,4 +234,26 @@ class BodyFormattingTest {
         assertNull(parseJson("""{"a":1}trailing"""))
         assertNull(parseJson(""))
     }
+
+    @Test
+    fun jsonErrorMessageAcceptsWellFormedAndBlank() {
+        // The editor treats a blank body as "no error" (an empty body is allowed).
+        assertNull(jsonErrorMessage(""))
+        assertNull(jsonErrorMessage("   \n  "))
+        assertNull(jsonErrorMessage("""{"a":1,"b":[2,3]}"""))
+        assertNull(jsonErrorMessage("[]"))
+    }
+
+    @Test
+    fun jsonErrorMessageReportsFailureWithLineAndColumn() {
+        val missingValue = jsonErrorMessage("""{"a":}""")
+        assertTrue(missingValue != null && missingValue.contains("line 1"), "expected a line reference: $missingValue")
+
+        // The failure position tracks newlines, so a later line is reported as such.
+        val multiline = jsonErrorMessage("{\n  \"a\": 1,\n  \"b\": ,\n}")
+        assertTrue(multiline != null && multiline.contains("line 3"), "expected line 3: $multiline")
+
+        // Extra content after a complete value is flagged rather than silently accepted.
+        assertTrue(jsonErrorMessage("""{"a":1} garbage""") != null)
+    }
 }

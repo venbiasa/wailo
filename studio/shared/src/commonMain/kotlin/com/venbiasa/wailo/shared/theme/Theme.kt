@@ -29,6 +29,8 @@ data class WailoColors(
 private val LightColorScheme = lightColorScheme(
     primary = LightAccent,
     onPrimary = LightOnAccent,
+    primaryContainer = LightPrimaryContainer,
+    onPrimaryContainer = LightOnPrimaryContainer,
     background = LightBackground,
     onBackground = LightOnBackground,
     surface = LightSurface,
@@ -46,6 +48,8 @@ private val LightColorScheme = lightColorScheme(
 private val DarkColorScheme = darkColorScheme(
     primary = DarkAccent,
     onPrimary = DarkOnAccent,
+    primaryContainer = DarkPrimaryContainer,
+    onPrimaryContainer = DarkOnPrimaryContainer,
     background = DarkBackground,
     onBackground = DarkOnBackground,
     surface = DarkSurface,

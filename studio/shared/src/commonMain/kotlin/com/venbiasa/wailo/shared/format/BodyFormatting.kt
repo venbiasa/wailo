@@ -264,10 +264,47 @@ internal fun parseJson(text: String): JsonNode? {
     }
 }
 
+/**
+ * Validates [text] as JSON for the body editor: null when it's well-formed (or blank — an empty body
+ * is allowed), otherwise a short message with the 1-based line/column of the failure. Reuses the same
+ * hand-rolled parser as [parseJson] so the editor's verdict matches how a body is actually parsed.
+ */
+internal fun jsonErrorMessage(text: String): String? {
+    if (text.isBlank()) return null
+    val parser = JsonParser(text)
+    return try {
+        parser.skipWhitespace()
+        parser.parseValue()
+        parser.skipWhitespace()
+        if (parser.atEnd()) null else "Unexpected trailing content at ${lineCol(text, parser.pos())}"
+    } catch (_: JsonParseException) {
+        "Invalid JSON at ${lineCol(text, parser.pos())}"
+    }
+}
+
+// 1-based line/column for a character offset, for the editor's validation hint.
+private fun lineCol(text: String, index: Int): String {
+    val end = index.coerceIn(0, text.length)
+    var line = 1
+    var col = 1
+    for (k in 0 until end) {
+        if (text[k] == '\n') {
+            line++
+            col = 1
+        } else {
+            col++
+        }
+    }
+    return "line $line, column $col"
+}
+
 private class JsonParseException : Exception()
 
 private class JsonParser(private val s: String) {
     private var i = 0
+
+    // The scan position, exposed so the editor's validation can report where parsing failed.
+    fun pos(): Int = i
 
     fun atEnd(): Boolean = i >= s.length
 

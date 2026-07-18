@@ -1,7 +1,6 @@
 package com.venbiasa.wailo.shared.ui
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.draggable
 import androidx.compose.foundation.gestures.rememberDraggableState
@@ -113,12 +112,7 @@ private fun DetailHeader(exchange: HttpExchange, onClose: () -> Unit) {
                 overflow = TextOverflow.Ellipsis,
             )
         }
-        Text(
-            "✕",
-            Modifier.clickable(onClick = onClose).padding(4.dp),
-            style = MaterialTheme.typography.titleSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
+        CloseButton(onClose, contentDescription = "Close detail")
     }
 }
 

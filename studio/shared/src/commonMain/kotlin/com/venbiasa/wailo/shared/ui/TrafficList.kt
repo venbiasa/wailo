@@ -3,7 +3,9 @@ package com.venbiasa.wailo.shared.ui
 import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.focusable
 import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.foundation.gestures.animateScrollBy
 import androidx.compose.foundation.gestures.draggable
 import androidx.compose.foundation.gestures.rememberDraggableState
 import androidx.compose.foundation.horizontalScroll
@@ -19,6 +21,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
@@ -38,14 +41,25 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshots.SnapshotStateMap
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import com.venbiasa.wailo.protocol.Header
 import com.venbiasa.wailo.shared.FlowEntry
+import com.venbiasa.wailo.shared.format.BodyContent
+import com.venbiasa.wailo.shared.format.bodyContent
 import com.venbiasa.wailo.shared.format.codeText
+import com.venbiasa.wailo.shared.format.contentType
 import com.venbiasa.wailo.shared.format.formatBytes
 import com.venbiasa.wailo.shared.format.formatClockTime
 import com.venbiasa.wailo.shared.format.requestHost
@@ -71,7 +85,7 @@ internal fun TrafficList(
     bookmarks: List<String>,
     onAddBookmark: (String) -> Unit,
     onRemoveBookmark: (String) -> Unit,
-    onMapLocalFromUrl: (String) -> Unit,
+    onMapLocalFromUrl: (String, String, List<Header>, String?) -> Unit,
 ) {
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
@@ -80,6 +94,7 @@ internal fun TrafficList(
     val hScroll = rememberScrollState()
     val widths = rememberColumnWidths()
     val density = LocalDensity.current
+    val focusRequester = remember { FocusRequester() }
 
     // "At the bottom" means the last row is visible; it drives whether we keep tailing new traffic.
     val atBottom by remember {
@@ -96,7 +111,40 @@ internal fun TrafficList(
         if (autoFollow && entries.isNotEmpty()) listState.scrollToItem(entries.lastIndex)
     }
 
-    Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surface)) {
+    // Arrow-key navigation: Up/Down move the selection to the adjacent row and keep it on-screen.
+    // With nothing selected yet, Down lands on the first row and Up on the last.
+    fun moveSelection(delta: Int) {
+        if (entries.isEmpty()) return
+        val current = entries.indexOfFirst { it.id == selectedId }
+        val target = when {
+            current < 0 -> if (delta > 0) 0 else entries.lastIndex
+            else -> (current + delta).coerceIn(0, entries.lastIndex)
+        }
+        if (target == current) return
+        onSelect(entries[target].id)
+        scope.launch { listState.ensureItemVisible(target) }
+    }
+
+    Box(
+        Modifier.fillMaxSize()
+            .background(MaterialTheme.colorScheme.surface)
+            .focusRequester(focusRequester)
+            .onPreviewKeyEvent { event ->
+                if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                when (event.key) {
+                    Key.DirectionDown -> {
+                        moveSelection(1)
+                        true
+                    }
+                    Key.DirectionUp -> {
+                        moveSelection(-1)
+                        true
+                    }
+                    else -> false
+                }
+            }
+            .focusable(),
+    ) {
         // The header always shows, even before any traffic arrives, so the table reads as a table
         // rather than an empty placeholder.
         Column(Modifier.fillMaxSize()) {
@@ -117,7 +165,11 @@ internal fun TrafficList(
                         widths = widths,
                         hScroll = hScroll,
                         selected = entry.id == selectedId,
-                        onClick = { onSelect(entry.id) },
+                        onClick = {
+                            onSelect(entry.id)
+                            // Clicking a row hands keyboard focus to the list so Up/Down can take over.
+                            focusRequester.requestFocus()
+                        },
                         zoneOffsetMillis = zoneOffsetMillis,
                         bookmarks = bookmarks,
                         onAddBookmark = onAddBookmark,
@@ -208,7 +260,7 @@ private fun TrafficRow(
     bookmarks: List<String>,
     onAddBookmark: (String) -> Unit,
     onRemoveBookmark: (String) -> Unit,
-    onMapLocalFromUrl: (String) -> Unit,
+    onMapLocalFromUrl: (String, String, List<Header>, String?) -> Unit,
 ) {
     val exchange = entry.exchange
     val request = exchange.request
@@ -234,7 +286,27 @@ private fun TrafficRow(
             )
         }
         if (url.isNotEmpty()) {
-            add(ContextMenuAction("Map Local\u2026") { onMapLocalFromUrl(url) })
+            // Seed a new rule from this row: the exact URL and method, this response's captured headers,
+            // plus its body (decoded/pretty-printed when textual — i.e. JSON — and capped so a giant
+            // payload doesn't stall the click) so it opens ready to map-and-tweak. Computed on select,
+            // not per row, to keep the list cheap.
+            add(
+                ContextMenuAction("Map Local\u2026") {
+                    val responseContentType = response?.headers?.contentType()
+                    val body = response?.body
+                    val seed = if (body != null && body.size > 0) {
+                        (bodyContent(body, responseContentType, maxTextChars = 5_000_000) as? BodyContent.Text)?.text
+                    } else {
+                        null
+                    }
+                    onMapLocalFromUrl(
+                        url,
+                        request?.method.orEmpty().trim().uppercase(),
+                        response?.headers ?: emptyList(),
+                        seed,
+                    )
+                },
+            )
         }
     }
 
@@ -313,15 +385,14 @@ private fun CellText(text: String, style: TextStyle, color: Color) {
 
 private fun durationText(durationMs: Long): String = if (durationMs > 0) "$durationMs ms" else "—"
 
-// Colors track the theme's accent rather than the FAB default (primaryContainer), which this grayscale
-// scheme never defines and would otherwise fall back to the Material baseline purple.
+// Uses the FAB's default colors (primaryContainer/onPrimaryContainer), which tokens.json themes to the
+// accent — so the button tracks the brand knob without a per-call-site override. Only the elevation is
+// customized below.
 @Composable
 private fun JumpToLatest(modifier: Modifier, onClick: () -> Unit) {
     SmallFloatingActionButton(
         onClick = onClick,
         modifier = modifier,
-        containerColor = MaterialTheme.colorScheme.primary,
-        contentColor = MaterialTheme.colorScheme.onPrimary,
         // The default 6.dp shadow reads as too heavy floating over the table; keep it subtle.
         elevation = FloatingActionButtonDefaults.elevation(
             defaultElevation = 2.dp,
@@ -334,5 +405,22 @@ private fun JumpToLatest(modifier: Modifier, onClick: () -> Unit) {
             imageVector = vectorResource(Res.drawable.ic_arrow_downward),
             contentDescription = "Jump to latest",
         )
+    }
+}
+
+// Scrolls just enough to reveal [index] when it sits past either viewport edge; a fully visible row
+// stays put so keyboard navigation doesn't jolt the list on every keystroke.
+private suspend fun LazyListState.ensureItemVisible(index: Int) {
+    val info = layoutInfo
+    val item = info.visibleItemsInfo.firstOrNull { it.index == index }
+    if (item == null) {
+        animateScrollToItem(index)
+        return
+    }
+    val above = item.offset - info.viewportStartOffset
+    val below = (item.offset + item.size) - info.viewportEndOffset
+    when {
+        above < 0 -> animateScrollBy(above.toFloat())
+        below > 0 -> animateScrollBy(below.toFloat())
     }
 }

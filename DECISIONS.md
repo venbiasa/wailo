@@ -594,3 +594,239 @@ Append-only. Newest at the bottom. Each entry: context, decision, consequences.
     wire contract (invariant #4), never by shared device code.
   - Desync is now both self-repairing (ack + retry + reconnect) and observable (the desktop knows each
     device's `ackedEpoch` vs the current `epoch`), enabling a future "rules out of sync" indicator.
+
+## ADR-0020: Map Local response-body editor — inline app-managed bodies + a Swing code editor behind a portable seam
+
+- Status: Accepted; building. Extends Map Local (ADR-0019) with an in-desktop body editor; adds one
+  desktop-only dependency (RSyntaxTextArea) and a new `shared` expect/actual seam.
+- Context: Map Local rules could only *reference a file on disk* — there was no way to author or tweak
+  a response body inside the desktop. The ask is an editor for JSON responses that stays smooth on large
+  payloads (target ~10 MB). Two forces shaped the design: (1) ADR-0019 makes the desktop serve a matched
+  body by reading a *file fresh from disk at request time* (device holds no bodies, engine stays headless);
+  (2) Compose's own text field (`BasicTextField`) re-lays-out the entire string on every edit — O(n) per
+  keystroke — so it stalls badly past a few hundred KB, i.e. it cannot meet the performance requirement.
+  A separate concern was raised: how does this scale to a future *mobile* preview/editor?
+- Key distinction (preview vs editor): the read-only JSON **preview** (`BodyPreview`) is already a
+  virtualized `LazyColumn` of lines in `commonMain`, so it composes only the visible rows, stays cheap on
+  huge JSON, and *already ports to Android/iOS unchanged*. Only huge-text **editing** needs a non-Compose
+  engine (Compose has no viewport-virtualized editable text). So mobile-preview is not blocked by the
+  desktop editor's technology.
+- Decision:
+  - **Dual body source, still file-backed** (ADR-0019 unchanged). `MapLocalRuleDef` gains an `inline` flag:
+    a rule serves either from the user's file (`filePath`, read fresh) or from an inline body the desktop
+    editor authors. An inline body is persisted as an app-managed file (`<app-data>/Wailo/maplocal-bodies/
+    <ruleId>.json`), and `serveBody` reads *that path* fresh per request — so the device still caches only
+    match-metadata, the desktop still reads bytes at request time, and the engine never learns paths. The
+    protocol, engine, and device SDKs are untouched.
+  - **Editor = RSyntaxTextArea via Compose Desktop `SwingPanel`**, behind a portable `CodeEditor`
+    expect/actual seam in `shared` whose signature carries no Swing types (text flows through a
+    `CodeEditorState` holder; the big document lives in the widget, never in Compose snapshot state, so a
+    keystroke never recomposes/re-copies megabytes). RSTA tokenizes and renders by viewport, so it stays
+    smooth into the multi-MB range; code folding (a whole-document parse) is disabled above ~1 MB. It is
+    themed from the design tokens (`colorScheme` + `WailoColors`, re-applied in `update`) so it honors
+    light/dark (ADR-0016), and its font rides the density `fontScale` so Cmd +/- scales it.
+  - **Format + validate reuse the existing hand-rolled JSON** (`prettyPrintJson`/`parseJson` +
+    `jsonErrorMessage`), keeping the module's dependency-light JSON stance; validity is a debounced live
+    status line (read off `snapshotFlow`, never per keystroke).
+  - **Seed-from-capture**: the traffic-row "Map Local…" action now carries the captured response body
+    (decoded/pretty-printed when textual, size-capped) to prefill a new inline rule's editor.
+  - **New dependency**: `com.fifesoft:rsyntaxtextarea` (BSD-3), in the `studio` catalog and only in
+    `shared`'s `jvmMain` — recorded here per the "a new dependency needs an ADR + catalog entry" convention.
+- Portability / how mobile scales later: the `CodeEditor` seam is the firewall. The read-only preview
+  stays Compose-native (already mobile-ready); the *editor* is per-platform behind the seam — desktop is
+  RSTA now, and a future mobile `actual` (a native editor, or a WebView + CodeMirror for true write-once)
+  can back the identical contract with **zero call-site churn**. This mirrors the device-SDK philosophy
+  (ADR-0010/0011): single-source the contract, implement per platform.
+- Alternatives considered:
+  - **Compose-native `BasicTextField` (with a size cap)**: not a real huge-text editor (O(n)/keystroke);
+    rejected because it defeats the stated performance goal.
+  - **A Compose-native line-virtualized editor now** (focused-line editable + `LazyColumn`): rendering is
+    easy, but a genuine editable one is effectively a text-editor engine — cross-line selection over
+    recycled items, a single logical caret, IME correctness (the hard part, and exactly what mobile needs),
+    and the minified single-giant-line case. Deferred behind the seam rather than gambling the ship-now
+    feature on it.
+  - **WebView + CodeMirror/Monaco, write-once across desktop + mobile** (editor + preview + scripting):
+    the most future-proof, but a heavy desktop runtime (JCEF/KCEF ~150 MB) + JS-bridge/asset work; it is
+    its own milestone/ADR to adopt if cross-platform *editing* becomes a committed requirement. The seam
+    keeps this open.
+  - **Store inline bodies in the rule/prefs**: rejected — prefs is for small values, it would hold bodies
+    resident and re-serialize them on every edit, and it fights ADR-0019's read-fresh model. App-managed
+    files keep `serveBody` a path read.
+- Consequences:
+  - Desktop-only Swing interop now lives in `shared/jvmMain` behind the expect/actual, with its known
+    caveats (a heavyweight component's z-order over Compose popups; theming/scale wired by hand). Acceptable
+    for a full-pane editor in its own window.
+  - A new app-managed body directory with a lifecycle: written on inline save, deleted on rule delete or a
+    switch back to a file source. The `MapLocalStore` prefs line grows 7→8 fields; legacy 7-field lines
+    still load (as file-backed).
+  - Verified by machine: `:shared:jvmTest` (adds `jsonErrorMessage` cases) + the `studio` build. Live
+    editing, large-JSON smoothness, seed-from-capture, and light/dark parity are manual smoke checks under
+    the repo's two-tier verification.
+
+## ADR-0021: Map Local is a docked right-side tool panel, single-method, seeded exactly from a row
+
+- Status: Accepted; building. Refines Map Local's desktop UX (ADR-0019/0020): it supersedes the
+  "separate resizable window" placement those ADRs assumed, and narrows the method match to one HTTP
+  method. Rewrites ADR-0020's "editor in its own window" consequence.
+- Context: Map Local opened in its **own OS window** (a locked UI decision at the time), launched from a
+  left nav-rail item. Three rough edges drove this revision: (1) a separate window is heavier than the
+  feature warrants and detaches the rules from the traffic you're mapping — the reference tools dock it beside the traffic; (2) the rule matched a *comma-separated list* of methods via a
+  free-text field, which is fiddly and overkill — a mapped endpoint is almost always one method; (3) the
+  per-row "Map Local…" only pre-filled a *wildcard* URL pattern and no method, so the user still had to
+  retype the very values they right-clicked on.
+- Decision:
+  - **Placement = an in-window right tool panel**, the Android Studio tool-window model: a thin right
+    **tool rail** (icon-only) toggles a **docked, resizable** panel between the content and the rail. Map
+    Local moves off the left nav rail onto the right rail — and with Map Local gone, Traffic was the rail's
+    only view, so the **left nav rail is dropped entirely** and the traffic list now spans to the window's
+    left edge. No separate window. The panel's open state, the current row-seeded draft, and its width are
+    the viewer's own **transient view state**; the host still owns the rules + persistence (`shared` stays
+    stateless, ADR-0013).
+  - **One method, via a dropdown.** `MapLocalRuleDef.methods: List<String>` becomes `method: String`
+    (blank = any); the editor picks a single HTTP method from a dropdown (Any/GET/POST/PUT/PATCH/DELETE/
+    HEAD/OPTIONS). The wire type keeps its `methods` list — `compileRules` maps a blank to `[]` (any) and
+    a concrete method to a singleton — so the protocol/engine/device matching are untouched. The
+    `MapLocalStore` line keeps its 8 fields; a legacy multi-method field collapses to its first entry.
+  - **Seed a row exactly.** The traffic-row "Map Local…" now pre-fills the **exact** captured URL (not a
+    wildcarded pattern — `patternFor` is dropped) and the **exact** method, alongside the existing JSON
+    body seed. Map Local stays JSON-focused: the body seed is the decoded/pretty-printed response when
+    textual, a row seed also carries the captured response's Content-Type (falling back to
+    `application/json`), and new rules default to a `Content-Type: application/json` header + the inline
+    editor.
+  - **Body & Headers are tabs; Content-Type is just a header.** The editor splits the response into a
+    **Body | Headers** tab pair under the compact rule fields (URL/method/status/enabled), so each gets
+    the narrow panel's full height. A single raw status+headers+body buffer was rejected: it breaks the
+    JSON editor's Format/validation, which assume the buffer is only the body keep Map
+    Local structured too — raw editing is their *breakpoint* tool, a different feature). Response
+    **headers** are now editable, and that is a **desktop-only** change: the served `BodyResponse` already
+    carried `repeated Header` end-to-end (engine `ServedBody`, iOS `WailoMappedResponse` — it is how
+    Content-Type was already applied), so no protocol/engine/SDK edit was needed. The old dedicated
+    Content-Type field folds into the headers table (a new/seeded rule starts with a `Content-Type` row);
+    the host still owns `Content-Length` — it recomputes it from the bytes and drops any hand-entered one —
+    and falls back to the extension-guessed Content-Type when the rule sets none.
+  - **Z-order via interop blending.** The method dropdown is a Compose popup that can overlap the inline
+    editor's embedded Swing panel (the z-order caveat ADR-0020 flagged). The host sets
+    `compose.interop.blending=true` before any Compose code so popups composite above the Swing panel
+    (effective on macOS/Metal + Windows/Direct3D; a harmless no-op elsewhere).
+- Alternatives considered:
+  - **Keep the separate window**: rejected — heavier than the feature and detached from the traffic.
+  - **Bottom panel (like the detail panel)** or a **left panel**: rejected — the bottom is the
+    request/response detail's home, and Map Local is a right-hand *tool* in the reference-tool mental
+    model; the right rail also leaves room for future tools.
+  - **`compose.layers.type=WINDOW`** (popups as separate OS windows) instead of blending: also fixes the
+    z-order and avoids the macOS event-order caveat, but changes *every* popup app-wide (context menus,
+    tooltips) — a larger blast radius than compositing just the Swing panel. Revisit if blending's macOS
+    event caveat bites the dropdown in practice.
+  - **Method chips / free-text**: chips avoid the popup entirely but aren't the requested dropdown;
+    free-text multi-method is the fiddly status quo being removed.
+- Consequences:
+  - `WailoApp`/`WailoViewer` gain the Map Local rules + persistence callbacks (was two window-launch
+    lambdas); the viewer renders the panel inline and owns its open/draft/width state. `Main.kt` drops the
+    second `Window` and its theme/scale wrapper (the panel is a child of the main composition, so it
+    inherits both).
+  - The inline body editor's Swing panel now lives in the **main** window, not a dedicated one — so
+    ADR-0020's "acceptable in its own window" no longer holds; interop blending is what keeps popups
+    usable over it. This is an experimental flag; light/dark, the dropdown-over-editor interaction, panel
+    resize, and row-seed-exactness are manual smoke checks under the repo's two-tier verification.
+  - The editor **fills** the payload area and is never wrapped in a Compose `verticalScroll`: a
+    heavyweight `SwingPanel` visibly flickers as an enclosing scroll repositions it each frame. So the
+    compact rule fields stay pinned above the tabs, and the editor (like the Headers tab) scrolls its own
+    content instead — RSTA's native scrollbars for the body, a Compose scroll for the all-Compose Headers
+    table. The editor grows with the panel/window rather than offering a drag-to-resize handle.
+  - **Body source is now always inline**, reversing the ADR-0019/0020 dual (inline vs. user-chosen file):
+    the "Local file" radio + native file picker are dropped, so every rule authors its body here and the
+    host persists it to the app-managed store. `MapLocalRuleDef` keeps `inline`/`filePath` (and the rule
+    row still labels a legacy file-backed rule) so old prefs load unchanged, but the editor always writes
+    `inline = true`, and the `onPickMapLocalFile`/`chooseLocalFile` chain (down through `WailoApp`/
+    `WailoViewer`) is removed. Rationale: the file source added a mode toggle and a second IO path for a
+    payload the user almost always edits by hand anyway.
+  - The live JSON **verdict moved into the footer**, sharing the line with Cancel/Save instead of a
+    dedicated status row above the editor — reclaiming vertical space for the editor — and it now wraps
+    (multiline) rather than truncating so a parse error stays fully readable.
+  - Added one mono vector drawable (`ic_arrow_drop_down`) for the dropdown affordance (tint-driven,
+    light/dark-safe per ADR-0016).
+  - The left nav rail (`NavRail`) is removed: once Map Local moved to the right rail its only entry was
+    the always-selected Traffic view, so a whole rail (plus its collapse toggle) earned no keep. The
+    viewer drops the rail, its divider, and the `railCollapsed` state; `NavRail.kt` is deleted and the
+    traffic list is now the left-most pane.
+  - `MapLocalRuleDef.contentType: String` becomes `headers: List<MapLocalHeader>`. The `MapLocalStore`
+    line reuses the old content-type slot for a headers blob (`enc(name):enc(value)` joined by `,`, every
+    token Base64 so a value can't collide with the `|`/line delimiters) and migrates a legacy lone
+    content-type to a `Content-Type` header; the field count is unchanged, so old prefs still load.
+  - Hosting the inline editor behind a tab means its Swing panel unmounts when Headers shows, so
+    `CodeEditorState` snapshots the live text into its seed on dispose (and reseeds on remount) — else a
+    tab switch, or a Save from the Headers tab, would read the stale initial text.
+
+## ADR-0022: Map Local panel navigates via Navigation 3; Add is a FAB; the nav layer is multiplatform-ready
+
+- Status: Accepted; building. Extends ADR-0021's docked tool panel with an explicit page stack and
+  reworks two of its affordances (Add, Back). Records how far the navigation is deliberately made
+  portable ahead of the rest of the panel.
+- Context: ADR-0021's panel has two pages — the rule **list** and the **Mapping Rule** editor — but
+  switched between them with a single `editing: MapLocalRuleDef?` state var (non-null = editor, null =
+  list). Two rough edges: (1) there was no explicit **Back** from the editor to the list — only a footer
+  *Cancel* and the panel-wide *Close* — so "return to the rules" wasn't a first-class, discoverable
+  action; and (2) **Add** was a labeled button crammed into the list header beside Close. Separately, the
+  project may later grow beyond the JVM desktop viewer (mobile/web companions), so new UI structure
+  should lean multiplatform where that is cheap.
+- Decision:
+  - **Navigation 3 owns the panel's page stack.** Adopt the JetBrains multiplatform build of Nav3
+    (`org.jetbrains.androidx.navigation3:navigation3-ui`, **stable 1.1.1**): a `NavDisplay` over a
+    user-owned back stack of two destinations (`RuleListDestination`, `RuleEditorDestination(ruleId)`).
+    The back stack is the single source of truth for which page shows and for Back; `MapLocalManager`
+    drops the `editing` flag. This is the repo's first navigation library, so it lands with a version
+    catalog entry (following the Koin precedent for new frameworks), not a hard-coded version.
+  - **Add is a FAB.** "Add rule" leaves the header (now just title + Close) for an **icon-only**
+    `FloatingActionButton` pinned bottom-right; the list carries a bottom content inset so the FAB never
+    hides the last row's controls. New rules still default to inline + a `Content-Type: application/json`
+    header (ADR-0021).
+  - **Editor gets a Back affordance; Cancel is dropped.** The Mapping Rule header leads with a back arrow
+    (new `ic_arrow_back` mono drawable, tint-driven per ADR-0016) that pops to the list. That made the
+    footer *Cancel* redundant (both merely returned to the list), so the footer is now the JSON verdict +
+    **Save** only; *Close* still dismisses the whole panel. Save/Back/predictive-back all pop the stack,
+    guarded so the root list is never popped (an empty `NavDisplay` back stack is illegal).
+  - **The nav layer is deliberately multiplatform-ready.** Destination keys are `@Serializable` + `NavKey`
+    and the back stack is built with an explicit `SavedStateConfiguration` polymorphic module — **not**
+    the reflection-based `rememberNavBackStack` overload, which is JVM/Android-only. So the navigation
+    code (in `commonMain`) would compile and restore state on Android/iOS/web unchanged. Cost: one
+    first-party Kotlin plugin (`kotlin.plugin.serialization`, ref'd to the Kotlin version — a zero-risk
+    toolchain addition) plus ~10 lines of config.
+  - **The rest of the panel is *not* multiplatform yet, and closing that gap is a much larger effort.**
+    Making Map Local actually *run* on mobile/web is out of scope here and is gated on, in rough order of
+    cost: (a) the response-body editor is a **Swing** `SwingPanel` behind the `CodeEditor` expect/actual
+    (ADR-0020) — desktop/JVM-only, with no iOS/web/Android actual; (b) `shared` is **JVM-only** and
+    `engine` is JVM (ADR-0015 dropped `shared`'s Android target on purpose), so the module would need
+    targets re-added plus a portable body/key-value store; (c) the transport/host wiring is JVM. The
+    navigation seam is made portable now because it is ~10 lines; the editor and module targets are the
+    real work, to be chosen per-capability once a concrete non-desktop client exists.
+- Alternatives considered:
+  - **Keep the `editing` flag + add only a back arrow** (no library): the smallest change and it fully
+    meets "Back to the list". Kept as the documented fallback if Nav3 proves heavy; not the primary path
+    only because the ask was to standardize on Nav3, which now has a stable multiplatform release.
+  - **Hand-rolled `List<Screen>` back stack**: real stack semantics, zero dependencies — but reinvents
+    what Nav3 provides (transitions, per-entry saveable-state scoping) and wouldn't match a future
+    app-wide nav choice.
+  - **Reflection-based `rememberNavBackStack(key)`**: fewer lines and fine on JVM+Android, but
+    *compiles-then-crashes* on iOS/web (no reflection). Rejected — the explicit config is ~10 lines and
+    truly portable, so the reflection overload would be a latent footgun the moment `shared` gains a
+    native target.
+  - **`androidx.navigation3` (Google, Android-only stable)** instead of the JetBrains multiplatform
+    build: rejected — it ships no JVM-desktop artifact, so it can't run the desktop viewer at all.
+- Consequences:
+  - New studio-build dependencies (catalog): `navigation3 = "1.1.1"` (`navigation3-ui`) + the
+    `kotlinSerialization` plugin. `navigation3-ui` is `implementation` in `shared`, so it rides onto
+    `desktopApp`'s runtime classpath transitively; `MapLocalManager`'s public signature is unchanged, so
+    `WailoViewer`/`WailoApp`/`Main.kt` are untouched.
+  - The editor's inputs (the rule being authored + any captured body seed) live in transient
+    `drafts`/`bodySeeds` maps keyed by rule id — out of the nav key, which stays a small id — because a
+    new/seeded rule isn't in the host's `rules` yet and a body seed is too large to ride in a key. These
+    are **not** restored across process death (an interrupted draft is cheap to re-open); Nav3's saveable
+    back stack restores *which* page you were on, not an unsaved draft's contents.
+  - A row-seeded launch resets the stack to `[list, editor]` (via `LaunchedEffect(initialDraft)`) so Back
+    lands on the list even when the panel opened straight into the editor from a traffic row.
+  - Added one mono vector drawable (`ic_arrow_back`).
+  - Manual smoke checks (two-tier verification): the Add FAB opens the editor; the editor's Back arrow and
+    a successful Save both return to the list; a row's "Map Local…" opens the editor with Back → list;
+    light/dark both read correctly. Runtime-only Nav3 behavior (page transitions; that the default entry
+    decorators resolve without the separate ViewModel artifact) isn't caught by the compile and is part
+    of this smoke pass.

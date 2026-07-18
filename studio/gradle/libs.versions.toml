@@ -5,18 +5,24 @@
 kotlin = "2.3.21"
 composeMultiplatform = "1.11.0"
 coroutines = "1.10.2"
+navigation3 = "1.1.1"
 ktor = "3.4.3"
+# Swing code editor embedded (via SwingPanel) for the Map Local response-body editor — Compose's own
+# text field isn't viewport-virtualized, so it stalls on large payloads (ADR-0020). Desktop-only.
+rsyntaxtextarea = "3.6.3"
 # The published SDK artifact this build consumes; matches the root build's group/version.
 wailoProtocol = "0.1.0-SNAPSHOT"
 
 [libraries]
 kotlinx-coroutines-core = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core", version.ref = "coroutines" }
+navigation3-ui = { module = "org.jetbrains.androidx.navigation3:navigation3-ui", version.ref = "navigation3" }
 ktor-server-core = { module = "io.ktor:ktor-server-core", version.ref = "ktor" }
 ktor-server-cio = { module = "io.ktor:ktor-server-cio", version.ref = "ktor" }
 ktor-server-websockets = { module = "io.ktor:ktor-server-websockets", version.ref = "ktor" }
 ktor-client-core = { module = "io.ktor:ktor-client-core", version.ref = "ktor" }
 ktor-client-cio = { module = "io.ktor:ktor-client-cio", version.ref = "ktor" }
 ktor-client-websockets = { module = "io.ktor:ktor-client-websockets", version.ref = "ktor" }
+rsyntaxtextarea = { module = "com.fifesoft:rsyntaxtextarea", version.ref = "rsyntaxtextarea" }
 wailo-protocol = { module = "com.venbiasa.wailo:wailo-protocol", version.ref = "wailoProtocol" }
 
 [plugins]
@@ -24,3 +30,4 @@ kotlinMultiplatform = { id = "org.jetbrains.kotlin.multiplatform", version.ref =
 kotlinJvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }
 composeMultiplatform = { id = "org.jetbrains.compose", version.ref = "composeMultiplatform" }
 composeCompiler = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
+kotlinSerialization = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlin" }

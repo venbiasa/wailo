@@ -4,6 +4,9 @@ plugins {
     alias(libs.plugins.kotlinMultiplatform)
     alias(libs.plugins.composeMultiplatform)
     alias(libs.plugins.composeCompiler)
+    // Navigation 3 destination keys are @Serializable so the panel's back stack persists portably
+    // across platforms (not just via JVM/Android reflection) — ADR-0022.
+    alias(libs.plugins.kotlinSerialization)
 }
 
 kotlin {
@@ -29,9 +32,23 @@ kotlin {
             implementation(compose.material3)
             implementation(compose.ui)
             implementation(compose.components.resources)
+            // Navigation 3 (JetBrains multiplatform) owns the Map Local panel's page stack; kept in
+            // commonMain so the nav layer ports beyond JVM desktop (ADR-0022).
+            implementation(libs.navigation3.ui)
+            // The body editor drives debounced validation off snapshotFlow and saves/loads on a
+            // background dispatcher; depend on coroutines directly rather than via Compose transitively.
+            implementation(libs.kotlinx.coroutines.core)
+        }
+        jvmMain.dependencies {
+            // The Map Local body editor embeds this Swing code editor via SwingPanel — Compose's own
+            // text field re-lays-out the whole string per keystroke, so it can't stay smooth on large
+            // JSON (ADR-0020). Desktop-only; kept off commonMain behind the CodeEditor expect/actual.
+            implementation(libs.rsyntaxtextarea)
         }
         jvmTest.dependencies {
             implementation(kotlin("test"))
+            implementation(compose.desktop.uiTestJUnit4)
+            implementation(compose.desktop.currentOs)
         }
     }
 }

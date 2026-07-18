@@ -1,6 +1,7 @@
 package com.venbiasa.wailo.shared.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.draggable
 import androidx.compose.foundation.gestures.rememberDraggableState
@@ -18,6 +19,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -31,9 +33,14 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
+import com.venbiasa.wailo.protocol.Header
 import com.venbiasa.wailo.shared.FlowEntry
+import com.venbiasa.wailo.shared.MapLocalHeader
+import com.venbiasa.wailo.shared.MapLocalRuleDef
 import com.venbiasa.wailo.shared.format.requestHost
 import com.venbiasa.wailo.shared.resources.Res
 import com.venbiasa.wailo.shared.resources.ic_dark_mode
@@ -41,7 +48,9 @@ import com.venbiasa.wailo.shared.resources.ic_delete
 import com.venbiasa.wailo.shared.resources.ic_light_mode
 import com.venbiasa.wailo.shared.resources.ic_pause
 import com.venbiasa.wailo.shared.resources.ic_play_arrow
+import com.venbiasa.wailo.shared.resources.ic_rule
 import com.venbiasa.wailo.shared.theme.LocalWailoColors
+import org.jetbrains.compose.resources.DrawableResource
 import org.jetbrains.compose.resources.vectorResource
 
 @Composable
@@ -57,12 +66,13 @@ internal fun WailoViewer(
     bookmarks: List<String>,
     onAddBookmark: (String) -> Unit,
     onRemoveBookmark: (String) -> Unit,
-    onOpenMapLocal: () -> Unit,
-    onMapLocalFromUrl: (String) -> Unit,
+    mapLocalRules: List<MapLocalRuleDef>,
+    onUpsertRule: (MapLocalRuleDef) -> Unit,
+    onRemoveRule: (String) -> Unit,
+    onLoadMapLocalBody: suspend (MapLocalRuleDef) -> String,
+    onSaveMapLocalBody: suspend (MapLocalRuleDef, String) -> Unit,
 ) {
-    // The rail is a launcher, not content routing (Map Local opens its own window), so its collapsed
-    // state is transient view state like the selection/filter below.
-    var railCollapsed by remember { mutableStateOf(false) }
+    // Transient view state (not persisted): nothing is selected when the app opens.
     var selectedId by remember { mutableStateOf<String?>(null) }
     // Resolve the open detail against the full list, not the filtered one, so switching bookmarks
     // never closes a detail panel whose row is currently filtered out.
@@ -80,67 +90,249 @@ internal fun WailoViewer(
         if (host == null) entries else entries.filter { requestHost(it.exchange.request?.url ?: "") == host }
     }
 
-    Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-        Row(Modifier.fillMaxSize()) {
-            NavRail(
-                collapsed = railCollapsed,
-                onToggleCollapsed = { railCollapsed = !railCollapsed },
-                onOpenMapLocal = onOpenMapLocal,
-            )
-            ColumnDivider()
-            BoxWithConstraints(Modifier.weight(1f).fillMaxHeight()) {
-                val minDetail = 180.dp
-                val maxDetail = (maxHeight - 160.dp).coerceAtLeast(minDetail)
-                var detailHeight by remember { mutableStateOf(360.dp) }
-                val density = LocalDensity.current
+    // Map Local tool panel: its open/close, the current draft, and the panel width are transient view
+    // state (like the selection/filter above). The host owns the rules and their persistence — the
+    // panel only renders them (ADR-0013/0021).
+    var mapLocalOpen by remember { mutableStateOf(false) }
+    var mapLocalDraft by remember { mutableStateOf<MapLocalRuleDef?>(null) }
+    var mapLocalBodySeed by remember { mutableStateOf<String?>(null) }
+    var mapLocalWidth by remember { mutableStateOf(460.dp) }
+    val density = LocalDensity.current
 
-                Column(Modifier.fillMaxSize()) {
-                    TopBar(
-                        listenAddress = listenAddress,
-                        capturing = capturing,
-                        onToggleCapture = onToggleCapture,
-                        onClear = onClear,
-                        darkTheme = darkTheme,
-                        onToggleDarkTheme = onToggleDarkTheme,
-                    )
-                    RowDivider()
-                    // The bookmark bar only exists once there is something to show, so an empty setup
-                    // costs no vertical space and reads exactly like the pre-bookmark viewer.
-                    if (bookmarks.isNotEmpty()) {
-                        BookmarkBar(
-                            bookmarks = bookmarks,
-                            activeHost = activeHost,
-                            onSelect = { activeHost = it },
-                            onRemove = onRemoveBookmark,
+    Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+        BoxWithConstraints(Modifier.fillMaxSize()) {
+            val totalWidth = maxWidth
+            Row(Modifier.fillMaxSize()) {
+                BoxWithConstraints(Modifier.weight(1f).fillMaxHeight()) {
+                    val minDetail = 180.dp
+                    val maxDetail = (maxHeight - 160.dp).coerceAtLeast(minDetail)
+                    var detailHeight by remember { mutableStateOf(360.dp) }
+
+                    Column(Modifier.fillMaxSize()) {
+                        TopBar(
+                            listenAddress = listenAddress,
+                            capturing = capturing,
+                            onToggleCapture = onToggleCapture,
+                            onClear = onClear,
                         )
                         RowDivider()
-                    }
-                    Box(Modifier.weight(1f).fillMaxWidth()) {
-                        TrafficList(
-                            entries = visibleEntries,
-                            selectedId = selectedId,
-                            onSelect = { selectedId = it },
-                            zoneOffsetMillis = zoneOffsetMillis,
-                            bookmarks = bookmarks,
-                            onAddBookmark = onAddBookmark,
-                            onRemoveBookmark = onRemoveBookmark,
-                            onMapLocalFromUrl = onMapLocalFromUrl,
-                        )
-                    }
-                    if (selected != null) {
-                        DragHandle { deltaPx ->
-                            val deltaDp = with(density) { deltaPx.toDp() }
-                            detailHeight = (detailHeight - deltaDp).coerceIn(minDetail, maxDetail)
+                        // The bookmark bar only exists once there is something to show, so an empty setup
+                        // costs no vertical space and reads exactly like the pre-bookmark viewer.
+                        if (bookmarks.isNotEmpty()) {
+                            BookmarkBar(
+                                bookmarks = bookmarks,
+                                activeHost = activeHost,
+                                onSelect = { activeHost = it },
+                                onRemove = onRemoveBookmark,
+                            )
+                            RowDivider()
                         }
-                        DetailPanel(
-                            entry = selected,
-                            modifier = Modifier.fillMaxWidth().height(detailHeight.coerceIn(minDetail, maxDetail)),
-                            onClose = { selectedId = null },
+                        Box(Modifier.weight(1f).fillMaxWidth()) {
+                            TrafficList(
+                                entries = visibleEntries,
+                                selectedId = selectedId,
+                                onSelect = { selectedId = it },
+                                zoneOffsetMillis = zoneOffsetMillis,
+                                bookmarks = bookmarks,
+                                onAddBookmark = onAddBookmark,
+                                onRemoveBookmark = onRemoveBookmark,
+                                // A row's "Map Local…" seeds a fresh draft (exact URL + method + JSON
+                                // body) and opens the tool panel — no separate window (ADR-0021).
+                                onMapLocalFromUrl = { url, method, responseHeaders, seed ->
+                                    mapLocalDraft = MapLocalRuleDef(
+                                        id = MapLocalRuleDef.newId(),
+                                        urlPattern = url,
+                                        method = method,
+                                        inline = true,
+                                        // Start the mock close to the observed response: its real headers,
+                                        // minus the ones that describe the live transfer rather than the
+                                        // payload (see seededHeaders).
+                                        headers = seededHeaders(responseHeaders),
+                                    )
+                                    mapLocalBodySeed = seed
+                                    mapLocalOpen = true
+                                },
+                            )
+                        }
+                        if (selected != null) {
+                            DragHandle { deltaPx ->
+                                val deltaDp = with(density) { deltaPx.toDp() }
+                                detailHeight = (detailHeight - deltaDp).coerceIn(minDetail, maxDetail)
+                            }
+                            DetailPanel(
+                                entry = selected,
+                                modifier = Modifier.fillMaxWidth().height(detailHeight.coerceIn(minDetail, maxDetail)),
+                                onClose = { selectedId = null },
+                            )
+                        }
+                    }
+                }
+                // The Map Local tool panel docks to the right, resizable, between the content and the
+                // tool rail — the Android Studio tool-window model.
+                if (mapLocalOpen) {
+                    val maxPanel = (totalWidth - 320.dp).coerceAtLeast(MinPanelWidth)
+                    val panelWidth = mapLocalWidth.coerceIn(MinPanelWidth, maxPanel)
+                    PanelResizeHandle { deltaPx ->
+                        mapLocalWidth = (panelWidth - with(density) { deltaPx.toDp() })
+                            .coerceIn(MinPanelWidth, maxPanel)
+                    }
+                    Box(Modifier.width(panelWidth).fillMaxHeight()) {
+                        MapLocalManager(
+                            rules = mapLocalRules,
+                            initialDraft = mapLocalDraft,
+                            initialBodySeed = mapLocalBodySeed,
+                            onUpsert = onUpsertRule,
+                            onRemove = onRemoveRule,
+                            onClose = { mapLocalOpen = false },
+                            onLoadBody = onLoadMapLocalBody,
+                            onSaveBody = onSaveMapLocalBody,
                         )
                     }
                 }
+                ColumnDivider()
+                ToolRail(
+                    darkTheme = darkTheme,
+                    onToggleDarkTheme = onToggleDarkTheme,
+                    mapLocalOpen = mapLocalOpen,
+                    onToggleMapLocal = {
+                        if (mapLocalOpen) {
+                            mapLocalOpen = false
+                        } else {
+                            // Opening from the rail lands on the rule list, not a seeded draft.
+                            mapLocalDraft = null
+                            mapLocalBodySeed = null
+                            mapLocalOpen = true
+                        }
+                    },
+                )
             }
         }
+    }
+}
+
+private val ToolRailWidth = 48.dp
+private val MinPanelWidth = 340.dp
+
+// Response headers not carried into a rule seeded from a row: they describe the live transfer, not the
+// payload, so they'd be wrong (or break the mock) once the desktop serves its own bytes. The host
+// recomputes Content-Length (ADR-0019); Transfer-Encoding/Connection are hop-by-hop; and a leftover
+// Content-Encoding (e.g. gzip) would tell the client to decode our already-decoded body.
+private val NonSeededHeaderNames = setOf(
+    "content-length",
+    "content-encoding",
+    "transfer-encoding",
+    "connection",
+)
+
+// Builds a seeded rule's headers from the captured response: keep the real headers so the mock starts
+// close to what was observed, drop the transfer-only ones, and guarantee a Content-Type (Map Local is
+// JSON-focused, ADR-0021) when the response carried none.
+private fun seededHeaders(responseHeaders: List<Header>): List<MapLocalHeader> {
+    val kept = responseHeaders
+        .filterNot { it.name.lowercase() in NonSeededHeaderNames }
+        .map { MapLocalHeader(it.name, it.value_) }
+    return if (kept.any { it.name.equals("Content-Type", ignoreCase = true) }) {
+        kept
+    } else {
+        kept + MapLocalHeader("Content-Type", "application/json")
+    }
+}
+
+/**
+ * The right tool rail: an icon-only strip (Android Studio's right tool bar). The dark/light toggle
+ * leads as a global app action; below a divider come the side-panel tools — today just Map Local,
+ * whose button stays highlighted while its panel is open.
+ */
+@Composable
+private fun ToolRail(
+    darkTheme: Boolean,
+    onToggleDarkTheme: () -> Unit,
+    mapLocalOpen: Boolean,
+    onToggleMapLocal: () -> Unit,
+) {
+    Column(
+        Modifier.fillMaxHeight()
+            .width(ToolRailWidth)
+            .background(MaterialTheme.colorScheme.surfaceContainer)
+            .padding(vertical = 6.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        // Icon reflects the target mode (moon = switch to dark, sun = switch to light), the common
+        // toggle convention so a glance tells you what clicking will do. It's an app-wide action, not a
+        // tool panel, so it never carries the selected highlight and sits above the tool divider.
+        ToolRailButton(
+            icon = if (darkTheme) Res.drawable.ic_light_mode else Res.drawable.ic_dark_mode,
+            contentDescription = if (darkTheme) "Switch to light mode" else "Switch to dark mode",
+            selected = false,
+            onClick = onToggleDarkTheme,
+        )
+        RailDivider()
+        ToolRailButton(
+            icon = Res.drawable.ic_rule,
+            contentDescription = "Map Local",
+            selected = mapLocalOpen,
+            onClick = onToggleMapLocal,
+        )
+    }
+}
+
+// Groups the rail's global app actions (theme) apart from its tool-panel buttons; inset so it reads as
+// a group separator rather than spanning the full rail width.
+@Composable
+private fun RailDivider() {
+    Box(
+        Modifier.padding(horizontal = 10.dp)
+            .fillMaxWidth()
+            .height(1.dp)
+            .background(MaterialTheme.colorScheme.outlineVariant),
+    )
+}
+
+@Composable
+private fun ToolRailButton(
+    icon: DrawableResource,
+    contentDescription: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+) {
+    val background = if (selected) MaterialTheme.colorScheme.surfaceVariant else Color.Transparent
+    val tint = if (selected) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant
+    // The rail is icon-only; hovering names the tool so an unfamiliar glyph is still legible.
+    HoverTooltip(label = contentDescription) {
+        Box(
+            Modifier.size(40.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .background(background)
+                .clickable(onClick = onClick),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                imageVector = vectorResource(icon),
+                contentDescription = contentDescription,
+                tint = tint,
+                modifier = Modifier.size(20.dp),
+            )
+        }
+    }
+}
+
+// The seam between the content and the docked tool panel: a visible grip with a wide invisible grab
+// strip and a horizontal resize cursor on hover, mirroring the detail panel's vertical [DragHandle].
+@Composable
+private fun PanelResizeHandle(onDragDelta: (Float) -> Unit) {
+    Box(
+        Modifier.fillMaxHeight()
+            .width(9.dp)
+            .background(MaterialTheme.colorScheme.surfaceVariant)
+            .draggable(
+                orientation = Orientation.Horizontal,
+                state = rememberDraggableState { onDragDelta(it) },
+            )
+            .resizeCursor(ResizeAxis.Horizontal),
+        contentAlignment = Alignment.Center,
+    ) {
+        Box(Modifier.width(3.dp).height(36.dp).background(MaterialTheme.colorScheme.outline))
     }
 }
 
@@ -150,8 +342,6 @@ private fun TopBar(
     capturing: Boolean,
     onToggleCapture: () -> Unit,
     onClear: () -> Unit,
-    darkTheme: Boolean,
-    onToggleDarkTheme: () -> Unit,
 ) {
     Row(
         Modifier.fillMaxWidth()
@@ -192,17 +382,6 @@ private fun TopBar(
             style = MaterialTheme.typography.labelMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        Spacer(Modifier.weight(1f))
-        // Icon reflects the target mode (moon = switch to dark, sun = switch to light), the common
-        // toggle convention so a glance tells you what tapping will do.
-        IconButton(onClick = onToggleDarkTheme, modifier = Modifier.size(36.dp)) {
-            Icon(
-                imageVector = vectorResource(if (darkTheme) Res.drawable.ic_light_mode else Res.drawable.ic_dark_mode),
-                contentDescription = if (darkTheme) "Switch to light mode" else "Switch to dark mode",
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.size(18.dp),
-            )
-        }
     }
 }
 

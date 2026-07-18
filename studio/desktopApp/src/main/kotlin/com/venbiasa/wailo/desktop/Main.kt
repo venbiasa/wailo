@@ -1,7 +1,6 @@
 package com.venbiasa.wailo.desktop
 
 import androidx.compose.foundation.isSystemInDarkTheme
-import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -14,12 +13,9 @@ import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.isMetaPressed
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.type
-import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.WindowPlacement
-import androidx.compose.ui.window.WindowPosition
 import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
@@ -29,23 +25,34 @@ import com.venbiasa.wailo.shared.FlowEntry
 import com.venbiasa.wailo.shared.MapLocalRuleDef
 import com.venbiasa.wailo.shared.WailoApp
 import com.venbiasa.wailo.shared.theme.TextScale
-import com.venbiasa.wailo.shared.theme.WailoTheme
-import com.venbiasa.wailo.shared.ui.MapLocalManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.withContext
-import java.awt.FileDialog
-import java.awt.Frame
+import java.awt.Dimension
 import java.net.DatagramSocket
 import java.net.InetAddress
 import java.util.TimeZone
 import kotlin.time.Duration.Companion.milliseconds
 
+fun main() {
+    // Render Compose popups (the Map Local method dropdown, context menus) above the inline body
+    // editor's embedded Swing panel (ADR-0021). Interop blending must be set before any Compose code
+    // runs, so it lives here rather than inside the composition; effective on macOS/Metal and
+    // Windows/Direct3D, a harmless no-op elsewhere.
+    System.setProperty("compose.interop.blending", "true")
+    runWailo()
+}
+
+// The window's first-run size, also enforced as its floor so the layout never has to reflow below the
+// geometry it was designed against. On desktop Compose sizes windows from Dp values 1:1 with AWT's
+// (density-independent) window units, so the same numbers drive both the initial size and the minimum.
+private val DefaultWindowSize = DpSize(800.dp, 600.dp)
+
 // debounce (used below to coalesce window resize/move writes) is still a coroutines preview API.
 @OptIn(FlowPreview::class)
-fun main() = application {
+private fun runWailo() = application {
     val engine = remember { WailoEngine().also(WailoEngine::start) }
     val rows by engine.exchanges.collectAsState()
     val capturing by engine.capturing.collectAsState()
@@ -98,21 +105,22 @@ fun main() = application {
 
     // Map Local rules: host-owned and persisted (like bookmarks). `shared` gets the definitions plus
     // upsert/remove callbacks and stays stateless; the host is the only side that reads files and talks
-    // to the engine. The window and its optional pre-filled draft are hoisted here so the rail button
-    // and the per-row "Map Local…" action both open the same window.
+    // to the engine. The tool panel's open state and any row-seeded draft are the viewer's own
+    // transient state now (ADR-0021), so the host only owns the rules themselves.
     var mapLocalRules by remember { mutableStateOf(MapLocalStore.load()) }
-    var showMapLocal by remember { mutableStateOf(false) }
-    var mapLocalDraft by remember { mutableStateOf<MapLocalRuleDef?>(null) }
     val upsertRule = { rule: MapLocalRuleDef ->
         mapLocalRules = if (mapLocalRules.any { it.id == rule.id }) {
             mapLocalRules.map { if (it.id == rule.id) rule else it }
         } else {
             mapLocalRules + rule
         }
+        // A file-backed rule owns no managed body; drop any left over from a prior inline edit.
+        if (!rule.inline) MapLocalStore.deleteInlineBody(rule.id)
         MapLocalStore.save(mapLocalRules)
     }
     val removeRule = { id: String ->
         mapLocalRules = mapLocalRules.filterNot { it.id == id }
+        MapLocalStore.deleteInlineBody(id)
         MapLocalStore.save(mapLocalRules)
     }
     // The engine (running on non-UI threads) resolves a matched rule's body through this seam; Compose
@@ -130,14 +138,12 @@ fun main() = application {
         ruleDefsRef.set(mapLocalRules)
         engine.updateRules(compileRules(mapLocalRules))
     }
-    // Kept for the whole session so reopening the window remembers its last size/position.
-    val mapLocalWindowState = rememberWindowState(size = DpSize(760.dp, 560.dp))
 
     // Window geometry survives restarts (host concern, like the theme/scale/bookmarks above). Seeded
     // from the last floating size/position; first run falls back to Compose's default size and lets
     // the OS place the window.
     val windowState = rememberWindowState(
-        size = WindowStateStore.loadSize(DpSize(800.dp, 600.dp)),
+        size = WindowStateStore.loadSize(DefaultWindowSize),
         position = WindowStateStore.loadPosition(),
     )
     // Persist continuously (so a crash/force-quit still remembers), but only while Floating so a
@@ -183,6 +189,15 @@ fun main() = application {
             }
         },
     ) {
+        // Floor the window at its first-run size so the content can't be squeezed below the layout it
+        // was built for. AWT enforces this on the OS chrome, covering drag-resize the Compose state
+        // never sees. Runs on the EDT (Compose Desktop's main dispatcher), so touching AWT is safe.
+        LaunchedEffect(Unit) {
+            window.minimumSize = Dimension(
+                DefaultWindowSize.width.value.toInt(),
+                DefaultWindowSize.height.value.toInt(),
+            )
+        }
         WailoApp(
             entries = entries,
             zoneOffsetMillis = zoneOffsetMillis,
@@ -196,55 +211,13 @@ fun main() = application {
             bookmarks = bookmarks,
             onAddBookmark = addBookmark,
             onRemoveBookmark = removeBookmark,
-            onOpenMapLocal = {
-                mapLocalDraft = null
-                showMapLocal = true
-            },
-            onMapLocalFromUrl = { url ->
-                mapLocalDraft = MapLocalRuleDef(id = MapLocalRuleDef.newId(), urlPattern = MapLocalRuleDef.patternFor(url))
-                showMapLocal = true
-            },
+            mapLocalRules = mapLocalRules,
+            onUpsertRule = upsertRule,
+            onRemoveRule = removeRule,
+            onLoadMapLocalBody = { rule -> withContext(Dispatchers.IO) { MapLocalStore.loadInlineBody(rule) } },
+            onSaveMapLocalBody = { rule, text -> withContext(Dispatchers.IO) { MapLocalStore.saveInlineBody(rule, text) } },
         )
     }
-
-    // The Map Local manager lives in its own resizable window (per the locked UI decision). It carries
-    // its own theme + text-scale wrapper because it's a separate Compose window, not a child of the
-    // main viewer.
-    if (showMapLocal) {
-        Window(
-            onCloseRequest = { showMapLocal = false },
-            state = mapLocalWindowState,
-            title = "Wailo — Map Local",
-        ) {
-            WailoTheme(darkTheme = darkTheme) {
-                val density = LocalDensity.current
-                CompositionLocalProvider(
-                    LocalDensity provides Density(density.density, density.fontScale * textScale),
-                ) {
-                    MapLocalManager(
-                        rules = mapLocalRules,
-                        initialDraft = mapLocalDraft,
-                        onUpsert = upsertRule,
-                        onRemove = removeRule,
-                        onPickFile = ::chooseLocalFile,
-                    )
-                }
-            }
-        }
-    }
-}
-
-/**
- * Opens the OS-native file chooser and returns the absolute path, or null if cancelled. Uses AWT's
- * [FileDialog] (rather than Swing's JFileChooser) so it's the real native picker on macOS. Modal by
- * design: it's invoked from a button click and blocks only that interaction.
- */
-private fun chooseLocalFile(): String? {
-    val dialog = FileDialog(null as Frame?, "Choose local file", FileDialog.LOAD)
-    dialog.isVisible = true
-    val directory = dialog.directory
-    val file = dialog.file
-    return if (directory != null && file != null) directory + file else null
 }
 
 /**
