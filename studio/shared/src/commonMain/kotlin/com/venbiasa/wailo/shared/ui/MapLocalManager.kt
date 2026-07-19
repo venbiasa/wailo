@@ -37,6 +37,7 @@ import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.snapshots.SnapshotStateList
@@ -126,6 +127,13 @@ fun MapLocalManager(
         backStack.add(RuleEditorDestination(draft.id))
     }
 
+    // NavDisplay caches each page's NavEntry keyed by the back stack, so the entry's content keeps the
+    // `rules` value it captured when first shown and won't see later host edits (e.g. a toggle) until you
+    // navigate. Reading the list through this stable State *inside* the entries makes NavEntry.Content —
+    // itself a restart scope — recompose on every change, so the list and the editor's enabled switch
+    // stay live and in sync instead of frozen until navigation.
+    val liveRules = rememberUpdatedState(rules)
+
     Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
         NavDisplay(
             backStack = backStack,
@@ -136,7 +144,7 @@ fun MapLocalManager(
                 when (destination) {
                     is RuleListDestination -> NavEntry(destination) {
                         RuleList(
-                            rules = rules,
+                            rules = liveRules.value,
                             onAdd = {
                                 // New rules default to the inline editor (the common "author a body"
                                 // path) and a JSON Content-Type header, changeable on the Headers tab.
@@ -155,17 +163,37 @@ fun MapLocalManager(
                         )
                     }
                     is RuleEditorDestination -> NavEntry(destination) {
+                        // Read the live list here (not the captured `rules`) so this entry tracks host
+                        // edits — see [liveRules].
+                        val currentRules = liveRules.value
                         // Resolve from the pending draft (new/seeded) or the persisted list.
                         val initial = drafts[destination.ruleId]
-                            ?: rules.firstOrNull { it.id == destination.ruleId }
+                            ?: currentRules.firstOrNull { it.id == destination.ruleId }
                         if (initial == null) {
                             // The rule was removed out from under an open editor: fall back to the list.
                             LaunchedEffect(destination.ruleId) {
                                 if (backStack.size > 1) backStack.removeLastOrNull()
                             }
                         } else {
+                            // The enabled toggle is shared with the list row, so it commits immediately
+                            // rather than waiting for Save — otherwise the editor and list switches drift.
+                            // For an already-persisted rule, read and write `enabled` straight through the
+                            // host list so both surfaces stay in lockstep; an unsaved draft keeps it local
+                            // until Save (there's no list row to sync with yet).
+                            val persisted = currentRules.firstOrNull { it.id == destination.ruleId }
                             RuleEditor(
                                 initial = initial,
+                                enabled = (persisted ?: initial).enabled,
+                                onToggleEnabled = { next ->
+                                    // Re-read the live rule at click time so committing the flag never
+                                    // clobbers a concurrent edit with a stale snapshot.
+                                    val live = liveRules.value.firstOrNull { it.id == destination.ruleId }
+                                    if (live != null) {
+                                        onUpsert(live.copy(enabled = next))
+                                    } else {
+                                        drafts[destination.ruleId]?.let { drafts[destination.ruleId] = it.copy(enabled = next) }
+                                    }
+                                },
                                 bodySeed = bodySeeds[destination.ruleId],
                                 onLoadBody = onLoadBody,
                                 onSaveBody = onSaveBody,
@@ -309,6 +337,8 @@ private fun RuleRow(
 @Composable
 private fun RuleEditor(
     initial: MapLocalRuleDef,
+    enabled: Boolean,
+    onToggleEnabled: (Boolean) -> Unit,
     bodySeed: String?,
     onLoadBody: suspend (MapLocalRuleDef) -> String,
     onSaveBody: suspend (MapLocalRuleDef, String) -> Unit,
@@ -321,7 +351,6 @@ private fun RuleEditor(
     var method by remember { mutableStateOf(initial.method) }
     var statusCode by remember { mutableStateOf(initial.statusCode.toString()) }
     val headers = remember { initial.headers.toMutableStateList() }
-    var enabled by remember { mutableStateOf(initial.enabled) }
     var editorTab by remember { mutableStateOf(EditorTab.Body) }
     var saving by remember { mutableStateOf(false) }
 
@@ -347,6 +376,8 @@ private fun RuleEditor(
             validity = withContext(Dispatchers.Default) {
                 when {
                     text.isBlank() -> BodyValidity.None
+                    // Building a JSON tree for a multi-megabyte body would stutter the UI; defer to Save.
+                    text.length > MAX_LIVE_VALIDATE_CHARS -> BodyValidity.TooLarge
                     else -> jsonErrorMessage(text)?.let { BodyValidity.Invalid(it) } ?: BodyValidity.Valid
                 }
             }
@@ -371,10 +402,12 @@ private fun RuleEditor(
         saving = true
         val rule = buildRule()
         scope.launch {
-            // Pretty-print on the way out (Map Local is JSON-focused); a body that won't parse as JSON
-            // is saved verbatim rather than blocking the save.
+            // Pretty-print on the way out (Map Local is JSON-focused); a body that won't parse as JSON is
+            // saved verbatim rather than blocking the save, and an over-large body skips formatting entirely.
             val raw = editorState.currentText()
-            val body = withContext(Dispatchers.Default) { prettyPrintJson(raw) } ?: raw
+            val body = withContext(Dispatchers.Default) {
+                if (raw.length <= MAX_FORMAT_CHARS) prettyPrintJson(raw) ?: raw else raw
+            }
             onSaveBody(rule, body)
             onUpsert(rule)
             onSaved()
@@ -407,7 +440,7 @@ private fun RuleEditor(
             )
             Spacer(Modifier.weight(1f))
             HoverTooltip(if (enabled) "Enabled" else "Disabled") {
-                CompactSwitch(checked = enabled, onCheckedChange = { enabled = it })
+                CompactSwitch(checked = enabled, onCheckedChange = onToggleEnabled)
             }
             Spacer(Modifier.width(4.dp))
             CloseButton(onClose, contentDescription = "Close panel")
@@ -485,10 +518,17 @@ private fun RuleEditor(
     }
 }
 
-/** Body validity for the footer verdict: no body, valid JSON, or a parse error message. */
+// Body-size ceilings (ADR-0023). Pretty-printing is a cheap single O(n) pass, so it runs up to ~10 MB;
+// live validation builds a full JSON tree (memory-heavy), so it's capped lower and defers to the Save-time
+// format/parse beyond it.
+private const val MAX_FORMAT_CHARS = 10_000_000
+private const val MAX_LIVE_VALIDATE_CHARS = 2_000_000
+
+/** Body validity for the footer verdict: no body, valid JSON, a parse error, or too large to check live. */
 private sealed interface BodyValidity {
     data object None : BodyValidity
     data object Valid : BodyValidity
+    data object TooLarge : BodyValidity
     data class Invalid(val message: String) : BodyValidity
 }
 
@@ -511,6 +551,12 @@ private fun BodyVerdict(validity: BodyValidity, modifier: Modifier = Modifier) {
             validity.message,
             style = MaterialTheme.typography.labelMedium,
             color = MaterialTheme.colorScheme.error,
+            modifier = modifier,
+        )
+        BodyValidity.TooLarge -> Text(
+            "Large body — checked on save",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = modifier,
         )
     }

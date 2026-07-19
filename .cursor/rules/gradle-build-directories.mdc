@@ -1,0 +1,39 @@
+---
+description: Which directory to run Gradle from (this repo has TWO separate Gradle builds)
+alwaysApply: true
+---
+
+# Run Gradle from the correct build directory
+
+This repo is **two independent Gradle builds** with their own wrappers pinned to
+different Gradle versions (ADR-0015). Running `./gradlew` from the wrong directory
+silently uses the wrong toolchain and fails or misbehaves.
+
+| Build | Run from | Wrapper | Modules |
+|-------|----------|---------|---------|
+| SDK build | repo root | Gradle 8.11.1 (`./gradlew`) | `protocol`, `sdk-android`, samples, plugin |
+| studio build | `studio/` | Gradle 9.3.1 (`studio/gradlew`) | `engine`, `shared`, `desktopApp` |
+
+## Rules
+
+- **Chain an absolute `cd` inside the command; do NOT rely on the Shell `working_directory`
+  parameter alone** — in this environment it is not reliably applied, so `./gradlew` silently
+  runs from the repo root (8.11.1) even when `working_directory` says `studio`. Always write
+  `cd /abs/path/to/repo/studio && ./gradlew …`.
+- To build/test/run **`engine`, `shared`, or `desktopApp`**, run studio's wrapper. NEVER run
+  these from the repo root — root's `./gradlew` is 8.11.1 and does not know these modules.
+- `protocol` is the seam: `:protocol:publishToMavenLocal` is a **root** task and must be run
+  (from repo root) before the studio build, which consumes `wailo-protocol` from Maven Local.
+
+```bash
+# studio (engine/shared/desktopApp) — absolute cd, then studio's ./gradlew (9.3.1)
+cd /abs/path/to/repo/studio && ./gradlew :shared:jvmTest
+cd /abs/path/to/repo/studio && ./gradlew :desktopApp:run
+
+# SDK build (protocol/sdk-android/samples/plugin) — from repo root (8.11.1)
+cd /abs/path/to/repo && ./gradlew :protocol:publishToMavenLocal
+cd /abs/path/to/repo && ./gradlew :sample-android:assembleDebug
+```
+
+Prefer the `rgradlew` skill's remote path only for the SDK/Android build; the studio
+build needs `wailo-protocol` in local Maven, so build it locally from `studio/`.

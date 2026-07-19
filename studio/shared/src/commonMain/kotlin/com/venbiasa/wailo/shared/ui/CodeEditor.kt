@@ -12,52 +12,256 @@ import androidx.compose.ui.Modifier
 internal enum class CodeLanguage { Json, PlainText }
 
 /**
- * The document handle for a [CodeEditor], kept apart from the widget so the platform actual owns the
- * live text (a large document must not ride in Compose snapshot state, or every keystroke would
- * recompose and re-copy megabytes). Callers read [currentText] on demand (save/format/validate) and
- * replace the whole document with [setText] (format/seed). [revision] ticks on each user edit —
- * observe it *off* the composition (e.g. `snapshotFlow`, debounced) so live validation never couples
- * a keystroke to a recomposition.
+ * The editor's document + caret/selection/undo, held apart from the widget so the model is portable and
+ * unit-testable (ADR-0023). The large text lives in an [EditorBuffer] (a list of lines), never in a single
+ * snapshot `String`, so a keystroke splices one line rather than re-copying megabytes.
+ *
+ * [version] ticks on *any* change (drives recomposition of the visible rows and line-count reads);
+ * [revision] ticks only on *user* edits (the debounced JSON validation observes it, exactly as before).
+ * The public contract — [currentText]/[setText]/[touch]/[revision] — is unchanged so `RuleEditor` and its
+ * validation effect keep working across the RSTA→Compose swap.
  */
 @Stable
 internal class CodeEditorState(initialText: String = "") {
-    // The text the editor should show on (re)mount; also the fallback before the widget is attached.
-    internal var seedText: String = initialText
-        private set
+    internal val buffer = EditorBuffer(initialText)
 
-    // Wired by the actual to read/replace the live document. Null until the widget is composed.
-    internal var reader: (() -> String)? = null
-    internal var writer: ((String) -> Unit)? = null
+    var version by mutableStateOf(0)
+        private set
 
     var revision by mutableStateOf(0)
         internal set
 
-    fun currentText(): String = reader?.invoke() ?: seedText
+    var caret by mutableStateOf(TextPos(0, 0))
+        internal set
 
-    /** Replaces the whole document (Format / seed-from-capture). No-op-safe before the widget mounts. */
-    fun setText(text: String) {
-        seedText = text
-        writer?.invoke(text)
+    // The fixed end of a selection; null when there's just a caret. The selection is [anchor, caret],
+    // order-independent, and the caret is always the moving end.
+    var anchor by mutableStateOf<TextPos?>(null)
+        internal set
+
+    // The column vertical moves try to keep, so gliding up/down through short lines returns to the
+    // original column (standard editor feel). Not Compose state — only read/written in event handlers.
+    internal var desiredCol: Int = 0
+
+    // High-water mark of the longest line; the horizontal-scroll content width derives from it. Kept as a
+    // mark (grows, resets on setText) so it doesn't thrash the scroll range as lines shrink.
+    var maxLineLength by mutableStateOf(buffer.maxLineLength())
+        internal set
+
+    private val undoStack = ArrayDeque<EditOp>()
+    private val redoStack = ArrayDeque<EditOp>()
+
+    // True while the last edit was a lone character insert, so the next one can extend the same undo group.
+    private var coalescing = false
+
+    fun lineCount(): Int {
+        version // establish a snapshot dependency so line-count reads recompose on edits
+        return buffer.lineCount
     }
 
-    /**
-     * Nudges [revision] so observers re-read after a programmatic change (which deliberately doesn't
-     * bump it, since a Format/seed isn't a user edit) — e.g. to re-run validation on the new document.
-     */
+    fun lineAt(index: Int): String {
+        version
+        return buffer.line(index)
+    }
+
+    fun currentText(): String = buffer.text()
+
+    /** Replaces the whole document (Format / seed-from-capture). Not a user edit, so [revision] is untouched. */
+    fun setText(text: String) {
+        buffer.reset(text)
+        caret = TextPos(0, 0)
+        anchor = null
+        desiredCol = 0
+        undoStack.clear()
+        redoStack.clear()
+        coalescing = false
+        maxLineLength = buffer.maxLineLength()
+        version++
+    }
+
+    /** Nudges observers to re-read after a programmatic change (e.g. re-run validation on a seeded body). */
     fun touch() {
         revision++
     }
 
     /**
-     * Called by the widget's actual when it leaves composition (e.g. the editor's tab is hidden): snapshot
-     * the live text into [seedText] and drop the widget wiring, so a later remount reseeds from the user's
-     * edits — not the stale initial text — and [currentText] stays correct while detached (Save can happen
-     * from another tab).
+     * Replaces the whole document as a *user* edit (bumps [revision]). Used only by the widget-backed
+     * Swing fallback (ADR-0023), which owns its own text and mirrors it here on every change; the
+     * Compose-native path never calls this (it edits the buffer directly). Undo history isn't tracked for
+     * the fallback (RSTA has its own undo).
      */
-    internal fun detach() {
-        reader?.let { seedText = it() }
-        reader = null
-        writer = null
+    internal fun replaceAllFromWidget(text: String) {
+        buffer.reset(text)
+        caret = buffer.clamp(caret)
+        anchor = null
+        maxLineLength = buffer.maxLineLength()
+        version++
+        revision++
+    }
+
+    // --- selection ---
+
+    /** The normalized selection (start <= end), or null when it's empty (caret only). */
+    fun selectionRange(): Pair<TextPos, TextPos>? {
+        val a = anchor ?: return null
+        if (a == caret) return null
+        return if (a <= caret) a to caret else caret to a
+    }
+
+    fun hasSelection(): Boolean = selectionRange() != null
+
+    fun selectedText(): String = selectionRange()?.let { buffer.textIn(it.first, it.second) } ?: ""
+
+    fun setSelection(anchorPos: TextPos, caretPos: TextPos) {
+        anchor = buffer.clamp(anchorPos)
+        val c = buffer.clamp(caretPos)
+        caret = c
+        desiredCol = c.col
+        coalescing = false
+    }
+
+    fun selectAll() = setSelection(TextPos(0, 0), buffer.endPos())
+
+    /**
+     * Moves the caret to [target]. [extend] grows the current selection (anchoring at the old caret if
+     * there wasn't one); otherwise the selection collapses. [keepDesired] preserves [desiredCol] for
+     * vertical motion through shorter lines.
+     */
+    fun moveCaret(target: TextPos, extend: Boolean, keepDesired: Boolean = false) {
+        val clamped = buffer.clamp(target)
+        anchor = if (extend) (anchor ?: caret) else null
+        caret = clamped
+        if (!keepDesired) desiredCol = clamped.col
+        coalescing = false
+    }
+
+    // --- edits ---
+
+    private fun applyEdit(from: TextPos, to: TextPos, insert: String, coalesce: Boolean) {
+        val start = if (from <= to) from else to
+        val end = if (from <= to) to else from
+        val removed = buffer.textIn(start, end)
+        val caretBefore = caret
+        val newCaret = buffer.replace(start, end, insert)
+        val op = EditOp(start, removed, insert, caretBefore, newCaret)
+
+        val last = undoStack.lastOrNull()
+        val canCoalesce = coalesce && coalescing && removed.isEmpty() &&
+            insert.length == 1 && insert[0] != '\n' &&
+            last != null && last.removed.isEmpty() && !last.inserted.contains('\n') &&
+            buffer.endAfterInsert(last.start, last.inserted) == start
+        if (canCoalesce) {
+            undoStack[undoStack.lastIndex] = last.copy(inserted = last.inserted + insert, caretAfter = newCaret)
+        } else {
+            undoStack.addLast(op)
+            if (undoStack.size > MAX_UNDO) undoStack.removeFirst()
+        }
+        redoStack.clear()
+        coalescing = coalesce && removed.isEmpty() && insert.length == 1 && insert[0] != '\n'
+
+        caret = newCaret
+        anchor = null
+        desiredCol = newCaret.col
+        val editedLen = buffer.line(newCaret.line).length
+        if (editedLen > maxLineLength) maxLineLength = editedLen
+        version++
+        revision++
+    }
+
+    /** Inserts [text], replacing any selection. Consecutive single chars fold into one undo step. */
+    fun insert(text: String) {
+        val sel = selectionRange()
+        if (sel != null) applyEdit(sel.first, sel.second, text, coalesce = false)
+        else applyEdit(caret, caret, text, coalesce = true)
+    }
+
+    fun deleteSelection(): Boolean {
+        val sel = selectionRange() ?: return false
+        applyEdit(sel.first, sel.second, "", coalesce = false)
+        return true
+    }
+
+    fun deleteBackward() {
+        if (deleteSelection()) return
+        val c = caret
+        val start = when {
+            c.col > 0 -> TextPos(c.line, c.col - 1)
+            c.line > 0 -> TextPos(c.line - 1, buffer.lineLength(c.line - 1))
+            else -> return
+        }
+        applyEdit(start, c, "", coalesce = false)
+    }
+
+    fun deleteForward() {
+        if (deleteSelection()) return
+        val c = caret
+        val end = when {
+            c.col < buffer.lineLength(c.line) -> TextPos(c.line, c.col + 1)
+            c.line < buffer.lineCount - 1 -> TextPos(c.line + 1, 0)
+            else -> return
+        }
+        applyEdit(c, end, "", coalesce = false)
+    }
+
+    fun undo() {
+        val op = undoStack.removeLastOrNull() ?: return
+        buffer.replace(op.start, buffer.endAfterInsert(op.start, op.inserted), op.removed)
+        redoStack.addLast(op)
+        restoreAfterHistory(op.caretBefore)
+    }
+
+    fun redo() {
+        val op = redoStack.removeLastOrNull() ?: return
+        buffer.replace(op.start, buffer.endAfterInsert(op.start, op.removed), op.inserted)
+        undoStack.addLast(op)
+        restoreAfterHistory(op.caretAfter)
+    }
+
+    private fun restoreAfterHistory(newCaret: TextPos) {
+        caret = buffer.clamp(newCaret)
+        anchor = null
+        desiredCol = caret.col
+        coalescing = false
+        maxLineLength = maxOf(maxLineLength, buffer.maxLineLength())
+        version++
+        revision++
+    }
+
+    /**
+     * Finds [query] starting from [from], wrapping once. Single-line queries only (find over a body is a
+     * substring hunt, and a JSON string can't hold a raw newline). Returns the match's [start, end).
+     */
+    fun find(query: String, from: TextPos, forward: Boolean): Pair<TextPos, TextPos>? {
+        if (query.isEmpty()) return null
+        val count = buffer.lineCount
+        for (offset in 0..count) {
+            if (forward) {
+                val line = (from.line + offset) % count
+                val startCol = if (offset == 0) from.col else 0
+                val idx = buffer.line(line).indexOf(query, startCol)
+                if (idx >= 0) return TextPos(line, idx) to TextPos(line, idx + query.length)
+            } else {
+                val line = ((from.line - offset) % count + count) % count
+                val hay = buffer.line(line)
+                val upTo = if (offset == 0) from.col - 1 else hay.length
+                if (upTo < 0) continue
+                val idx = hay.lastIndexOf(query, upTo.coerceAtMost(hay.length))
+                if (idx >= 0) return TextPos(line, idx) to TextPos(line, idx + query.length)
+            }
+        }
+        return null
+    }
+
+    private data class EditOp(
+        val start: TextPos,
+        val removed: String,
+        val inserted: String,
+        val caretBefore: TextPos,
+        val caretAfter: TextPos,
+    )
+
+    private companion object {
+        const val MAX_UNDO = 1000
     }
 }
 
@@ -67,10 +271,9 @@ internal fun rememberCodeEditorState(initialText: String = ""): CodeEditorState 
 
 /**
  * A code text area for [state]'s document, highlighted for [language] and editable unless [readOnly].
- * Portable seam (no platform types in the signature): the desktop actual embeds a real code editor
- * for large-document performance, while a future mobile actual can back the same contract without
- * touching call sites (ADR-0020). Colors are read from the theme by the actual, so it tracks
- * light/dark.
+ * Portable seam (no platform types in the signature) so call sites don't change across platforms. The
+ * default implementation is a Compose-native, viewport-virtualized editor ([ComposeCodeEditor], ADR-0023);
+ * the JVM `actual` still exists only to keep the flag-gated Swing fallback reachable during the transition.
  */
 @Composable
 internal expect fun CodeEditor(

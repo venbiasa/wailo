@@ -18,6 +18,7 @@ import androidx.compose.material3.LocalMinimumInteractiveComponentSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
@@ -212,6 +213,15 @@ internal fun CompactSwitch(
             checked = checked,
             onCheckedChange = onCheckedChange,
             modifier = modifier.scale(0.8f),
+            // The stock unchecked switch paints its thumb in `outline` — a near-disabled gray in this
+            // monochrome theme, so "off" was indistinguishable from "disabled". Drive the off-state from
+            // the secondary content color (a solid, clearly-active thumb) over a defined track so it reads
+            // as an intentional off, not a greyed-out control.
+            colors = SwitchDefaults.colors(
+                uncheckedThumbColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                uncheckedTrackColor = MaterialTheme.colorScheme.surfaceVariant,
+                uncheckedBorderColor = MaterialTheme.colorScheme.outline,
+            ),
         )
     }
 }

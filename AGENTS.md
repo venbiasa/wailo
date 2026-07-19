@@ -53,6 +53,11 @@ from the desktop `shared` module.
 
 ## Build & verify
 
+> **Run Gradle from the right directory.** Two builds, two wrappers, two Gradle versions: the SDK build is
+> the repo root (`./gradlew`, 8.11.1); the studio build (`engine`/`shared`/`desktopApp`) is `studio/`
+> (`studio/gradlew`, 9.3.1). Build studio modules from `studio/` (`cd studio && ./gradlew …`), never from
+> root. See `.cursor/rules/gradle-build-directories.mdc`.
+
 ```bash
 # --- SDK build (repo root): protocol, sdk-android, samples, plugin ---
 ./gradlew projects
