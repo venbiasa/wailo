@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -456,7 +457,7 @@ private fun RuleEditor(
             Modifier.fillMaxWidth().padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
-            LabeledField("URL pattern") {
+            LabeledField("URL pattern", Modifier.fillMaxWidth()) {
                 CompactOutlinedTextField(
                     value = urlPattern,
                     onValueChange = { urlPattern = it },
@@ -464,15 +465,18 @@ private fun RuleEditor(
                     placeholder = "https://api.example.com/v1/*",
                 )
             }
+            // Both fields hug their content and sit together at the start of the row rather than
+            // stretching across it — Method fits the selected verb, Status code fits three digits (a
+            // min width keeps it from collapsing as you type).
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                LabeledField("Method", Modifier.weight(1f)) {
+                LabeledField("Method") {
                     MethodDropdown(method = method, onSelect = { method = it })
                 }
-                LabeledField("Status code", Modifier.width(120.dp)) {
+                LabeledField("Status code") {
                     CompactOutlinedTextField(
                         value = statusCode,
                         onValueChange = { next -> statusCode = next.filter { it.isDigit() }.take(3) },
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier.widthIn(min = 64.dp),
                         placeholder = "200",
                     )
                 }
@@ -562,9 +566,11 @@ private fun BodyVerdict(validity: BodyValidity, modifier: Modifier = Modifier) {
     }
 }
 
+// Wraps its content by default, so a compact field (Method/Status) hugs what it holds; a field that
+// should span the panel (URL pattern) opts in by passing Modifier.fillMaxWidth().
 @Composable
 private fun LabeledField(label: String, modifier: Modifier = Modifier, content: @Composable () -> Unit) {
-    Column(modifier.fillMaxWidth()) {
+    Column(modifier) {
         Text(label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Spacer(Modifier.height(4.dp))
         content()
@@ -591,9 +597,10 @@ private fun MethodDropdown(method: String, onSelect: (String) -> Unit) {
     Box {
         // Render as a read-only compact field: the exact decoration the text fields use, so Method and
         // Status code are the same height by construction (not by re-tuned padding). The value can't be
-        // free-typed; clicking anywhere in the field opens the menu.
+        // free-typed; clicking anywhere in the field opens the menu. It wraps to the label width so the
+        // field hugs the selected verb rather than stretching across the row.
         Box(
-            Modifier.fillMaxWidth()
+            Modifier
                 .clip(RoundedCornerShape(4.dp))
                 .clickable(interactionSource = interactionSource, indication = null) { expanded = true },
         ) {
