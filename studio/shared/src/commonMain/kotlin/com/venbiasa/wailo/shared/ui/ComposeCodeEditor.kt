@@ -44,6 +44,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.isCtrlPressed
@@ -53,6 +54,7 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.key.utf16CodePoint
+import androidx.compose.ui.input.pointer.isShiftPressed
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalClipboardManager
@@ -193,6 +195,9 @@ internal fun ComposeCodeEditor(
             caretOn = !caretOn
         }
     }
+    // The caret belongs to whoever has focus; when the user clicks away to another field the editor keeps its
+    // caret *position* but must stop drawing it, so two fields don't look focused at once.
+    var focused by remember { mutableStateOf(false) }
 
     // Keep the caret line composed (so its row and this frame's edits stay live) and on-screen both ways.
     // With folds active the list index is the caret's position in `visibleLines`, not its raw line number.
@@ -455,6 +460,7 @@ internal fun ComposeCodeEditor(
         Box(
             Modifier.weight(1f).fillMaxWidth()
                 .onSizeChanged { viewportWidthPx = it.width }
+                .onFocusChanged { focused = it.isFocused }
                 .focusRequester(focusRequester)
                 .focusable()
                 .onPreviewKeyEvent { onKey(it) },
@@ -476,7 +482,7 @@ internal fun ComposeCodeEditor(
                         gutterWidthDp = gutterWidthDp,
                         contentWidthDp = contentWidthDp,
                         hScroll = hScroll,
-                        caretOn = caretOn,
+                        caretOn = caretOn && focused,
                         foldable = foldRegions.containsKey(index),
                         folded = index in foldedStarts && foldRegions.containsKey(index),
                         foldCloseChar = foldRegions[index]?.closeChar,
@@ -487,6 +493,10 @@ internal fun ComposeCodeEditor(
                         onPlaceCaret = { pos ->
                             focusRequester.requestFocus()
                             state.moveCaret(pos, extend = false)
+                        },
+                        onExtendSelect = { pos ->
+                            focusRequester.requestFocus()
+                            state.moveCaret(pos, extend = true)
                         },
                         onDragSelect = { anchorPos, caretPos ->
                             focusRequester.requestFocus()
@@ -519,6 +529,7 @@ private fun EditorLineRow(
     foldCloseChar: Char?,
     onToggleFold: () -> Unit,
     onPlaceCaret: (TextPos) -> Unit,
+    onExtendSelect: (TextPos) -> Unit,
     onDragSelect: (TextPos, TextPos) -> Unit,
 ) {
     val scheme = MaterialTheme.colorScheme
@@ -577,38 +588,50 @@ private fun EditorLineRow(
                 Modifier.width(contentWidthDp).fillMaxHeight()
                     .pointerInput(index, lineText, charWidthPx, lineHeightPx, folded) {
                         // Caret moves on pointer-DOWN (not up), so a click lands instantly instead of waiting
-                        // out the double-tap window `detectTapGestures` imposes. A second quick press on the
-                        // same spot selects the word; moving after the press drags a selection from that point.
+                        // out the double-tap window `detectTapGestures` imposes. Shift+click extends the current
+                        // selection to the hit; a second quick press on the same spot selects the word; moving
+                        // after the press drags a selection.
                         awaitPointerEventScope {
                             var lastDownTime = 0L
                             var lastDownCol = -1
                             while (true) {
                                 val down = awaitFirstDown(requireUnconsumed = false)
+                                val shift = currentEvent.keyboardModifiers.isShiftPressed
                                 // On a collapsed row, only a hit on the `⋯` chip (the cells right after the
                                 // opener text, before the close bracket) expands — clicking the opener text or
                                 // the close bracket just places a caret, as the user asked.
                                 val xCells = down.position.x / charWidthPx
-                                if (folded && xCells >= lineText.length && xCells < lineText.length + DOTS_CELLS) {
+                                if (folded && !shift && xCells >= lineText.length && xCells < lineText.length + DOTS_CELLS) {
                                     onToggleFold()
                                     continue
                                 }
                                 val downCol = colAt(down.position.x, charWidthPx, lineText.length)
-                                val isDoubleClick =
+                                val isDoubleClick = !shift &&
                                     down.uptimeMillis - lastDownTime < viewConfiguration.doubleTapTimeoutMillis &&
                                         abs(downCol - lastDownCol) <= 1
                                 lastDownTime = down.uptimeMillis
                                 lastDownCol = downCol
-                                if (isDoubleClick) {
-                                    val (s, e) = wordBoundsAt(lineText, downCol)
-                                    onDragSelect(TextPos(index, s), TextPos(index, e))
-                                } else {
-                                    onPlaceCaret(TextPos(index, downCol))
+                                // Shift+click keeps the existing anchor and stretches to the hit; a later drag
+                                // continues from that same anchor rather than the press point.
+                                val dragAnchor = when {
+                                    shift -> {
+                                        onExtendSelect(TextPos(index, downCol))
+                                        state.anchor ?: TextPos(index, downCol)
+                                    }
+                                    isDoubleClick -> {
+                                        val (s, e) = wordBoundsAt(lineText, downCol)
+                                        onDragSelect(TextPos(index, s), TextPos(index, e))
+                                        TextPos(index, s)
+                                    }
+                                    else -> {
+                                        onPlaceCaret(TextPos(index, downCol))
+                                        TextPos(index, downCol)
+                                    }
                                 }
-                                val anchor = TextPos(index, downCol)
                                 drag(down.id) { change ->
                                     val line = index + floor(change.position.y / lineHeightPx).toInt()
                                     val col = (change.position.x / charWidthPx).roundToInt().coerceAtLeast(0)
-                                    onDragSelect(anchor, TextPos(line, col))
+                                    onDragSelect(dragAnchor, TextPos(line, col))
                                     change.consume()
                                 }
                             }
