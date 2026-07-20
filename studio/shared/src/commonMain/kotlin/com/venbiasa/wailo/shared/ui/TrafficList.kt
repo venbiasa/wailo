@@ -158,26 +158,34 @@ internal fun TrafficList(
                 },
             )
             RowDivider()
-            LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
-                items(entries, key = { it.id }) { entry ->
-                    TrafficRow(
-                        entry = entry,
-                        widths = widths,
-                        hScroll = hScroll,
-                        selected = entry.id == selectedId,
-                        onClick = {
-                            onSelect(entry.id)
-                            // Clicking a row hands keyboard focus to the list so Up/Down can take over.
-                            focusRequester.requestFocus()
-                        },
-                        zoneOffsetMillis = zoneOffsetMillis,
-                        bookmarks = bookmarks,
-                        onAddBookmark = onAddBookmark,
-                        onRemoveBookmark = onRemoveBookmark,
-                        onMapLocalFromUrl = onMapLocalFromUrl,
-                    )
-                    RowDivider()
+            Box(Modifier.fillMaxSize()) {
+                LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
+                    items(entries, key = { it.id }) { entry ->
+                        TrafficRow(
+                            entry = entry,
+                            widths = widths,
+                            hScroll = hScroll,
+                            selected = entry.id == selectedId,
+                            onClick = {
+                                onSelect(entry.id)
+                                // Clicking a row hands keyboard focus to the list so Up/Down can take over.
+                                focusRequester.requestFocus()
+                            },
+                            zoneOffsetMillis = zoneOffsetMillis,
+                            bookmarks = bookmarks,
+                            onAddBookmark = onAddBookmark,
+                            onRemoveBookmark = onRemoveBookmark,
+                            onMapLocalFromUrl = onMapLocalFromUrl,
+                        )
+                        RowDivider()
+                    }
                 }
+                // Overlays the list's right edge; the desktop scrollbar self-hides unless the traffic
+                // overflows the viewport, so it shows only when there's something to scroll.
+                VerticalListScrollbar(
+                    listState = listState,
+                    modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight(),
+                )
             }
         }
         if (!atBottom) {
