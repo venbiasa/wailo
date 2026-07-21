@@ -39,12 +39,6 @@ kotlin {
             // background dispatcher; depend on coroutines directly rather than via Compose transitively.
             implementation(libs.kotlinx.coroutines.core)
         }
-        jvmMain.dependencies {
-            // The Map Local body editor embeds this Swing code editor via SwingPanel — Compose's own
-            // text field re-lays-out the whole string per keystroke, so it can't stay smooth on large
-            // JSON (ADR-0020). Desktop-only; kept off commonMain behind the CodeEditor expect/actual.
-            implementation(libs.rsyntaxtextarea)
-        }
         jvmTest.dependencies {
             implementation(kotlin("test"))
             implementation(compose.desktop.uiTestJUnit4)

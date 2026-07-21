@@ -450,9 +450,8 @@ private fun RuleEditor(
 
         // Compact rule fields stay pinned at the top; the response payload (body + headers) fills the
         // rest through the tabs, so the editor takes the panel's remaining height and grows with the
-        // window. The Swing-backed editor deliberately isn't wrapped in a Compose scroll — a heavyweight
-        // AWT component flickers as the scroll repositions it — so it fills a fixed slot and scrolls its
-        // own content instead (ADR-0020/0021).
+        // window. The editor owns its own (viewport-virtualized) vertical scroll, so it fills a fixed
+        // slot rather than being wrapped in an outer Compose scroll (ADR-0023).
         Column(
             Modifier.fillMaxWidth().padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp),
@@ -585,8 +584,7 @@ private fun methodLabel(method: String): String = method.ifBlank { "Any" }
 
 /**
  * Single-select HTTP method picker. A plain field + [DropdownMenu] (not a text field) so the menu
- * anchors to it and the value can't be free-typed. The menu is a Compose popup drawn over the inline
- * body editor's Swing panel, which works because the host enables interop blending (ADR-0021).
+ * anchors to it and the value can't be free-typed.
  */
 @Composable
 private fun MethodDropdown(method: String, onSelect: (String) -> Unit) {
@@ -641,15 +639,14 @@ private fun MethodDropdown(method: String, onSelect: (String) -> Unit) {
 private enum class EditorTab(val label: String) { Body("Body"), Headers("Headers") }
 
 /**
- * The Body tab: the JSON editor for the response body Map Local will serve. The editor is a Swing panel
- * that unmounts when the Headers tab shows, but [CodeEditorState] snapshots its text across that (see its
- * `detach`), so edits and Save survive a switch. Validity shows in the footer verdict, not here.
+ * The Body tab: the JSON editor for the response body Map Local will serve. The editor composable unmounts
+ * when the Headers tab shows, but [CodeEditorState] is hoisted above the tabs, so edits and Save survive a
+ * switch. Validity shows in the footer verdict, not here.
  */
 @Composable
 private fun BodyTab(editorState: CodeEditorState) {
-    // Fill the tab area rather than wrapping the Swing editor in a Compose scroll: a heavyweight AWT
-    // component flickers as an outer scroll repositions it. The editor grows with the panel/window and
-    // scrolls its own content via RSyntaxTextArea's native scrollbars.
+    // Fill the tab area rather than wrapping the editor in an outer Compose scroll: it owns its own
+    // (viewport-virtualized) vertical scroll and grows with the panel/window (ADR-0023).
     CodeEditor(
         state = editorState,
         language = CodeLanguage.Json,

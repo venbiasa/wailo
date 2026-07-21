@@ -36,14 +36,7 @@ import java.net.InetAddress
 import java.util.TimeZone
 import kotlin.time.Duration.Companion.milliseconds
 
-fun main() {
-    // Render Compose popups (the Map Local method dropdown, context menus) above the inline body
-    // editor's embedded Swing panel (ADR-0021). Interop blending must be set before any Compose code
-    // runs, so it lives here rather than inside the composition; effective on macOS/Metal and
-    // Windows/Direct3D, a harmless no-op elsewhere.
-    System.setProperty("compose.interop.blending", "true")
-    runWailo()
-}
+fun main() = runWailo()
 
 // The window's first-run size, also enforced as its floor so the layout never has to reflow below the
 // geometry it was designed against. On desktop Compose sizes windows from Dp values 1:1 with AWT's
