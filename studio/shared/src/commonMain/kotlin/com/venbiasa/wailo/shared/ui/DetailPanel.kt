@@ -40,7 +40,6 @@ import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import com.venbiasa.wailo.protocol.Header
@@ -84,10 +83,12 @@ private fun DetailHeader(exchange: HttpExchange, onClose: () -> Unit) {
     // hue is lighter and low alpha would wash out. onSurface luminance stands in for "is dark theme".
     val dark = MaterialTheme.colorScheme.surface.luminance() < 0.5f
 
+    // Top-aligned so the status/method chips stay beside the URL's first line when a long URL wraps,
+    // rather than floating in the vertical center of a tall multi-line block.
     Row(
         Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
-        verticalAlignment = Alignment.CenterVertically,
+        verticalAlignment = Alignment.Top,
     ) {
         Pill(
             text = statusChipText(response?.code, response?.message ?: "", hasError),
@@ -103,13 +104,13 @@ private fun DetailHeader(exchange: HttpExchange, onClose: () -> Unit) {
             textStyle = MaterialTheme.typography.labelMedium.copy(fontFamily = FontFamily.Monospace),
         )
         val url = request?.url
-        SelectionContainer(Modifier.weight(1f)) {
+        // The chips carry 4.dp of vertical padding, so the same top inset drops the URL's first line
+        // onto the chips' text; the full address then wraps across as many lines as it needs.
+        SelectionContainer(Modifier.weight(1f).padding(top = 4.dp)) {
             Text(
                 if (url.isNullOrBlank()) AnnotatedString("(no URL)") else urlAnnotated(url),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
             )
         }
         CloseButton(onClose, contentDescription = "Close detail")

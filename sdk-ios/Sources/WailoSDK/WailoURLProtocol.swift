@@ -187,7 +187,8 @@ public final class WailoURLProtocol: URLProtocol {
         let headers = response.allHeaderFields.map { Header(name: "\($0.key)", value: "\($0.value)") }
         return HttpResponse(
             code: Int32(response.statusCode),
-            message: HTTPURLResponse.localizedString(forStatusCode: response.statusCode),
+            // URLSession never exposes the HTTP status line's reason phrase
+            message: "",
             body: Data(captured),
             body_size: declaredSize,
             body_truncated: truncated
