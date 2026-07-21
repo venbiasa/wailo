@@ -23,17 +23,25 @@ import com.venbiasa.wailo.engine.MapLocalBodyProvider
 import com.venbiasa.wailo.engine.WailoEngine
 import com.venbiasa.wailo.shared.FlowEntry
 import com.venbiasa.wailo.shared.MapLocalRuleDef
+import com.venbiasa.wailo.shared.PickedFile
 import com.venbiasa.wailo.shared.WailoApp
 import com.venbiasa.wailo.shared.theme.TextScale
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import java.awt.Dimension
+import java.awt.EventQueue
+import java.awt.FileDialog
+import java.awt.Frame
+import java.io.File
+import java.io.FilenameFilter
 import java.net.DatagramSocket
 import java.net.InetAddress
 import java.util.TimeZone
+import kotlin.coroutines.resume
 import kotlin.time.Duration.Companion.milliseconds
 
 fun main() = runWailo()
@@ -208,8 +216,51 @@ private fun runWailo() = application {
             onUpsertRule = upsertRule,
             onRemoveRule = removeRule,
             onLoadMapLocalBody = { rule -> withContext(Dispatchers.IO) { MapLocalStore.loadInlineBody(rule) } },
-            onSaveMapLocalBody = { rule, text -> withContext(Dispatchers.IO) { MapLocalStore.saveInlineBody(rule, text) } },
+            onSaveMapLocalBody = { rule, bytes -> withContext(Dispatchers.IO) { MapLocalStore.saveInlineBody(rule, bytes) } },
+            // `window` (the ComposeWindow, an AWT Frame) parents the native dialog so it's modal to the app.
+            onPickMapLocalFile = { chooseMapLocalFile(window) },
         )
+    }
+}
+
+// The common Map Local body file types, used to gently filter the native picker.
+private val BodyFileExtensions = setOf(
+    "json", "txt", "html", "xml", "js", "css", "csv", "png", "jpg", "jpeg", "gif", "webp", "bmp", "svg",
+)
+
+/**
+ * Opens the *native* OS file picker (Cocoa's NSOpenPanel on macOS, the Win32 dialog on Windows, GTK on
+ * Linux) for a Map Local body file and reads the chosen file. [java.awt.FileDialog] is the native picker;
+ * Swing's JFileChooser is a cross-platform look-alike, which is why we use FileDialog here. The file's
+ * extension drives the Content-Type, which selects the editor's body surface (JSON editor vs image
+ * preview) and what the mock serves. Returns null when the user cancels or the file can't be read.
+ */
+private suspend fun chooseMapLocalFile(owner: Frame?): PickedFile? {
+    val file = awaitNativeFileDialog(owner) ?: return null
+    return withContext(Dispatchers.IO) {
+        runCatching { PickedFile(file.readBytes(), guessContentType(file.name)) }.getOrNull()
+    }
+}
+
+/**
+ * Shows the native modal [FileDialog] and suspends until it's dismissed. The dialog is opened via
+ * [EventQueue.invokeLater] — on a *fresh* EDT event rather than inline — so its nested modal event loop
+ * never runs inside Compose's current render/flush pass. Opening it inline (this is called from the
+ * Compose composition scope) re-enters Compose's coroutine dispatcher mid-flush and crashes it with a
+ * ClassCastException / ConcurrentModificationException.
+ */
+private suspend fun awaitNativeFileDialog(owner: Frame?): File? = suspendCancellableCoroutine { cont ->
+    EventQueue.invokeLater {
+        val dialog = FileDialog(owner, "Choose body file", FileDialog.LOAD).apply {
+            isMultipleMode = false
+            // Honored by the native macOS/Linux pickers to gray out non-body files; Windows ignores it and
+            // shows everything, which is fine — any file can still be mapped.
+            filenameFilter = FilenameFilter { _, name -> name.substringAfterLast('.', "").lowercase() in BodyFileExtensions }
+        }
+        dialog.isVisible = true // blocks the EDT (nested modal loop) until the user chooses or cancels
+        val name = dialog.file
+        val dir = dialog.directory
+        cont.resume(if (name != null && dir != null) File(dir, name) else null)
     }
 }
 

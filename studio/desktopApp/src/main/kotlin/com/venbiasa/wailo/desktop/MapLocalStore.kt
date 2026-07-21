@@ -41,18 +41,29 @@ object MapLocalStore {
     fun save(rules: List<MapLocalRuleDef>) =
         store.putString(KEY, rules.joinToString(RULE_SEP) { encode(it) })
 
-    /** The current text of an inline rule's authored body (empty if none saved yet or unreadable). */
-    fun loadInlineBody(rule: MapLocalRuleDef): String =
-        runCatching { managedBodyFile(rule.id).readText() }.getOrDefault("")
-
-    /** Persists an inline rule's body to its app-managed file, so [serveBody] can read it per request. */
-    fun saveInlineBody(rule: MapLocalRuleDef, text: String) {
-        runCatching { managedBodyFile(rule.id).writeText(text) }
+    /**
+     * An inline rule's authored body bytes (empty if none saved yet or unreadable). Bytes, not text, so
+     * a rule can serve any payload — JSON or a binary image — through the one code path.
+     */
+    fun loadInlineBody(rule: MapLocalRuleDef): ByteArray {
+        val file = existingManagedBodyFile(rule.id) ?: return ByteArray(0)
+        return runCatching { file.readBytes() }.getOrDefault(ByteArray(0))
     }
 
-    /** Removes an inline rule's managed body file (on rule delete or a switch back to a file source). */
+    /**
+     * Persists an inline rule's body to its app-managed file, so [serveBody] can read it per request.
+     * The file's extension follows the rule's Content-Type (json/png/…) so the stored body is
+     * self-describing and the extension guess is still correct if the header is later cleared. Any prior
+     * body for this id is removed first, so a body-type switch (e.g. JSON → image) never leaves two files.
+     */
+    fun saveInlineBody(rule: MapLocalRuleDef, bytes: ByteArray) {
+        deleteInlineBody(rule.id)
+        runCatching { managedBodyFileFor(rule).writeBytes(bytes) }
+    }
+
+    /** Removes any app-managed body file(s) for [id] (on rule delete, a body-type switch, or a file source). */
     fun deleteInlineBody(id: String) {
-        runCatching { managedBodyFile(id).delete() }
+        runCatching { managedBodyFiles(id).forEach { it.delete() } }
     }
 
     private fun encode(rule: MapLocalRuleDef): String = listOf(
@@ -103,8 +114,42 @@ object MapLocalStore {
 }
 
 // Inline bodies live under the OS's per-user app-data dir (not in prefs, which is for small values),
-// one .json file per rule id. The .json suffix also drives the served Content-Type when none is set.
-private fun managedBodyFile(id: String): File = File(mapLocalBodiesDir(), "$id.json")
+// one file per rule id. The extension follows the rule's Content-Type so the stored body is
+// self-describing (a .png holds an image, .json holds JSON) and drives the served Content-Type when
+// the rule sets none.
+private fun managedBodyFileFor(rule: MapLocalRuleDef): File =
+    File(mapLocalBodiesDir(), "${rule.id}.${extensionForContentType(rule.contentType())}")
+
+// Every managed body file for a rule id (there should be at most one). A glob rather than a fixed name
+// so it finds the body whatever its extension, sweeps a stale file left by an interrupted type switch,
+// and still finds the legacy fixed-name ".json" body written before bodies were typed. The trailing dot
+// makes "$id." delimit the id, so sibling ids that share a prefix never match.
+private fun managedBodyFiles(id: String): List<File> =
+    mapLocalBodiesDir().listFiles { file -> file.name.startsWith("$id.") }?.toList() ?: emptyList()
+
+private fun existingManagedBodyFile(id: String): File? = managedBodyFiles(id).firstOrNull()
+
+private fun MapLocalRuleDef.contentType(): String? =
+    headers.firstOrNull { it.name.equals("Content-Type", ignoreCase = true) }?.value
+
+// The file extension to store a body under, from its Content-Type — the inverse of [guessContentType],
+// used to name the managed body file. Unknown/absent types fall back to a neutral ".bin".
+private fun extensionForContentType(contentType: String?): String =
+    when (contentType?.substringBefore(';')?.trim()?.lowercase()) {
+        "application/json" -> "json"
+        "text/html" -> "html"
+        "application/xml", "text/xml" -> "xml"
+        "text/plain" -> "txt"
+        "application/javascript", "text/javascript" -> "js"
+        "text/css" -> "css"
+        "text/csv" -> "csv"
+        "image/png" -> "png"
+        "image/jpeg" -> "jpg"
+        "image/gif" -> "gif"
+        "image/svg+xml" -> "svg"
+        "image/webp" -> "webp"
+        else -> "bin"
+    }
 
 private fun mapLocalBodiesDir(): File = File(appDataDir(), "maplocal-bodies").apply { mkdirs() }
 
@@ -148,7 +193,7 @@ fun compileRules(rules: List<MapLocalRuleDef>): List<MapLocalRule> =
  */
 fun serveBody(ruleId: String, defs: List<MapLocalRuleDef>): ServedBody? {
     val def = defs.firstOrNull { it.id == ruleId && it.enabled } ?: return null
-    val file = if (def.inline) managedBodyFile(def.id) else File(def.filePath)
+    val file = if (def.inline) (existingManagedBodyFile(def.id) ?: return null) else File(def.filePath)
     val bytes = runCatching { file.readBytes() }.getOrNull() ?: return null
     val authored = def.headers.filter { it.name.isNotBlank() }
     val hasContentType = authored.any { it.name.equals("Content-Type", ignoreCase = true) }
@@ -169,7 +214,7 @@ fun serveBody(ruleId: String, defs: List<MapLocalRuleDef>): ServedBody? {
     return ServedBody(code = def.statusCode, headers = headers, body = bytes)
 }
 
-private fun guessContentType(path: String): String = when (path.substringAfterLast('.', "").lowercase()) {
+internal fun guessContentType(path: String): String = when (path.substringAfterLast('.', "").lowercase()) {
     "json" -> "application/json"
     "html", "htm" -> "text/html"
     "xml" -> "application/xml"

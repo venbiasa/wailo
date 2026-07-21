@@ -9,6 +9,16 @@ import kotlin.random.Random
 data class MapLocalHeader(val name: String, val value: String)
 
 /**
+ * A body file the host's file picker read from disk, handed back to the Map Local editor to author a
+ * rule's response body: a JSON/text file loads into the code editor, an image into the preview.
+ * [contentType] is inferred from the file's extension so the editor can set the rule's Content-Type,
+ * which picks the body surface and keeps what's served in sync. Not a `data class`: a [ByteArray] has
+ * identity equality, so the generated equals/hashCode would be misleading — this is a plain carrier the
+ * editor reads once.
+ */
+class PickedFile(val bytes: ByteArray, val contentType: String)
+
+/**
  * A Map Local rule as the desktop authors it: match a request, answer it with the contents of a
  * local file. This is the UI/host-facing definition — it holds the file *path*, not its bytes. The
  * host reads the file and compiles this into the protocol `MapLocalRule` (bytes inlined) before

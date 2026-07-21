@@ -41,6 +41,7 @@ import com.venbiasa.wailo.protocol.Header
 import com.venbiasa.wailo.shared.FlowEntry
 import com.venbiasa.wailo.shared.MapLocalHeader
 import com.venbiasa.wailo.shared.MapLocalRuleDef
+import com.venbiasa.wailo.shared.PickedFile
 import com.venbiasa.wailo.shared.format.requestHost
 import com.venbiasa.wailo.shared.resources.Res
 import com.venbiasa.wailo.shared.resources.ic_dark_mode
@@ -69,8 +70,9 @@ internal fun WailoViewer(
     mapLocalRules: List<MapLocalRuleDef>,
     onUpsertRule: (MapLocalRuleDef) -> Unit,
     onRemoveRule: (String) -> Unit,
-    onLoadMapLocalBody: suspend (MapLocalRuleDef) -> String,
-    onSaveMapLocalBody: suspend (MapLocalRuleDef, String) -> Unit,
+    onLoadMapLocalBody: suspend (MapLocalRuleDef) -> ByteArray,
+    onSaveMapLocalBody: suspend (MapLocalRuleDef, ByteArray) -> Unit,
+    onPickMapLocalFile: suspend () -> PickedFile?,
 ) {
     // Transient view state (not persisted): nothing is selected when the app opens.
     var selectedId by remember { mutableStateOf<String?>(null) }
@@ -95,7 +97,7 @@ internal fun WailoViewer(
     // panel only renders them (ADR-0013/0021).
     var mapLocalOpen by remember { mutableStateOf(false) }
     var mapLocalDraft by remember { mutableStateOf<MapLocalRuleDef?>(null) }
-    var mapLocalBodySeed by remember { mutableStateOf<String?>(null) }
+    var mapLocalBodySeed by remember { mutableStateOf<ByteArray?>(null) }
     var mapLocalWidth by remember { mutableStateOf(460.dp) }
     val density = LocalDensity.current
 
@@ -136,8 +138,9 @@ internal fun WailoViewer(
                                 bookmarks = bookmarks,
                                 onAddBookmark = onAddBookmark,
                                 onRemoveBookmark = onRemoveBookmark,
-                                // A row's "Map Local…" seeds a fresh draft (exact URL + method + JSON
-                                // body) and opens the tool panel — no separate window (ADR-0021).
+                                // A row's "Map Local…" seeds a fresh draft (exact URL + method + the
+                                // captured body's bytes — JSON or image) and opens the tool panel — no
+                                // separate window (ADR-0021).
                                 onMapLocalFromUrl = { url, method, responseHeaders, seed ->
                                     mapLocalDraft = MapLocalRuleDef(
                                         id = MapLocalRuleDef.newId(),
@@ -186,6 +189,7 @@ internal fun WailoViewer(
                             onClose = { mapLocalOpen = false },
                             onLoadBody = onLoadMapLocalBody,
                             onSaveBody = onSaveMapLocalBody,
+                            onPickFile = onPickMapLocalFile,
                         )
                     }
                 }

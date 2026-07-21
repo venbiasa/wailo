@@ -56,10 +56,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.venbiasa.wailo.protocol.Header
 import com.venbiasa.wailo.shared.FlowEntry
-import com.venbiasa.wailo.shared.format.BodyContent
-import com.venbiasa.wailo.shared.format.bodyContent
 import com.venbiasa.wailo.shared.format.codeText
-import com.venbiasa.wailo.shared.format.contentType
 import com.venbiasa.wailo.shared.format.formatBytes
 import com.venbiasa.wailo.shared.format.formatClockTime
 import com.venbiasa.wailo.shared.format.requestHost
@@ -85,7 +82,7 @@ internal fun TrafficList(
     bookmarks: List<String>,
     onAddBookmark: (String) -> Unit,
     onRemoveBookmark: (String) -> Unit,
-    onMapLocalFromUrl: (String, String, List<Header>, String?) -> Unit,
+    onMapLocalFromUrl: (String, String, List<Header>, ByteArray?) -> Unit,
 ) {
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
@@ -268,7 +265,7 @@ private fun TrafficRow(
     bookmarks: List<String>,
     onAddBookmark: (String) -> Unit,
     onRemoveBookmark: (String) -> Unit,
-    onMapLocalFromUrl: (String, String, List<Header>, String?) -> Unit,
+    onMapLocalFromUrl: (String, String, List<Header>, ByteArray?) -> Unit,
 ) {
     val exchange = entry.exchange
     val request = exchange.request
@@ -295,18 +292,12 @@ private fun TrafficRow(
         }
         if (url.isNotEmpty()) {
             // Seed a new rule from this row: the exact URL and method, this response's captured headers,
-            // plus its body (decoded/pretty-printed when textual — i.e. JSON — and capped so a giant
-            // payload doesn't stall the click) so it opens ready to map-and-tweak. Computed on select,
-            // not per row, to keep the list cheap.
+            // plus its body's raw bytes (the editor decodes them as JSON text or previews them as an image
+            // per the Content-Type) so it opens ready to map-and-tweak. Computed on select, not per row.
             add(
                 ContextMenuAction("Map Local\u2026") {
-                    val responseContentType = response?.headers?.contentType()
                     val body = response?.body
-                    val seed = if (body != null && body.size > 0) {
-                        (bodyContent(body, responseContentType, maxTextChars = 5_000_000) as? BodyContent.Text)?.text
-                    } else {
-                        null
-                    }
+                    val seed = body?.takeIf { it.size > 0 }?.toByteArray()
                     onMapLocalFromUrl(
                         url,
                         request?.method.orEmpty().trim().uppercase(),

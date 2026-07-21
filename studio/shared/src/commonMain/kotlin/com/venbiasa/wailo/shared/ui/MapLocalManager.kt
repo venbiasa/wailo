@@ -1,5 +1,6 @@
 package com.venbiasa.wailo.shared.ui
 
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -46,6 +47,7 @@ import androidx.compose.runtime.toMutableStateList
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.navigation3.runtime.NavEntry
@@ -55,6 +57,8 @@ import androidx.navigation3.ui.NavDisplay
 import androidx.savedstate.serialization.SavedStateConfiguration
 import com.venbiasa.wailo.shared.MapLocalHeader
 import com.venbiasa.wailo.shared.MapLocalRuleDef
+import com.venbiasa.wailo.shared.PickedFile
+import com.venbiasa.wailo.shared.format.formatBytes
 import com.venbiasa.wailo.shared.format.jsonErrorMessage
 import com.venbiasa.wailo.shared.format.prettyPrintJson
 import com.venbiasa.wailo.shared.resources.Res
@@ -72,6 +76,7 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.modules.SerializersModule
 import kotlinx.serialization.modules.polymorphic
 import kotlinx.serialization.modules.subclass
+import org.jetbrains.compose.resources.decodeToImageBitmap
 import org.jetbrains.compose.resources.vectorResource
 
 /**
@@ -81,21 +86,24 @@ import org.jetbrains.compose.resources.vectorResource
  *
  * [initialDraft] seeds the editor: non-null opens straight into the form (used when launched from a
  * traffic row so the URL/method are pre-filled), null shows the list. [initialBodySeed] pre-fills the
- * inline body editor for that draft (e.g. the captured response, to map-and-tweak). [onUpsert] adds or
- * replaces a rule by id; [onRemove] deletes by id. [onLoadBody]/[onSaveBody] read and persist a rule's
- * authored body — the host owns all file IO (the body is an app-managed file), so `shared` still never
- * touches the filesystem. [onClose] dismisses the whole panel (the tool-panel close affordance).
+ * body for that draft with the captured response's raw bytes (decoded as JSON text, or previewed as an
+ * image, depending on its Content-Type). [onUpsert] adds or replaces a rule by id; [onRemove] deletes
+ * by id. [onLoadBody]/[onSaveBody] read and persist a rule's authored body as bytes — the host owns all
+ * file IO (the body is an app-managed file), so `shared` still never touches the filesystem.
+ * [onPickFile] asks the host to open a file picker for a body file (JSON/text or image) and hand back its
+ * bytes. [onClose] dismisses the whole panel (the tool-panel close affordance).
  */
 @Composable
 fun MapLocalManager(
     rules: List<MapLocalRuleDef>,
     initialDraft: MapLocalRuleDef?,
-    initialBodySeed: String? = null,
+    initialBodySeed: ByteArray? = null,
     onUpsert: (MapLocalRuleDef) -> Unit,
     onRemove: (String) -> Unit,
     onClose: () -> Unit = {},
-    onLoadBody: suspend (MapLocalRuleDef) -> String = { "" },
-    onSaveBody: suspend (MapLocalRuleDef, String) -> Unit = { _, _ -> },
+    onLoadBody: suspend (MapLocalRuleDef) -> ByteArray = { ByteArray(0) },
+    onSaveBody: suspend (MapLocalRuleDef, ByteArray) -> Unit = { _, _ -> },
+    onPickFile: suspend () -> PickedFile? = { null },
 ) {
     // Navigation 3 owns the panel's page stack (rule list -> mapping-rule editor): the back stack is
     // the single source of truth for which page shows and for Back. The keys are @Serializable and the
@@ -109,9 +117,9 @@ fun MapLocalManager(
     // isn't in `rules` yet, so it lives here until Save persists it. Transient session state, not
     // restored across process death (an interrupted draft is cheap to re-open).
     val drafts = remember { mutableStateMapOf<String, MapLocalRuleDef>() }
-    val bodySeeds = remember { mutableStateMapOf<String, String?>() }
+    val bodySeeds = remember { mutableStateMapOf<String, ByteArray?>() }
 
-    fun openEditor(rule: MapLocalRuleDef, seed: String? = null) {
+    fun openEditor(rule: MapLocalRuleDef, seed: ByteArray? = null) {
         drafts[rule.id] = rule
         bodySeeds[rule.id] = seed
         backStack.add(RuleEditorDestination(rule.id))
@@ -198,6 +206,7 @@ fun MapLocalManager(
                                 bodySeed = bodySeeds[destination.ruleId],
                                 onLoadBody = onLoadBody,
                                 onSaveBody = onSaveBody,
+                                onPickFile = onPickFile,
                                 onSaved = { if (backStack.size > 1) backStack.removeLastOrNull() },
                                 onUpsert = onUpsert,
                                 onBack = { if (backStack.size > 1) backStack.removeLastOrNull() },
@@ -340,9 +349,10 @@ private fun RuleEditor(
     initial: MapLocalRuleDef,
     enabled: Boolean,
     onToggleEnabled: (Boolean) -> Unit,
-    bodySeed: String?,
-    onLoadBody: suspend (MapLocalRuleDef) -> String,
-    onSaveBody: suspend (MapLocalRuleDef, String) -> Unit,
+    bodySeed: ByteArray?,
+    onLoadBody: suspend (MapLocalRuleDef) -> ByteArray,
+    onSaveBody: suspend (MapLocalRuleDef, ByteArray) -> Unit,
+    onPickFile: suspend () -> PickedFile?,
     onSaved: () -> Unit,
     onUpsert: (MapLocalRuleDef) -> Unit,
     onBack: () -> Unit,
@@ -356,15 +366,61 @@ private fun RuleEditor(
     var saving by remember { mutableStateOf(false) }
 
     val scope = rememberCoroutineScope()
-    val editorState = rememberCodeEditorState(bodySeed ?: "")
 
-    // Seed the editor: from the captured body when launched from a row, else load the rule's stored
-    // body from the host. touch() re-runs validation after either fills the document.
+    // A rule serves either a text/JSON body (authored in the code editor) or a binary image body (chosen
+    // from a file, previewed here), decided live by the Content-Type header — so choosing a file (or
+    // editing Content-Type on the Headers tab) flips the Body tab between the two. The two bodies live in
+    // separate state: the code editor's document for text, in-memory [imageBytes] for the image; only the
+    // one matching the current Content-Type is persisted on Save.
+    val contentType = headers.firstOrNull { it.name.equals("Content-Type", ignoreCase = true) }?.value
+    val isImage = contentType.isImageContentType()
+    // The seed can't be decoded both ways, so the code editor is only ever seeded for a rule that opened
+    // as text; an image rule keeps its bytes for the preview instead.
+    val startedAsImage = remember { initial.headers.firstOrNull { it.name.equals("Content-Type", ignoreCase = true) }?.value.isImageContentType() }
+    var imageBytes by remember { mutableStateOf(if (startedAsImage) bodySeed else null) }
+
+    val editorState = rememberCodeEditorState("")
+
+    fun setContentType(value: String) {
+        val idx = headers.indexOfFirst { it.name.equals("Content-Type", ignoreCase = true) }
+        if (idx >= 0) headers[idx] = headers[idx].copy(value = value)
+        else headers.add(MapLocalHeader("Content-Type", value))
+    }
+
+    // Fill the code editor from JSON/text bytes, pretty-printing JSON off the main thread on the way in.
+    suspend fun fillEditor(bytes: ByteArray) {
+        val text = withContext(Dispatchers.Default) {
+            val raw = bytes.decodeToString()
+            prettyPrintJson(raw) ?: raw
+        }
+        editorState.setText(text)
+        editorState.touch()
+    }
+
+    // Seed the body once: an image rule loads its bytes (the captured seed, or the host's stored file)
+    // for the preview; a text rule fills the code editor. touch() re-runs validation after it's filled.
     LaunchedEffect(editorState) {
-        if (bodySeed == null) {
-            editorState.setText(onLoadBody(initial))
+        if (startedAsImage) {
+            if (bodySeed == null) imageBytes = onLoadBody(initial)
+        } else {
+            fillEditor(bodySeed ?: onLoadBody(initial))
         }
         editorState.touch()
+    }
+
+    // Author the body from a file the host picks (any rule): adopt the file's Content-Type — which drives
+    // the Body surface and what's served — then a JSON/text file loads into the code editor and an image
+    // into the preview.
+    fun chooseFile() {
+        scope.launch {
+            val picked = onPickFile() ?: return@launch
+            setContentType(picked.contentType)
+            if (picked.contentType.isImageContentType()) {
+                imageBytes = picked.bytes
+            } else {
+                fillEditor(picked.bytes)
+            }
+        }
     }
 
     // Live JSON validity, debounced off the editor's edit ticks so a keystroke never forces a
@@ -402,14 +458,21 @@ private fun RuleEditor(
         if (saving) return
         saving = true
         val rule = buildRule()
+        // Snapshot the body source now (off-composition reads in the coroutine would be stale/illegal).
+        val imageMode = isImage
+        val bodyImage = imageBytes
         scope.launch {
-            // Pretty-print on the way out (Map Local is JSON-focused); a body that won't parse as JSON is
-            // saved verbatim rather than blocking the save, and an over-large body skips formatting entirely.
-            val raw = editorState.currentText()
-            val body = withContext(Dispatchers.Default) {
-                if (raw.length <= MAX_FORMAT_CHARS) prettyPrintJson(raw) ?: raw else raw
+            val bytes = if (imageMode) {
+                bodyImage ?: ByteArray(0)
+            } else {
+                // Pretty-print JSON on the way out; a body that won't parse is saved verbatim rather than
+                // blocking the save, and an over-large body skips formatting entirely.
+                val raw = editorState.currentText()
+                withContext(Dispatchers.Default) {
+                    (if (raw.length <= MAX_FORMAT_CHARS) prettyPrintJson(raw) ?: raw else raw).encodeToByteArray()
+                }
             }
-            onSaveBody(rule, body)
+            onSaveBody(rule, bytes)
             onUpsert(rule)
             onSaved()
         }
@@ -496,7 +559,12 @@ private fun RuleEditor(
         )
         Box(Modifier.weight(1f).fillMaxWidth()) {
             when (editorTab) {
-                EditorTab.Body -> BodyTab(editorState = editorState)
+                EditorTab.Body -> BodyTab(
+                    isImage = isImage,
+                    imageBytes = imageBytes,
+                    editorState = editorState,
+                    onChooseFile = ::chooseFile,
+                )
                 EditorTab.Headers -> HeadersTab(headers)
             }
         }
@@ -509,8 +577,9 @@ private fun RuleEditor(
         ) {
             // The JSON verdict shares the footer with Save to save vertical space, taking the free width
             // to its left and wrapping (multiline) so an error stays readable. Backing out is the
-            // header's arrow, so the footer carries just the commit action.
-            BodyVerdict(validity, Modifier.weight(1f))
+            // header's arrow, so the footer carries just the commit action. An image body has no JSON to
+            // judge, so the verdict is suppressed then.
+            BodyVerdict(if (isImage) BodyValidity.None else validity, Modifier.weight(1f))
             Button(
                 onClick = { save() },
                 enabled = !saving && urlPattern.isNotBlank(),
@@ -643,17 +712,69 @@ private enum class EditorTab(val label: String) { Body("Body"), Headers("Headers
  * when the Headers tab shows, but [CodeEditorState] is hoisted above the tabs, so edits and Save survive a
  * switch. Validity shows in the footer verdict, not here.
  */
+/**
+ * The Body tab: a "Choose file…" action (fill the body from a file on disk — available to every rule)
+ * above the body surface, which is the JSON code editor for a text/JSON body or an image preview for an
+ * image body, decided by the rule's Content-Type. The editor's [CodeEditorState] is hoisted above the
+ * tabs so edits and Save survive a tab switch or a flip between the two surfaces.
+ */
 @Composable
-private fun BodyTab(editorState: CodeEditorState) {
-    // Fill the tab area rather than wrapping the editor in an outer Compose scroll: it owns its own
-    // (viewport-virtualized) vertical scroll and grows with the panel/window (ADR-0023).
-    CodeEditor(
-        state = editorState,
-        language = CodeLanguage.Json,
-        readOnly = false,
-        modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp, vertical = 8.dp),
-    )
+private fun BodyTab(
+    isImage: Boolean,
+    imageBytes: ByteArray?,
+    editorState: CodeEditorState,
+    onChooseFile: () -> Unit,
+) {
+    Column(Modifier.fillMaxSize()) {
+        OutlinedButton(onClick = onChooseFile, modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
+            Text("Choose file\u2026")
+        }
+        // The body surface fills the rest of the tab: the editor owns its own (viewport-virtualized)
+        // scroll and grows with the panel/window (ADR-0023); the image preview scales to fit.
+        Box(Modifier.weight(1f).fillMaxWidth()) {
+            if (isImage) {
+                ImagePreviewPane(imageBytes)
+            } else {
+                CodeEditor(
+                    state = editorState,
+                    language = CodeLanguage.Json,
+                    readOnly = false,
+                    modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp, vertical = 8.dp),
+                )
+            }
+        }
+    }
 }
+
+/**
+ * Previews the image bytes a rule will serve. Bytes that don't decode (a format Skia can't render, e.g.
+ * SVG) still serve as-is, so this only reports it rather than treating it as an error.
+ */
+@Composable
+private fun ImagePreviewPane(bytes: ByteArray?) {
+    val bitmap = remember(bytes) {
+        bytes?.takeIf { it.isNotEmpty() }?.let { runCatching { it.decodeToImageBitmap() }.getOrNull() }
+    }
+    Box(Modifier.fillMaxSize().padding(16.dp), contentAlignment = Alignment.Center) {
+        when {
+            bytes == null || bytes.isEmpty() ->
+                MutedText("No image yet — choose a file to serve as this response's body.")
+            bitmap == null ->
+                MutedText("Can't preview this file (${formatBytes(bytes.size.toLong())}); it will still be served as-is.")
+            else -> Image(
+                bitmap = bitmap,
+                contentDescription = "Mapped image preview",
+                modifier = Modifier.fillMaxSize(),
+                contentScale = ContentScale.Fit,
+            )
+        }
+    }
+}
+
+// A rule serves an image when its Content-Type is image/* — the signal the editor uses to switch the
+// Body tab between the JSON editor and the image preview, and the host uses to name the stored body.
+private fun String?.isImageContentType(): Boolean =
+    this?.trim()?.startsWith("image/", ignoreCase = true) == true
 
 /**
  * The Headers tab: an editable name/value table for the headers the mocked response returns. Content-Type

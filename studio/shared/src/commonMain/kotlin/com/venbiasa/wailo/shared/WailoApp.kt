@@ -23,8 +23,9 @@ import com.venbiasa.wailo.shared.ui.WailoViewer
  * [onRemoveBookmark] let the viewer mutate that set (the host owns its persistence, ADR-0013).
  * [mapLocalRules] are the host-owned, persisted Map Local rules the right-side tool panel renders
  * (ADR-0021); [onUpsertRule]/[onRemoveRule] mutate them, and [onLoadMapLocalBody]/[onSaveMapLocalBody]
- * read/persist a rule's authored body (the host owns all file IO). The panel's open state and any
- * row-seeded draft are the viewer's own transient state.
+ * read/persist a rule's authored body as bytes (the host owns all file IO). [onPickMapLocalFile] opens
+ * the host's file picker for a body file (JSON/text or image). The panel's open state and any row-seeded
+ * draft are the viewer's own transient state.
  */
 @Composable
 fun WailoApp(
@@ -43,8 +44,9 @@ fun WailoApp(
     mapLocalRules: List<MapLocalRuleDef> = emptyList(),
     onUpsertRule: (MapLocalRuleDef) -> Unit = {},
     onRemoveRule: (String) -> Unit = {},
-    onLoadMapLocalBody: suspend (MapLocalRuleDef) -> String = { "" },
-    onSaveMapLocalBody: suspend (MapLocalRuleDef, String) -> Unit = { _, _ -> },
+    onLoadMapLocalBody: suspend (MapLocalRuleDef) -> ByteArray = { ByteArray(0) },
+    onSaveMapLocalBody: suspend (MapLocalRuleDef, ByteArray) -> Unit = { _, _ -> },
+    onPickMapLocalFile: suspend () -> PickedFile? = { null },
 ) {
     WailoTheme(darkTheme = darkTheme) {
         val density = LocalDensity.current
@@ -68,6 +70,7 @@ fun WailoApp(
                 onRemoveRule = onRemoveRule,
                 onLoadMapLocalBody = onLoadMapLocalBody,
                 onSaveMapLocalBody = onSaveMapLocalBody,
+                onPickMapLocalFile = onPickMapLocalFile,
             )
         }
     }
