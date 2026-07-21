@@ -221,8 +221,6 @@ internal fun ComposeCodeEditor(
         target?.let { hScroll.scrollTo(it.roundToInt().coerceIn(0, hScroll.maxValue)) }
     }
 
-    LaunchedEffect(Unit) { focusRequester.requestFocus() }
-
     // The selection to actually copy/cut. When it ends right at a collapsed opener's fold point (that line's
     // end, where `{`/`[` sits), stretch the end down to the matching close so the copy carries the whole
     // `{ ⋯ }` body the user sees as one unit — not just the visible opener line (the folded-away lines are
@@ -483,6 +481,7 @@ internal fun ComposeCodeEditor(
                         contentWidthDp = contentWidthDp,
                         hScroll = hScroll,
                         caretOn = caretOn && focused,
+                        focused = focused,
                         foldable = foldRegions.containsKey(index),
                         folded = index in foldedStarts && foldRegions.containsKey(index),
                         foldCloseChar = foldRegions[index]?.closeChar,
@@ -524,6 +523,7 @@ private fun EditorLineRow(
     contentWidthDp: Dp,
     hScroll: ScrollState,
     caretOn: Boolean,
+    focused: Boolean,
     foldable: Boolean,
     folded: Boolean,
     foldCloseChar: Char?,
@@ -537,6 +537,9 @@ private fun EditorLineRow(
     val caret = state.caret
     val selection = state.selectionRange()
     val isCaretLine = index == caret.line
+    // The current-line affordances (brighter gutter number + faint row tint) belong to a focused editor;
+    // an unfocused viewer has no active caret, so its caret row must not be singled out.
+    val activeCaretLine = isCaretLine && focused
     val annotated = remember(lineText, language, highlight) { annotateLine(lineText, language, highlight) }
     // A collapsed block reads as selected once the selection reaches the opener's fold point (its line end,
     // where `{`/`[` sits): the `⋯ }` chip then highlights and Ctrl+C copies the whole hidden body (the copy
@@ -556,8 +559,8 @@ private fun EditorLineRow(
             Text(
                 (index + 1).toString(),
                 // Inactive numbers use onSurfaceVariant (as the JSON preview does) rather than the faint
-                // `outline`, which was too low-contrast to read; the caret's line brightens to onSurface.
-                style = textStyle.copy(color = if (isCaretLine) scheme.onSurface else scheme.onSurfaceVariant),
+                // `outline`, which was too low-contrast to read; the focused caret's line brightens to onSurface.
+                style = textStyle.copy(color = if (activeCaretLine) scheme.onSurface else scheme.onSurfaceVariant),
                 maxLines = 1,
             )
         }
@@ -580,7 +583,7 @@ private fun EditorLineRow(
         }
         Box(
             Modifier.weight(1f).fillMaxHeight()
-                .background(if (isCaretLine && selection == null) scheme.onSurface.copy(alpha = 0.05f) else Color.Transparent)
+                .background(if (activeCaretLine && selection == null) scheme.onSurface.copy(alpha = 0.05f) else Color.Transparent)
                 .clipToBounds()
                 .horizontalScroll(hScroll),
         ) {

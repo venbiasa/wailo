@@ -79,7 +79,7 @@ internal fun analyzeBody(body: ByteString, contentType: String?, truncated: Bool
         else -> PreviewKind.Text
     }
     val previewers = when (kind) {
-        // JSON gets the interactive collapsible tree only — no Text/Hex toggle. The full raw bytes
+        // JSON gets the read-only code editor only — no Text/Hex toggle. The full raw bytes
         // are still one click away on the Raw tab, so nothing is lost.
         PreviewKind.Json -> listOf(PreviewKind.Json)
         PreviewKind.Text -> listOf(PreviewKind.Text, PreviewKind.Hex)
