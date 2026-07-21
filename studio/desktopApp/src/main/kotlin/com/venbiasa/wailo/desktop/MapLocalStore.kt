@@ -75,14 +75,20 @@ object MapLocalStore {
         rule.statusCode.toString(),
         encodeHeaders(rule.headers),
         if (rule.inline) "1" else "0",
+        // Name is appended last so pre-name lines (8 fields) still decode; free text, so Base64 like
+        // the other string fields to stay delimiter-safe.
+        enc(rule.name),
     ).joinToString(FIELD_SEP)
 
     private fun decode(line: String): MapLocalRuleDef? {
         val parts = line.split(FIELD_SEP)
-        // Accept the legacy 7-field layout (pre-inline rules) as file-backed, plus the current 8-field one.
-        if (parts.size != 7 && parts.size != 8) return null
+        // Accept the legacy 7-field layout (pre-inline) as file-backed, the 8-field one (pre-name), and
+        // the current 9-field one.
+        if (parts.size !in 7..9) return null
         return MapLocalRuleDef(
             id = parts[0],
+            // Rules saved before names existed migrate to "Untitled" (a blank name can't be saved now).
+            name = if (parts.size >= 9) dec(parts[8]).ifBlank { "Untitled" } else "Untitled",
             enabled = parts[1] == "1",
             urlPattern = dec(parts[2]),
             // A rule now matches a single method; a legacy multi-method line collapses to its first.
@@ -90,7 +96,7 @@ object MapLocalStore {
             filePath = dec(parts[4]),
             statusCode = parts[5].toIntOrNull() ?: 200,
             headers = decodeHeaders(parts[6]),
-            inline = parts.size == 8 && parts[7] == "1",
+            inline = parts.size >= 8 && parts[7] == "1",
         )
     }
 

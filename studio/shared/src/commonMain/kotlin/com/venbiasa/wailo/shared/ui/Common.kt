@@ -129,6 +129,7 @@ internal fun CompactOutlinedTextField(
     placeholder: String? = null,
     singleLine: Boolean = true,
     enabled: Boolean = true,
+    isError: Boolean = false,
 ) {
     val interactionSource = remember { MutableInteractionSource() }
     BasicTextField(
@@ -140,7 +141,7 @@ internal fun CompactOutlinedTextField(
         // Input text color rides on BasicTextField (the DecorationBox colors don't reach it); the outline,
         // placeholder, and focus tint still come from the standard OutlinedTextField colors below.
         textStyle = MaterialTheme.typography.bodyMedium.copy(color = MaterialTheme.colorScheme.onSurface),
-        cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+        cursorBrush = SolidColor(if (isError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary),
         interactionSource = interactionSource,
         decorationBox = { innerTextField ->
             CompactFieldDecoration(
@@ -149,6 +150,7 @@ internal fun CompactOutlinedTextField(
                 enabled = enabled,
                 singleLine = singleLine,
                 placeholder = placeholder,
+                isError = isError,
                 innerTextField = innerTextField,
             )
         },
@@ -175,6 +177,7 @@ internal fun CompactFieldDecoration(
     enabled: Boolean = true,
     singleLine: Boolean = true,
     placeholder: String? = null,
+    isError: Boolean = false,
     trailingIcon: (@Composable () -> Unit)? = null,
 ) {
     CompositionLocalProvider(LocalMinimumInteractiveComponentSize provides 0.dp) {
@@ -185,6 +188,7 @@ internal fun CompactFieldDecoration(
             singleLine = singleLine,
             visualTransformation = VisualTransformation.None,
             interactionSource = interactionSource,
+            isError = isError,
             placeholder = placeholder?.let { text ->
                 { Text(text, style = MaterialTheme.typography.bodyMedium) }
             },

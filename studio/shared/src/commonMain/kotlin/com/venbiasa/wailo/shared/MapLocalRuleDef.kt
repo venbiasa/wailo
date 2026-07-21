@@ -24,6 +24,8 @@ class PickedFile(val bytes: ByteArray, val contentType: String)
  * host reads the file and compiles this into the protocol `MapLocalRule` (bytes inlined) before
  * pushing it to devices, so `shared` never touches the filesystem or the wire types.
  *
+ * [name] is a human label for the rule (what the list shows and how the author identifies it); it
+ * defaults to "Untitled" for a fresh rule and must be non-blank to save. It is not part of matching.
  * [urlPattern] is a wildcard match against the full request URL (`*` matches any run of characters).
  * [method] restricts the rule to that single HTTP method; blank means any. [statusCode] and [headers]
  * shape the synthesized response; [headers] carries Content-Type (there is no separate field for it) —
@@ -38,6 +40,7 @@ class PickedFile(val bytes: ByteArray, val contentType: String)
  */
 data class MapLocalRuleDef(
     val id: String,
+    val name: String = "Untitled",
     val enabled: Boolean = true,
     val urlPattern: String = "",
     val method: String = "",

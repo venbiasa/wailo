@@ -316,17 +316,18 @@ private fun RuleRow(
         CompactSwitch(checked = rule.enabled, onCheckedChange = { onToggle(rule) })
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
+            // The name identifies the rule (it's what the author titled it); the match — method + URL
+            // pattern — reads underneath as the detail.
             Text(
-                rule.urlPattern.ifBlank { "(no pattern)" },
+                rule.name.ifBlank { "Untitled" },
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurface,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
             val method = rule.method.ifBlank { "ANY" }
-            val target = if (rule.inline) "inline body" else fileName(rule.filePath).ifBlank { "(no file)" }
             Text(
-                "$method  \u2192  $target",
+                "$method  \u2192  ${rule.urlPattern.ifBlank { "(no pattern)" }}",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
@@ -358,12 +359,20 @@ private fun RuleEditor(
     onBack: () -> Unit,
     onClose: () -> Unit,
 ) {
+    var name by remember { mutableStateOf(initial.name) }
     var urlPattern by remember { mutableStateOf(initial.urlPattern) }
     var method by remember { mutableStateOf(initial.method) }
     var statusCode by remember { mutableStateOf(initial.statusCode.toString()) }
     val headers = remember { initial.headers.toMutableStateList() }
     var editorTab by remember { mutableStateOf(EditorTab.Body) }
     var saving by remember { mutableStateOf(false) }
+
+    // Save-blocking validation, surfaced live as an error indicator on each field. A rule needs a name
+    // to identify it in the list; the status code must be a real HTTP status (100–599), so a typo like
+    // an empty or out-of-range value can't ride through to a served response.
+    val nameError = name.isBlank()
+    val statusCodeError = statusCode.toIntOrNull().let { it == null || it !in VALID_STATUS_CODES }
+    val canSave = !saving && !nameError && !statusCodeError && urlPattern.isNotBlank()
 
     val scope = rememberCoroutineScope()
 
@@ -443,6 +452,7 @@ private fun RuleEditor(
 
     fun buildRule(): MapLocalRuleDef = initial.copy(
         enabled = enabled,
+        name = name.trim(),
         urlPattern = urlPattern.trim(),
         method = method,
         // Every rule is now inline: the body is authored here and persisted to the host's app-managed
@@ -455,7 +465,9 @@ private fun RuleEditor(
     )
 
     fun save() {
-        if (saving) return
+        // Guard the same validity the Save button enforces, so a stray call can't persist an unnamed
+        // rule or an out-of-range status code.
+        if (!canSave) return
         saving = true
         val rule = buildRule()
         // Snapshot the body source now (off-composition reads in the coroutine would be stale/illegal).
@@ -519,6 +531,19 @@ private fun RuleEditor(
             Modifier.fillMaxWidth().padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
+            LabeledField(
+                "Name",
+                Modifier.fillMaxWidth(),
+                error = if (nameError) "Name can\u2019t be empty" else null,
+            ) {
+                CompactOutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    placeholder = "Untitled",
+                    isError = nameError,
+                )
+            }
             LabeledField("URL pattern", Modifier.fillMaxWidth()) {
                 CompactOutlinedTextField(
                     value = urlPattern,
@@ -534,12 +559,16 @@ private fun RuleEditor(
                 LabeledField("Method") {
                     MethodDropdown(method = method, onSelect = { method = it })
                 }
-                LabeledField("Status code") {
+                LabeledField(
+                    "Status code",
+                    error = if (statusCodeError) "100\u2013599" else null,
+                ) {
                     CompactOutlinedTextField(
                         value = statusCode,
                         onValueChange = { next -> statusCode = next.filter { it.isDigit() }.take(3) },
                         modifier = Modifier.widthIn(min = 64.dp),
                         placeholder = "200",
+                        isError = statusCodeError,
                     )
                 }
             }
@@ -582,7 +611,7 @@ private fun RuleEditor(
             BodyVerdict(if (isImage) BodyValidity.None else validity, Modifier.weight(1f))
             Button(
                 onClick = { save() },
-                enabled = !saving && urlPattern.isNotBlank(),
+                enabled = canSave,
             ) {
                 Text("Save")
             }
@@ -635,15 +664,30 @@ private fun BodyVerdict(validity: BodyValidity, modifier: Modifier = Modifier) {
 }
 
 // Wraps its content by default, so a compact field (Method/Status) hugs what it holds; a field that
-// should span the panel (URL pattern) opts in by passing Modifier.fillMaxWidth().
+// should span the panel (URL pattern) opts in by passing Modifier.fillMaxWidth(). A non-null [error]
+// caption renders under the field in the error color — the field itself carries the matching red
+// outline (isError) so the failing input reads as invalid at a glance.
 @Composable
-private fun LabeledField(label: String, modifier: Modifier = Modifier, content: @Composable () -> Unit) {
+private fun LabeledField(
+    label: String,
+    modifier: Modifier = Modifier,
+    error: String? = null,
+    content: @Composable () -> Unit,
+) {
     Column(modifier) {
         Text(label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Spacer(Modifier.height(4.dp))
         content()
+        if (error != null) {
+            Spacer(Modifier.height(4.dp))
+            Text(error, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error)
+        }
     }
 }
+
+// HTTP status codes span 100–599; the editor blocks Save (and flags the field) on anything outside so
+// a typo like an empty or out-of-range code can't ride through to a served response.
+private val VALID_STATUS_CODES = 100..599
 
 // A rule matches a single HTTP method; "Any" (blank) leaves the method unconstrained. The blank entry
 // leads so it reads as the "no restriction" default, then the common methods in request-frequency order.
@@ -838,5 +882,3 @@ private fun HeaderRowEditor(
         }
     }
 }
-
-private fun fileName(path: String): String = path.substringAfterLast('/').substringAfterLast('\\')
