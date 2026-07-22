@@ -18,12 +18,12 @@ import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
-/** The real WailoClient opens with a Hello and then drains buffered exchanges to a throwaway server.
+/** The real WailoClient opens with a Hello and then streams live exchanges to a throwaway server.
  * Uses ktor-server purely as a test fixture — the SDK never depends on engine (invariant #3). */
 class WailoClientTest {
 
     @Test
-    fun sendsHelloThenBufferedExchange() = runBlocking {
+    fun sendsHelloThenLiveExchange() = runBlocking {
         val received = Channel<Envelope>(capacity = 16)
         val port = 18988
         val server = embeddedServer(CIO, port = port) {
@@ -42,13 +42,16 @@ class WailoClientTest {
             host = "localhost",
             port = port,
         ).also { it.start() }
-        // Enqueued before the socket is up; must arrive after the Hello once connected.
-        client.onExchange(HttpExchange(id = "e1", started_at_epoch_ms = 1, duration_ms = 2))
 
         try {
+            // Hello lands on connect and proves the tap is live: the client marks the connection live
+            // before sending Hello, so once the server has seen Hello, onExchange won't be dropped.
             val hello = withTimeout(5_000) { received.receive() }
-            val exchange = withTimeout(5_000) { received.receive() }
             assertEquals("com.test", hello.hello?.app_id)
+
+            // Captured while connected → delivered right after the Hello.
+            client.onExchange(HttpExchange(id = "e1", started_at_epoch_ms = 1, duration_ms = 2))
+            val exchange = withTimeout(5_000) { received.receive() }
             assertEquals("e1", exchange.exchange?.id)
         } finally {
             client.stop()
@@ -56,10 +59,11 @@ class WailoClientTest {
         }
     }
 
-    /** The desktop isn't up when the client starts: the connect loop must keep retrying so a
-     * buffered exchange is still delivered once the server appears. */
+    /** A live tap keeps no backlog: an exchange captured while the desktop is down is dropped, never
+     * buffered for replay — but the connect loop still recovers the link, so an exchange captured
+     * after the reconnect is delivered. */
     @Test
-    fun retriesUntilServerIsUp() = runBlocking {
+    fun dropsWhileDownButStreamsAfterReconnect() = runBlocking {
         val received = Channel<Envelope>(capacity = 16)
         val port = 18989
 
@@ -68,8 +72,8 @@ class WailoClientTest {
             host = "localhost",
             port = port,
         ).also { it.start() }
-        // Enqueued before any server exists; must survive the failed attempts and the reconnect wait.
-        client.onExchange(HttpExchange(id = "late", started_at_epoch_ms = 1, duration_ms = 2))
+        // Captured while nothing is listening → dropped, not buffered.
+        client.onExchange(HttpExchange(id = "early", started_at_epoch_ms = 1, duration_ms = 2))
 
         // Let the client fail at least one connect attempt before the server comes up.
         delay(500)
@@ -85,10 +89,15 @@ class WailoClientTest {
         }.also { it.start(wait = false) }
 
         try {
+            // The connect loop recovers the link; Hello proves it is live again.
             val hello = withTimeout(10_000) { received.receive() }
-            val exchange = withTimeout(10_000) { received.receive() }
             assertEquals("com.test", hello.hello?.app_id)
-            assertEquals("late", exchange.exchange?.id)
+
+            // Captured after the reconnect → delivered. "early" was dropped, so the only exchange the
+            // server ever sees is this one.
+            client.onExchange(HttpExchange(id = "live", started_at_epoch_ms = 3, duration_ms = 4))
+            val exchange = withTimeout(10_000) { received.receive() }
+            assertEquals("live", exchange.exchange?.id)
         } finally {
             client.stop()
             server.stop(0, 0)

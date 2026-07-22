@@ -5,7 +5,7 @@ import WailoProtocol
 @testable import WailoSDK
 
 /// End-to-end transport check: stands up a real WebSocket server (Network.framework) and asserts
-/// `WailoClient` opens with a decodable `Hello` and then streams a buffered exchange — the same
+/// `WailoClient` opens with a decodable `Hello` and then streams a live exchange — the same
 /// bytes the Kotlin `engine` decodes. The Swift analog of the desktop client<->server loopback test.
 final class WailoClientLoopbackTests: XCTestCase {
 
@@ -35,7 +35,7 @@ final class WailoClientLoopbackTests: XCTestCase {
             port: Int(port)
         )
         client.start()
-        // Buffered before the socket is up; must be delivered after the Hello once connected.
+        // Captured during the (healthy) connection's handshake; delivered live after the Hello.
         client.onExchange(HttpExchange(id: "e1", started_at_epoch_ms: 1, duration_ms: 2, error: "", edited: false))
 
         wait(for: [helloReceived, exchangeReceived], timeout: 10)
@@ -218,10 +218,11 @@ final class WailoClientLoopbackTests: XCTestCase {
         XCTAssertNil(mapped, "a fetch with no connection must fail open (nil), not hang")
     }
 
-    /// The desktop isn't up when the client starts: the first connect attempts fail, and the client
-    /// must keep retrying so that a buffered exchange is delivered once the server finally appears.
-    /// This is the case the old `handleDisconnect`-only reconnect could wedge on.
-    func testReconnectsWhenServerStartsLate() throws {
+    /// A live tap keeps no backlog. The desktop isn't up when the client starts, so an exchange
+    /// captured while down must be dropped (never buffered for replay); but the connect loop must
+    /// still recover the link so an exchange captured *after* the reconnect is delivered. This is the
+    /// case the old buffering behavior replayed on reconnect (the "stale traffic after a restart" bug).
+    func testDropsWhileDownButStreamsAfterReconnect() throws {
         let port = try reserveEphemeralPort()
 
         let client = WailoClient(
@@ -231,8 +232,8 @@ final class WailoClientLoopbackTests: XCTestCase {
             reconnectDelay: 0.2
         )
         client.start()
-        // Enqueued while nothing is listening; must survive the failed attempts.
-        client.onExchange(HttpExchange(id: "late", started_at_epoch_ms: 1, duration_ms: 2, error: "", edited: false))
+        // Captured while nothing is listening → dropped, not buffered.
+        client.onExchange(HttpExchange(id: "early", started_at_epoch_ms: 1, duration_ms: 2, error: "", edited: false))
 
         // Let a few connect attempts fail before the desktop shows up.
         Thread.sleep(forTimeInterval: 0.6)
@@ -240,21 +241,29 @@ final class WailoClientLoopbackTests: XCTestCase {
         let server = LoopbackWebSocketServer()
         let helloReceived = expectation(description: "hello after late start")
         helloReceived.assertForOverFulfill = false
-        let exchangeReceived = expectation(description: "buffered exchange delivered")
-        exchangeReceived.assertForOverFulfill = false
+        let liveReceived = expectation(description: "post-reconnect exchange delivered")
+        liveReceived.assertForOverFulfill = false
+        // The first exchange the server ever sees proves "early" was dropped, not replayed.
+        var firstExchangeId: String?
         server.onEnvelope = { envelope in
             switch envelope.message {
             case .hello:
                 helloReceived.fulfill()
-            case let .exchange(exchange) where exchange.id == "late":
-                exchangeReceived.fulfill()
+            case let .exchange(exchange):
+                if firstExchangeId == nil { firstExchangeId = exchange.id }
+                if exchange.id == "live" { liveReceived.fulfill() }
             default:
                 break
             }
         }
         try server.start(on: port)
 
-        wait(for: [helloReceived, exchangeReceived], timeout: 10)
+        // Reconnect first (Hello proves the tap is live again), then capture a fresh exchange.
+        wait(for: [helloReceived], timeout: 10)
+        client.onExchange(HttpExchange(id: "live", started_at_epoch_ms: 3, duration_ms: 4, error: "", edited: false))
+        wait(for: [liveReceived], timeout: 10)
+        XCTAssertEqual(firstExchangeId, "live", "an exchange captured while disconnected must be dropped, not replayed")
+
         client.stopAndWaitForTeardown()
         server.stop()
     }
@@ -302,9 +311,11 @@ final class WailoClientLoopbackTests: XCTestCase {
             }
         }
         try server2.start(on: port)
+        // Capture only after the reconnect Hello proves the tap is live again — a live tap drops
+        // anything captured during the gap between attempts.
+        wait(for: [reconnectHello], timeout: 10)
         client.onExchange(HttpExchange(id: "after", started_at_epoch_ms: 3, duration_ms: 4, error: "", edited: false))
-
-        wait(for: [reconnectHello, postDropExchange], timeout: 10)
+        wait(for: [postDropExchange], timeout: 10)
         client.stopAndWaitForTeardown()
         server2.stop()
     }

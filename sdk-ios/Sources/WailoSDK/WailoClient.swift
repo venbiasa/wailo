@@ -6,10 +6,12 @@ import Wire
 /// back down the same socket (ADR-0019): it caches the desktop's match-metadata snapshots (dropping them
 /// whenever the connection is lost, so the desktop stays the single source of truth), acknowledges each
 /// snapshot's epoch so a lost push can be re-sent, and — as the `WailoBodyFetcher` — fetches a matched
-/// rule's body on demand rather than caching bodies. The Swift port of `core.WailoClient`:
-/// `onExchange` only enqueues; a background loop drains the buffer and reconnects whenever the
-/// desktop isn't up yet. On overflow the oldest is dropped so a slow/absent desktop never blocks or
-/// grows memory without bound in the host app.
+/// rule's body on demand rather than caching bodies. The Swift port of `core.WailoClient`, and a *live
+/// tap*: `onExchange` enqueues only while a connection exists, and the buffer is cleared on disconnect,
+/// so traffic captured while the desktop is down is dropped rather than replayed on reconnect (ADR-0025).
+/// A background loop reconnects whenever the desktop isn't up, so a dropped/stale link self-heals for
+/// future traffic. On overflow the oldest is dropped so a slow desktop never blocks or grows memory
+/// without bound in the host app.
 ///
 /// Reconnection is deliberately hard to wedge. `URLSessionWebSocketTask` does not guarantee that the
 /// `send`/`receive` completion handlers fire on every failure (notably a connection that never
@@ -74,6 +76,10 @@ final class WailoClient: NSObject, CaptureSink, WailoBodyFetcher, URLSessionWebS
 
     func onExchange(_ exchange: HttpExchange) {
         queue.async {
+            // Live tap: only accept while a connection exists (the buffer is cleared on disconnect, so
+            // it never holds a backlog across a drop). Traffic captured while the desktop is down is
+            // dropped rather than hoarded to replay on reconnect.
+            guard self.task != nil else { return }
             self.buffer.append(exchange)
             let overflow = self.buffer.count - self.bufferCapacity
             if overflow > 0 {
@@ -295,12 +301,16 @@ final class WailoClient: NSObject, CaptureSink, WailoBodyFetcher, URLSessionWebS
         generation += 1
         connected = false
         sending = false
+        // Live tap: drop any not-yet-sent exchanges so the next connection starts clean and never
+        // replays a backlog captured across the drop (ADR-0025).
+        buffer.removeAll()
         dropCachedRules()
         drainPending()
         task?.cancel(with: .abnormalClosure, reason: nil)
         task = nil
         guard started else { return }
-        // Desktop unreachable; back off and retry. Buffered exchanges wait (drop-oldest on overflow).
+        // Desktop unreachable; back off and retry. Only traffic captured while the next connection is
+        // live will be sent.
         queue.asyncAfter(deadline: .now() + reconnectDelay) { [weak self] in
             self?.connect()
         }
