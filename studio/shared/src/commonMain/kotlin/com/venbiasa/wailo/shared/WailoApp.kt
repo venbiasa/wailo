@@ -21,11 +21,11 @@ import com.venbiasa.wailo.shared.ui.WailoViewer
  * traffic is being recorded, and [onToggleCapture]/[onClear] drive the top bar (the engine lives in the
  * host, not here). [bookmarks] are the persisted, host-owned bookmarked hosts; [onAddBookmark]/
  * [onRemoveBookmark] let the viewer mutate that set (the host owns its persistence, ADR-0013).
- * [mapLocalRules] are the host-owned, persisted Map Local rules the right-side tool panel renders
- * (ADR-0021); [onUpsertRule]/[onRemoveRule] mutate them, and [onLoadMapLocalBody]/[onSaveMapLocalBody]
- * read/persist a rule's authored body as bytes (the host owns all file IO). [onPickMapLocalFile] opens
- * the host's file picker for a body file (JSON/text or image). The panel's open state and any row-seeded
- * draft are the viewer's own transient state.
+ * [mapLocalNodes] are the host-owned, persisted Map Local layout (groups + rules, in priority order) the
+ * right-side tool panel renders (ADR-0021/0026); [onMapLocalLayoutChange] hands back a new layout for any
+ * structural change, and [onLoadMapLocalBody]/[onSaveMapLocalBody] read/persist a rule's authored body as
+ * bytes (the host owns all file IO). [onPickMapLocalFile] opens the host's file picker for a body file
+ * (JSON/text or image). The panel's open state and any row-seeded draft are the viewer's own transient state.
  */
 @Composable
 fun WailoApp(
@@ -41,9 +41,8 @@ fun WailoApp(
     bookmarks: List<String> = emptyList(),
     onAddBookmark: (String) -> Unit = {},
     onRemoveBookmark: (String) -> Unit = {},
-    mapLocalRules: List<MapLocalRuleDef> = emptyList(),
-    onUpsertRule: (MapLocalRuleDef) -> Unit = {},
-    onRemoveRule: (String) -> Unit = {},
+    mapLocalNodes: List<MapLocalNode> = emptyList(),
+    onMapLocalLayoutChange: (List<MapLocalNode>) -> Unit = {},
     onLoadMapLocalBody: suspend (MapLocalRuleDef) -> ByteArray = { ByteArray(0) },
     onSaveMapLocalBody: suspend (MapLocalRuleDef, ByteArray) -> Unit = { _, _ -> },
     onPickMapLocalFile: suspend () -> PickedFile? = { null },
@@ -65,9 +64,8 @@ fun WailoApp(
                 bookmarks = bookmarks,
                 onAddBookmark = onAddBookmark,
                 onRemoveBookmark = onRemoveBookmark,
-                mapLocalRules = mapLocalRules,
-                onUpsertRule = onUpsertRule,
-                onRemoveRule = onRemoveRule,
+                mapLocalNodes = mapLocalNodes,
+                onMapLocalLayoutChange = onMapLocalLayoutChange,
                 onLoadMapLocalBody = onLoadMapLocalBody,
                 onSaveMapLocalBody = onSaveMapLocalBody,
                 onPickMapLocalFile = onPickMapLocalFile,

@@ -3,43 +3,41 @@ package com.venbiasa.wailo.desktop
 import com.venbiasa.wailo.engine.ServedBody
 import com.venbiasa.wailo.protocol.Header
 import com.venbiasa.wailo.protocol.MapLocalRule
-import com.venbiasa.wailo.shared.MapLocalHeader
+import com.venbiasa.wailo.shared.MapLocalLayoutCodec
+import com.venbiasa.wailo.shared.MapLocalNode
 import com.venbiasa.wailo.shared.MapLocalRuleDef
+import com.venbiasa.wailo.shared.allRules
+import com.venbiasa.wailo.shared.findRule
+import com.venbiasa.wailo.shared.isRuleActive
+import com.venbiasa.wailo.shared.rulesForMatch
 import com.venbiasa.wailo.shared.settings.createKeyValueStore
 import java.io.File
-import java.util.Base64
 
 /**
- * Persists Map Local rule definitions across launches, mirroring [BookmarkStore]. Host-owned: the
- * rule state lives at the desktop window; `shared` only renders it and calls back to mutate. The rule
- * *definitions* ride in prefs; an inline rule's authored body is stored separately as an app-managed
- * file keyed by rule id (see [loadInlineBody]/[saveInlineBody]), so the prefs line never holds bytes
- * and a matched request always reads the body fresh from disk (ADR-0019).
- *
- * [createKeyValueStore] is primitive-only, so the list rides as one string: one rule per line, fields
- * `|`-separated, and each free-text field Base64-encoded so paths/patterns can never collide with the
- * delimiters.
+ * Persists the Map Local layout (groups + rules + order) across launches, mirroring [BookmarkStore].
+ * Host-owned: the layout lives at the desktop window; `shared` only renders it and calls back to mutate.
+ * The layout *definitions* ride in prefs as one string via the portable [MapLocalLayoutCodec]; an inline
+ * rule's authored body is stored separately as an app-managed file keyed by rule id (see
+ * [loadInlineBody]/[saveInlineBody]), so the prefs line never holds bytes and a matched request always
+ * reads the body fresh from disk (ADR-0019).
  */
 object MapLocalStore {
     private const val KEY = "mapLocalRules"
-    private const val RULE_SEP = "\n"
-    private const val FIELD_SEP = "|"
-    private const val METHOD_SEP = ","
-    // Within the single headers field: one header is enc(name):enc(value), headers joined by ",". Base64
-    // has neither ":" nor ",", so a header value can hold any bytes without colliding with a delimiter.
-    private const val HEADER_SEP = ","
-    private const val HEADER_KV = ":"
     private val store = createKeyValueStore("desktop")
-    private val b64Encoder: Base64.Encoder = Base64.getEncoder()
-    private val b64Decoder: Base64.Decoder = Base64.getDecoder()
 
-    fun load(): List<MapLocalRuleDef> =
-        store.getString(KEY, "")
-            .split(RULE_SEP)
-            .mapNotNull { decode(it) }
+    fun load(): List<MapLocalNode> = MapLocalLayoutCodec.decode(store.getString(KEY, ""))
 
-    fun save(rules: List<MapLocalRuleDef>) =
-        store.putString(KEY, rules.joinToString(RULE_SEP) { encode(it) })
+    fun save(nodes: List<MapLocalNode>) = store.putString(KEY, MapLocalLayoutCodec.encode(nodes))
+
+    /**
+     * Deletes the app-managed body of every rule present in [old] but gone from [new]. A whole-layout
+     * replace (the single mutation the panel uses) hands us no per-rule delete signal, so the removed set
+     * is recovered by diffing — this sweeps bodies orphaned by a rule delete or a group delete-all.
+     */
+    fun reconcileRemovedBodies(old: List<MapLocalNode>, new: List<MapLocalNode>) {
+        val kept = new.allRules().mapTo(HashSet()) { it.id }
+        old.allRules().forEach { if (it.id !in kept) deleteInlineBody(it.id) }
+    }
 
     /**
      * An inline rule's authored body bytes (empty if none saved yet or unreadable). Bytes, not text, so
@@ -65,58 +63,6 @@ object MapLocalStore {
     fun deleteInlineBody(id: String) {
         runCatching { managedBodyFiles(id).forEach { it.delete() } }
     }
-
-    private fun encode(rule: MapLocalRuleDef): String = listOf(
-        rule.id,
-        if (rule.enabled) "1" else "0",
-        enc(rule.urlPattern),
-        enc(rule.method),
-        enc(rule.filePath),
-        rule.statusCode.toString(),
-        encodeHeaders(rule.headers),
-        if (rule.inline) "1" else "0",
-        // Name is appended last so pre-name lines (8 fields) still decode; free text, so Base64 like
-        // the other string fields to stay delimiter-safe.
-        enc(rule.name),
-    ).joinToString(FIELD_SEP)
-
-    private fun decode(line: String): MapLocalRuleDef? {
-        val parts = line.split(FIELD_SEP)
-        // Accept the legacy 7-field layout (pre-inline) as file-backed, the 8-field one (pre-name), and
-        // the current 9-field one.
-        if (parts.size !in 7..9) return null
-        return MapLocalRuleDef(
-            id = parts[0],
-            // Rules saved before names existed migrate to "Untitled" (a blank name can't be saved now).
-            name = if (parts.size >= 9) dec(parts[8]).ifBlank { "Untitled" } else "Untitled",
-            enabled = parts[1] == "1",
-            urlPattern = dec(parts[2]),
-            // A rule now matches a single method; a legacy multi-method line collapses to its first.
-            method = dec(parts[3]).substringBefore(METHOD_SEP).trim(),
-            filePath = dec(parts[4]),
-            statusCode = parts[5].toIntOrNull() ?: 200,
-            headers = decodeHeaders(parts[6]),
-            inline = parts.size >= 8 && parts[7] == "1",
-        )
-    }
-
-    private fun encodeHeaders(headers: List<MapLocalHeader>): String =
-        headers.filter { it.name.isNotBlank() }
-            .joinToString(HEADER_SEP) { enc(it.name) + HEADER_KV + enc(it.value) }
-
-    // Field[6] once held a lone Base64 Content-Type; a Base64 token has no ":" separator, so its absence
-    // marks a legacy line — migrate it to a Content-Type header. A blank field means no headers.
-    private fun decodeHeaders(field: String): List<MapLocalHeader> {
-        if (field.isBlank()) return emptyList()
-        if (!field.contains(HEADER_KV)) return listOf(MapLocalHeader("Content-Type", dec(field)))
-        return field.split(HEADER_SEP).mapNotNull { part ->
-            val kv = part.split(HEADER_KV)
-            if (kv.size != 2) null else MapLocalHeader(dec(kv[0]), dec(kv[1]))
-        }
-    }
-
-    private fun enc(value: String): String = b64Encoder.encodeToString(value.encodeToByteArray())
-    private fun dec(value: String): String = runCatching { b64Decoder.decode(value).decodeToString() }.getOrDefault("")
 }
 
 // Inline bodies live under the OS's per-user app-data dir (not in prefs, which is for small values),
@@ -173,13 +119,13 @@ private fun appDataDir(): File {
 }
 
 /**
- * Compiles the authored rules into the match-metadata the engine pushes to devices (ADR-0019): the
- * enabled ones, with no file reading and no bytes — the device caches only how to *match*. The body is
- * read later, per match, by [serveBody]. A file that can't be read isn't dropped here (it's not read
- * yet); a broken path surfaces at fetch time as found=false, and the device falls open to the network.
+ * Compiles the authored layout into the match-metadata the engine pushes to devices (ADR-0019): the
+ * *active* rules (group-on AND rule-on) in top-to-bottom priority order (ADR-0026), with no file reading
+ * and no bytes — the device caches only how to *match* and returns the first match in list order, so this
+ * order is the priority. The body is read later, per match, by [serveBody].
  */
-fun compileRules(rules: List<MapLocalRuleDef>): List<MapLocalRule> =
-    rules.filter { it.enabled }.map { def ->
+fun compileRules(nodes: List<MapLocalNode>): List<MapLocalRule> =
+    nodes.rulesForMatch().map { def ->
         MapLocalRule(
             id = def.id,
             enabled = true,
@@ -193,12 +139,14 @@ fun compileRules(rules: List<MapLocalRuleDef>): List<MapLocalRule> =
  * Resolves a matched rule to the bytes to serve, read fresh from disk at request time. The body comes
  * from the rule's app-managed file (inline rules) or the user's chosen file (file rules) — either way
  * a path read at request time, so ADR-0019 (device holds no bodies; desktop reads fresh) is unchanged.
- * Returns null (→ found=false → device falls open to the network) when the rule is gone/disabled or
- * its file can't be read. The rule's authored headers pass through as-is, except Content-Length (the
- * host owns it, computed from the bytes); Content-Type falls back to an extension guess when unset.
+ * Returns null (→ found=false → device falls open to the network) when the rule is gone, its group is
+ * off, the rule is off, or its file can't be read. The rule's authored headers pass through as-is,
+ * except Content-Length (the host owns it, computed from the bytes); Content-Type falls back to an
+ * extension guess when unset.
  */
-fun serveBody(ruleId: String, defs: List<MapLocalRuleDef>): ServedBody? {
-    val def = defs.firstOrNull { it.id == ruleId && it.enabled } ?: return null
+fun serveBody(ruleId: String, nodes: List<MapLocalNode>): ServedBody? {
+    if (!nodes.isRuleActive(ruleId)) return null
+    val def = nodes.findRule(ruleId) ?: return null
     val file = if (def.inline) (existingManagedBodyFile(def.id) ?: return null) else File(def.filePath)
     val bytes = runCatching { file.readBytes() }.getOrNull() ?: return null
     val authored = def.headers.filter { it.name.isNotBlank() }

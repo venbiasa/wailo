@@ -40,6 +40,7 @@ import androidx.compose.ui.unit.dp
 import com.venbiasa.wailo.protocol.Header
 import com.venbiasa.wailo.shared.FlowEntry
 import com.venbiasa.wailo.shared.MapLocalHeader
+import com.venbiasa.wailo.shared.MapLocalNode
 import com.venbiasa.wailo.shared.MapLocalRuleDef
 import com.venbiasa.wailo.shared.PickedFile
 import com.venbiasa.wailo.shared.format.requestHost
@@ -67,9 +68,8 @@ internal fun WailoViewer(
     bookmarks: List<String>,
     onAddBookmark: (String) -> Unit,
     onRemoveBookmark: (String) -> Unit,
-    mapLocalRules: List<MapLocalRuleDef>,
-    onUpsertRule: (MapLocalRuleDef) -> Unit,
-    onRemoveRule: (String) -> Unit,
+    mapLocalNodes: List<MapLocalNode>,
+    onMapLocalLayoutChange: (List<MapLocalNode>) -> Unit,
     onLoadMapLocalBody: suspend (MapLocalRuleDef) -> ByteArray,
     onSaveMapLocalBody: suspend (MapLocalRuleDef, ByteArray) -> Unit,
     onPickMapLocalFile: suspend () -> PickedFile?,
@@ -181,11 +181,10 @@ internal fun WailoViewer(
                     }
                     Box(Modifier.width(panelWidth).fillMaxHeight()) {
                         MapLocalManager(
-                            rules = mapLocalRules,
+                            nodes = mapLocalNodes,
                             initialDraft = mapLocalDraft,
                             initialBodySeed = mapLocalBodySeed,
-                            onUpsert = onUpsertRule,
-                            onRemove = onRemoveRule,
+                            onLayoutChange = onMapLocalLayoutChange,
                             onClose = { mapLocalOpen = false },
                             onLoadBody = onLoadMapLocalBody,
                             onSaveBody = onSaveMapLocalBody,

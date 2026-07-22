@@ -77,6 +77,7 @@ cd sample-ios && xcodegen generate && xcodebuild -scheme WailoSampleiOS -sdk iph
 # --- studio build (studio/): engine, shared, desktopApp on the modern toolchain ---
 cd studio && ./gradlew build               # consumes wailo-protocol from Maven Local
 cd studio && ./gradlew :desktopApp:run     # start the desktop inspector
+cd studio && ./gradlew :desktopApp:hotRun --auto  # dev loop: auto-recompiles + hot-reloads on save; if it's already running, DON'T recompile (see .cursor/rules/gradle-build-directories.mdc)
 ```
 
 ## Conventions

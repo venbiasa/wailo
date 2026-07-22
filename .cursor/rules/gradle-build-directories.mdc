@@ -35,5 +35,25 @@ cd /abs/path/to/repo && ./gradlew :protocol:publishToMavenLocal
 cd /abs/path/to/repo && ./gradlew :sample-android:assembleDebug
 ```
 
+## Studio dev loop: check `hotRun` before you compile
+
+The studio desktop app is usually already running under **Compose Hot Reload auto mode**
+(`cd studio && ./gradlew :desktopApp:hotRun --auto`) in one of the user's terminals. Auto mode
+**continuously recompiles and hot-reloads on every source edit**, so a manual studio build is
+redundant and slow — and a second sandboxed `./gradlew` can even fail on stale caches.
+
+**Before running any studio compile/build/run, check whether `hotRun` is already live:**
+
+- Look in the terminals folder for a terminal whose `active_command` contains
+  `:desktopApp:hotRun` (its output shows `Compose Hot Reload` and `> :desktopApp:hotRun` / `> IDLE`).
+- **If it IS running:** do NOT run `:desktopApp:run` or a manual `compileKotlin`/`build`. Just
+  edit the source — hot reload rebuilds automatically. Read that terminal's file to confirm the
+  reload and to surface any compile errors.
+- **If it is NOT running:** build/run/compile normally (above), or start it with
+  `cd studio && ./gradlew :desktopApp:hotRun --auto`.
+
+`hotRun` only covers the running app — tests (e.g. `:shared:jvmTest`) are a separate task and
+still need their own invocation.
+
 Prefer the `rgradlew` skill's remote path only for the SDK/Android build; the studio
 build needs `wailo-protocol` in local Maven, so build it locally from `studio/`.

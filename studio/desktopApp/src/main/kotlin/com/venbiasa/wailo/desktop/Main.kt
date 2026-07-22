@@ -22,6 +22,7 @@ import androidx.compose.ui.window.rememberWindowState
 import com.venbiasa.wailo.engine.MapLocalBodyProvider
 import com.venbiasa.wailo.engine.WailoEngine
 import com.venbiasa.wailo.shared.FlowEntry
+import com.venbiasa.wailo.shared.MapLocalNode
 import com.venbiasa.wailo.shared.MapLocalRuleDef
 import com.venbiasa.wailo.shared.PickedFile
 import com.venbiasa.wailo.shared.WailoApp
@@ -104,40 +105,34 @@ private fun runWailo() = application {
         }
     }
 
-    // Map Local rules: host-owned and persisted (like bookmarks). `shared` gets the definitions plus
-    // upsert/remove callbacks and stays stateless; the host is the only side that reads files and talks
-    // to the engine. The tool panel's open state and any row-seeded draft are the viewer's own
-    // transient state now (ADR-0021), so the host only owns the rules themselves.
-    var mapLocalRules by remember { mutableStateOf(MapLocalStore.load()) }
-    val upsertRule = { rule: MapLocalRuleDef ->
-        mapLocalRules = if (mapLocalRules.any { it.id == rule.id }) {
-            mapLocalRules.map { if (it.id == rule.id) rule else it }
-        } else {
-            mapLocalRules + rule
-        }
-        // A file-backed rule owns no managed body; drop any left over from a prior inline edit.
-        if (!rule.inline) MapLocalStore.deleteInlineBody(rule.id)
-        MapLocalStore.save(mapLocalRules)
-    }
-    val removeRule = { id: String ->
-        mapLocalRules = mapLocalRules.filterNot { it.id == id }
-        MapLocalStore.deleteInlineBody(id)
-        MapLocalStore.save(mapLocalRules)
+    // Map Local layout (groups + rules, in priority order): host-owned and persisted (like bookmarks).
+    // `shared` renders it and hands back a whole new layout for any structural change; the host is the
+    // only side that reads files and talks to the engine. The tool panel's open state and any row-seeded
+    // draft are the viewer's own transient state now (ADR-0021), so the host only owns the layout.
+    var mapLocalNodes by remember { mutableStateOf(MapLocalStore.load()) }
+    val onLayoutChange = { next: List<MapLocalNode> ->
+        val prev = mapLocalNodes
+        mapLocalNodes = next
+        // Sweep bodies orphaned by this change (a rule delete or a group delete-all) — the layout is
+        // replaced wholesale, so the removed set is recovered by diffing (ADR-0026).
+        MapLocalStore.reconcileRemovedBodies(prev, next)
+        MapLocalStore.save(next)
     }
     // The engine (running on non-UI threads) resolves a matched rule's body through this seam; Compose
-    // state can't be read off the composition, so bridge the current defs through an AtomicReference the
+    // state can't be read off the composition, so bridge the current layout through an AtomicReference the
     // rule effect keeps fresh. Files are read on demand, on the IO dispatcher (ADR-0019).
-    val ruleDefsRef = remember { java.util.concurrent.atomic.AtomicReference(mapLocalRules) }
+    val ruleDefsRef = remember { java.util.concurrent.atomic.AtomicReference(mapLocalNodes) }
     LaunchedEffect(Unit) {
         engine.bodyProvider = MapLocalBodyProvider { ruleId, _, _ ->
             withContext(Dispatchers.IO) { serveBody(ruleId, ruleDefsRef.get()) }
         }
     }
     // Push the match-metadata snapshot (no file reads here) on first composition and every edit; a save
-    // re-pushes the whole set, and the engine re-pushes to any device that hasn't acked it.
-    LaunchedEffect(mapLocalRules) {
-        ruleDefsRef.set(mapLocalRules)
-        engine.updateRules(compileRules(mapLocalRules))
+    // re-pushes the active rules in priority order, and the engine re-pushes to any device that hasn't
+    // acked it. Group toggles/reorders change which rules are active and in what order (ADR-0026).
+    LaunchedEffect(mapLocalNodes) {
+        ruleDefsRef.set(mapLocalNodes)
+        engine.updateRules(compileRules(mapLocalNodes))
     }
 
     // Window geometry survives restarts (host concern, like the theme/scale/bookmarks above). Seeded
@@ -212,9 +207,8 @@ private fun runWailo() = application {
             bookmarks = bookmarks,
             onAddBookmark = addBookmark,
             onRemoveBookmark = removeBookmark,
-            mapLocalRules = mapLocalRules,
-            onUpsertRule = upsertRule,
-            onRemoveRule = removeRule,
+            mapLocalNodes = mapLocalNodes,
+            onMapLocalLayoutChange = onLayoutChange,
             onLoadMapLocalBody = { rule -> withContext(Dispatchers.IO) { MapLocalStore.loadInlineBody(rule) } },
             onSaveMapLocalBody = { rule, bytes -> withContext(Dispatchers.IO) { MapLocalStore.saveInlineBody(rule, bytes) } },
             // `window` (the ComposeWindow, an AWT Frame) parents the native dialog so it's modal to the app.

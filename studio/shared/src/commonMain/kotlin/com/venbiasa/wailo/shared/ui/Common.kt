@@ -211,12 +211,14 @@ internal fun CompactSwitch(
     checked: Boolean,
     onCheckedChange: (Boolean) -> Unit,
     modifier: Modifier = Modifier,
+    enabled: Boolean = true,
 ) {
     CompositionLocalProvider(LocalMinimumInteractiveComponentSize provides 0.dp) {
         Switch(
             checked = checked,
             onCheckedChange = onCheckedChange,
             modifier = modifier.scale(0.8f),
+            enabled = enabled,
             // The stock unchecked switch paints its thumb in `outline` — a near-disabled gray in this
             // monochrome theme, so "off" was indistinguishable from "disabled". Drive the off-state from
             // the secondary content color (a solid, clearly-active thumb) over a defined track so it reads

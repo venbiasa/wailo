@@ -9,7 +9,6 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -19,13 +18,10 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -35,6 +31,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -48,7 +45,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.navigation3.runtime.NavEntry
 import androidx.navigation3.runtime.NavKey
@@ -56,8 +52,13 @@ import androidx.navigation3.runtime.rememberNavBackStack
 import androidx.navigation3.ui.NavDisplay
 import androidx.savedstate.serialization.SavedStateConfiguration
 import com.venbiasa.wailo.shared.MapLocalHeader
+import com.venbiasa.wailo.shared.MapLocalNode
 import com.venbiasa.wailo.shared.MapLocalRuleDef
 import com.venbiasa.wailo.shared.PickedFile
+import com.venbiasa.wailo.shared.findRule
+import com.venbiasa.wailo.shared.groupOf
+import com.venbiasa.wailo.shared.setRuleEnabled
+import com.venbiasa.wailo.shared.upsertRule
 import com.venbiasa.wailo.shared.format.formatBytes
 import com.venbiasa.wailo.shared.format.jsonErrorMessage
 import com.venbiasa.wailo.shared.format.prettyPrintJson
@@ -80,26 +81,26 @@ import org.jetbrains.compose.resources.decodeToImageBitmap
 import org.jetbrains.compose.resources.vectorResource
 
 /**
- * The Map Local rules panel: a list of rules that falls through to an add/edit form. Stateless over
- * its inputs — the host owns the rule list and its persistence; this only renders and calls back. It
- * fills whatever surface it's given (the studio's right tool panel, ADR-0021).
+ * The Map Local panel: an interleaved list of groups + loose rules (ADR-0026) that falls through to an
+ * add/edit form. Stateless over its inputs — the host owns [nodes] (the ordered layout) and its
+ * persistence; this renders it and hands back a new layout via [onLayoutChange] for every structural
+ * change (reorder, group toggle/rename/delete, rule add/edit/delete/move). Top-to-bottom order is the
+ * match priority. It fills whatever surface it's given (the studio's right tool panel, ADR-0021).
  *
  * [initialDraft] seeds the editor: non-null opens straight into the form (used when launched from a
  * traffic row so the URL/method are pre-filled), null shows the list. [initialBodySeed] pre-fills the
  * body for that draft with the captured response's raw bytes (decoded as JSON text, or previewed as an
- * image, depending on its Content-Type). [onUpsert] adds or replaces a rule by id; [onRemove] deletes
- * by id. [onLoadBody]/[onSaveBody] read and persist a rule's authored body as bytes — the host owns all
- * file IO (the body is an app-managed file), so `shared` still never touches the filesystem.
- * [onPickFile] asks the host to open a file picker for a body file (JSON/text or image) and hand back its
- * bytes. [onClose] dismisses the whole panel (the tool-panel close affordance).
+ * image, depending on its Content-Type). [onLoadBody]/[onSaveBody] read and persist a rule's authored
+ * body as bytes — the host owns all file IO (the body is an app-managed file), so `shared` still never
+ * touches the filesystem. [onPickFile] asks the host to open a file picker for a body file (JSON/text or
+ * image) and hand back its bytes. [onClose] dismisses the whole panel (the tool-panel close affordance).
  */
 @Composable
 fun MapLocalManager(
-    rules: List<MapLocalRuleDef>,
+    nodes: List<MapLocalNode>,
     initialDraft: MapLocalRuleDef?,
     initialBodySeed: ByteArray? = null,
-    onUpsert: (MapLocalRuleDef) -> Unit,
-    onRemove: (String) -> Unit,
+    onLayoutChange: (List<MapLocalNode>) -> Unit,
     onClose: () -> Unit = {},
     onLoadBody: suspend (MapLocalRuleDef) -> ByteArray = { ByteArray(0) },
     onSaveBody: suspend (MapLocalRuleDef, ByteArray) -> Unit = { _, _ -> },
@@ -137,11 +138,14 @@ fun MapLocalManager(
     }
 
     // NavDisplay caches each page's NavEntry keyed by the back stack, so the entry's content keeps the
-    // `rules` value it captured when first shown and won't see later host edits (e.g. a toggle) until you
-    // navigate. Reading the list through this stable State *inside* the entries makes NavEntry.Content —
+    // `nodes` value it captured when first shown and won't see later host edits (e.g. a toggle) until you
+    // navigate. Reading the layout through this stable State *inside* the entries makes NavEntry.Content —
     // itself a restart scope — recompose on every change, so the list and the editor's enabled switch
     // stay live and in sync instead of frozen until navigation.
-    val liveRules = rememberUpdatedState(rules)
+    val liveNodes = rememberUpdatedState(nodes)
+    // Which groups are collapsed — transient view state hoisted above the NavDisplay entries so it
+    // survives navigating into the editor and back; not persisted (relaunch shows every group expanded).
+    val collapsedGroups = remember { mutableStateListOf<String>() }
 
     Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
         NavDisplay(
@@ -152,9 +156,9 @@ fun MapLocalManager(
             entryProvider = { destination ->
                 when (destination) {
                     is RuleListDestination -> NavEntry(destination) {
-                        RuleList(
-                            rules = liveRules.value,
-                            onAdd = {
+                        RuleListPage(
+                            nodes = liveNodes.value,
+                            onAddRule = {
                                 // New rules default to the inline editor (the common "author a body"
                                 // path) and a JSON Content-Type header, changeable on the Headers tab.
                                 openEditor(
@@ -165,19 +169,18 @@ fun MapLocalManager(
                                     ),
                                 )
                             },
-                            onEdit = { openEditor(it) },
-                            onToggle = { rule -> onUpsert(rule.copy(enabled = !rule.enabled)) },
-                            onRemove = onRemove,
+                            onEditRule = { openEditor(it) },
+                            onNodesChange = onLayoutChange,
+                            collapsedGroupIds = collapsedGroups,
                             onClose = onClose,
                         )
                     }
                     is RuleEditorDestination -> NavEntry(destination) {
-                        // Read the live list here (not the captured `rules`) so this entry tracks host
-                        // edits — see [liveRules].
-                        val currentRules = liveRules.value
-                        // Resolve from the pending draft (new/seeded) or the persisted list.
-                        val initial = drafts[destination.ruleId]
-                            ?: currentRules.firstOrNull { it.id == destination.ruleId }
+                        // Read the live layout here (not the captured `nodes`) so this entry tracks host
+                        // edits — see [liveNodes].
+                        val currentNodes = liveNodes.value
+                        // Resolve from the pending draft (new/seeded) or the persisted layout.
+                        val initial = drafts[destination.ruleId] ?: currentNodes.findRule(destination.ruleId)
                         if (initial == null) {
                             // The rule was removed out from under an open editor: fall back to the list.
                             LaunchedEffect(destination.ruleId) {
@@ -186,19 +189,19 @@ fun MapLocalManager(
                         } else {
                             // The enabled toggle is shared with the list row, so it commits immediately
                             // rather than waiting for Save — otherwise the editor and list switches drift.
-                            // For an already-persisted rule, read and write `enabled` straight through the
-                            // host list so both surfaces stay in lockstep; an unsaved draft keeps it local
-                            // until Save (there's no list row to sync with yet).
-                            val persisted = currentRules.firstOrNull { it.id == destination.ruleId }
+                            // A rule inside an off group can't be toggled here either (the group gates it,
+                            // its own state preserved); a loose/undrafted rule is always toggleable.
+                            val persisted = currentNodes.findRule(destination.ruleId)
+                            val groupEnabled = currentNodes.groupOf(destination.ruleId)?.enabled ?: true
                             RuleEditor(
                                 initial = initial,
                                 enabled = (persisted ?: initial).enabled,
+                                enabledToggleable = groupEnabled,
                                 onToggleEnabled = { next ->
-                                    // Re-read the live rule at click time so committing the flag never
+                                    // Re-read the live layout at click time so committing the flag never
                                     // clobbers a concurrent edit with a stale snapshot.
-                                    val live = liveRules.value.firstOrNull { it.id == destination.ruleId }
-                                    if (live != null) {
-                                        onUpsert(live.copy(enabled = next))
+                                    if (liveNodes.value.findRule(destination.ruleId) != null) {
+                                        onLayoutChange(liveNodes.value.setRuleEnabled(destination.ruleId, next))
                                     } else {
                                         drafts[destination.ruleId]?.let { drafts[destination.ruleId] = it.copy(enabled = next) }
                                     }
@@ -208,7 +211,7 @@ fun MapLocalManager(
                                 onSaveBody = onSaveBody,
                                 onPickFile = onPickFile,
                                 onSaved = { if (backStack.size > 1) backStack.removeLastOrNull() },
-                                onUpsert = onUpsert,
+                                onCommit = { rule -> onLayoutChange(liveNodes.value.upsertRule(rule)) },
                                 onBack = { if (backStack.size > 1) backStack.removeLastOrNull() },
                                 onClose = onClose,
                             )
@@ -246,116 +249,17 @@ private val MapLocalNavConfig = SavedStateConfiguration {
 }
 
 @Composable
-private fun RuleList(
-    rules: List<MapLocalRuleDef>,
-    onAdd: () -> Unit,
-    onEdit: (MapLocalRuleDef) -> Unit,
-    onToggle: (MapLocalRuleDef) -> Unit,
-    onRemove: (String) -> Unit,
-    onClose: () -> Unit,
-) {
-    Box(Modifier.fillMaxSize()) {
-        Column(Modifier.fillMaxSize()) {
-            Row(
-                Modifier.fillMaxWidth()
-                    .background(MaterialTheme.colorScheme.surfaceContainer)
-                    .padding(horizontal = 16.dp, vertical = 10.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text("Map Local", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurface)
-                Spacer(Modifier.weight(1f))
-                CloseButton(onClose, contentDescription = "Close panel")
-            }
-            RowDivider()
-            if (rules.isEmpty()) {
-                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Text(
-                        "No rules yet. Add one to answer a request with an edited body or a local file.",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            } else {
-                LazyColumn(
-                    Modifier.fillMaxSize(),
-                    // Bottom inset so the FAB never covers the last rule's toggle/delete controls.
-                    contentPadding = PaddingValues(bottom = 88.dp),
-                ) {
-                    items(rules, key = { it.id }) { rule ->
-                        RuleRow(rule = rule, onEdit = onEdit, onToggle = onToggle, onRemove = onRemove)
-                        RowDivider()
-                    }
-                }
-            }
-        }
-        // Add is the panel's primary action, so it rides as an icon-only FAB in the bottom-right rather
-        // than a labeled button in the header (which now holds just the title + close). The default
-        // containerColor (primaryContainer) is themed to the accent in tokens.json, so no override.
-        FloatingActionButton(
-            onClick = onAdd,
-            modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp),
-        ) {
-            Icon(vectorResource(Res.drawable.ic_add), contentDescription = "Add rule", modifier = Modifier.size(24.dp))
-        }
-    }
-}
-
-@Composable
-private fun RuleRow(
-    rule: MapLocalRuleDef,
-    onEdit: (MapLocalRuleDef) -> Unit,
-    onToggle: (MapLocalRuleDef) -> Unit,
-    onRemove: (String) -> Unit,
-) {
-    Row(
-        Modifier.fillMaxWidth()
-            .clickable { onEdit(rule) }
-            .padding(horizontal = 12.dp, vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        CompactSwitch(checked = rule.enabled, onCheckedChange = { onToggle(rule) })
-        Spacer(Modifier.width(12.dp))
-        Column(Modifier.weight(1f)) {
-            // The name identifies the rule (it's what the author titled it); the match — method + URL
-            // pattern — reads underneath as the detail.
-            Text(
-                rule.name.ifBlank { "Untitled" },
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurface,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            val method = rule.method.ifBlank { "ANY" }
-            Text(
-                "$method  \u2192  ${rule.urlPattern.ifBlank { "(no pattern)" }}",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-        }
-        IconButton(onClick = { onRemove(rule.id) }, modifier = Modifier.size(36.dp)) {
-            Icon(
-                vectorResource(Res.drawable.ic_delete),
-                contentDescription = "Delete rule",
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.size(18.dp),
-            )
-        }
-    }
-}
-
-@Composable
 private fun RuleEditor(
     initial: MapLocalRuleDef,
     enabled: Boolean,
+    enabledToggleable: Boolean,
     onToggleEnabled: (Boolean) -> Unit,
     bodySeed: ByteArray?,
     onLoadBody: suspend (MapLocalRuleDef) -> ByteArray,
     onSaveBody: suspend (MapLocalRuleDef, ByteArray) -> Unit,
     onPickFile: suspend () -> PickedFile?,
     onSaved: () -> Unit,
-    onUpsert: (MapLocalRuleDef) -> Unit,
+    onCommit: (MapLocalRuleDef) -> Unit,
     onBack: () -> Unit,
     onClose: () -> Unit,
 ) {
@@ -485,7 +389,7 @@ private fun RuleEditor(
                 }
             }
             onSaveBody(rule, bytes)
-            onUpsert(rule)
+            onCommit(rule)
             onSaved()
         }
     }
@@ -516,7 +420,7 @@ private fun RuleEditor(
             )
             Spacer(Modifier.weight(1f))
             HoverTooltip(if (enabled) "Enabled" else "Disabled") {
-                CompactSwitch(checked = enabled, onCheckedChange = onToggleEnabled)
+                CompactSwitch(checked = enabled, onCheckedChange = onToggleEnabled, enabled = enabledToggleable)
             }
             Spacer(Modifier.width(4.dp))
             CloseButton(onClose, contentDescription = "Close panel")
