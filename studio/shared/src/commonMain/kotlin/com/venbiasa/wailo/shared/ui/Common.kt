@@ -69,6 +69,13 @@ internal fun rememberColumnWidths(): SnapshotStateMap<TrafficColumn, Dp> = remem
     }
 }
 
+// Shared height for every docked surface's top bar, so the main viewer, Map Local, and the capture
+// allowlist line up across the panels rather than each drifting to its own padding-derived height. The
+// bars are icon-dominated (36.dp buttons), so 48.dp leaves an even 6.dp of vertical breathing room. A
+// fixed height (like the traffic table's header) is safe because the text scale is capped at 1.8x
+// (TextScale.Max), below where the buttons/titles would outgrow it.
+internal val TopBarHeight = 48.dp
+
 @Composable
 internal fun RowDivider(color: Color = MaterialTheme.colorScheme.outlineVariant) {
     Box(Modifier.fillMaxWidth().height(1.dp).background(color))

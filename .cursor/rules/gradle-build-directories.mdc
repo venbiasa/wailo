@@ -55,5 +55,30 @@ redundant and slow — and a second sandboxed `./gradlew` can even fail on stale
 `hotRun` only covers the running app — tests (e.g. `:shared:jvmTest`) are a separate task and
 still need their own invocation.
 
+## Agent shell is sandboxed: don't verify studio changes with `./gradlew`
+
+The agent's Shell tool runs inside a **sandbox** that breaks the Gradle wrapper in ways the user's own
+terminal never sees. Do not read a failed agent-side `./gradlew` as a real build failure without first
+ruling these out — two distinct failure modes, both observed:
+
+- **Default (sandboxed) run:** the wrapper's `xargs` call hits a blocked syscall
+  (`xargs: sysconf(_SC_ARG_MAX) failed`), which derails the script so it can't find the installed Gradle
+  and instead tries to **download** it from `services.gradle.org` — blocked by the network allowlist
+  (`UnknownHostException`). It fails in <1s and *looks* like Gradle is missing, even though the pinned
+  version is already installed and the user's own terminal builds the same target in seconds.
+- **Sandbox disabled (`required_permissions: ["all"]`):** no download, but it spins up a *separate, cold*
+  Gradle/Kotlin daemon (full Compose-compiler warmup — minutes) that also contends with the user's warm
+  `hotRun` daemon. Slow, not broken — easy to mistake for a hang and interrupt.
+
+**So verify studio (`shared`/`engine`/`desktopApp`) edits WITHOUT running `studio/gradlew` yourself:**
+
+1. `ReadLints` on the edited files — catches unresolved references, missing imports, and type errors
+   (this alone would have caught the one real bug in the top-bar-height change: a missing `height` import).
+2. Read the running `hotRun --auto` terminal file — it recompiles on save and prints
+   `e: <file>:<line> …` compile errors there (the fastest real-compiler signal available to the agent).
+3. Only if a genuine build is unavoidable: ask the user to run it in their warm, unsandboxed terminal,
+   or run with `required_permissions: ["all"]` and expect a slow cold compile — don't keep retrying the
+   default sandboxed path, it will just keep hitting the `xargs`/download failure above.
+
 Prefer the `rgradlew` skill's remote path only for the SDK/Android build; the studio
 build needs `wailo-protocol` in local Maven, so build it locally from `studio/`.

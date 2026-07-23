@@ -166,6 +166,17 @@ private fun runWailo() = application {
         engine.updateRules(compileRules(mapLocalNodes))
     }
 
+    // Docked tool-panel width, host-owned and persisted like the theme/scale above, but stored as a
+    // fraction of the window so it scales with the window rather than pinning to a fixed dp. `shared`
+    // gets the fraction plus a callback the resize handle drives; the clamping lives in ToolPanelLayout.
+    var toolPanelWidthRatio by remember { mutableStateOf(PanelWidthStore.load()) }
+    // Persist debounced so a drag-resize doesn't hammer prefs every frame (like the window geometry below).
+    LaunchedEffect(Unit) {
+        snapshotFlow { toolPanelWidthRatio }
+            .debounce(300.milliseconds)
+            .collect { PanelWidthStore.save(it) }
+    }
+
     // Window geometry survives restarts (host concern, like the theme/scale/bookmarks above). Seeded
     // from the last floating size/position; first run falls back to Compose's default size and lets
     // the OS place the window.
@@ -247,6 +258,8 @@ private fun runWailo() = application {
             onSaveMapLocalBody = { rule, bytes -> withContext(Dispatchers.IO) { MapLocalStore.saveInlineBody(rule, bytes) } },
             // `window` (the ComposeWindow, an AWT Frame) parents the native dialog so it's modal to the app.
             onPickMapLocalFile = { chooseMapLocalFile(window) },
+            toolPanelWidthRatio = toolPanelWidthRatio,
+            onToolPanelWidthRatioChange = { toolPanelWidthRatio = it },
         )
     }
 }

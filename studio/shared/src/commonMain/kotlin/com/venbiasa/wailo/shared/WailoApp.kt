@@ -7,6 +7,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Density
 import com.venbiasa.wailo.shared.theme.TextScale
 import com.venbiasa.wailo.shared.theme.WailoTheme
+import com.venbiasa.wailo.shared.ui.ToolPanelLayout
 import com.venbiasa.wailo.shared.ui.WailoViewer
 
 /**
@@ -27,7 +28,10 @@ import com.venbiasa.wailo.shared.ui.WailoViewer
  * right-side tool panel renders (ADR-0021/0026); [onMapLocalLayoutChange] hands back a new layout for any
  * structural change, and [onLoadMapLocalBody]/[onSaveMapLocalBody] read/persist a rule's authored body as
  * bytes (the host owns all file IO). [onPickMapLocalFile] opens the host's file picker for a body file
- * (JSON/text or image). The panel's open state and any row-seeded draft are the viewer's own transient state.
+ * (JSON/text or image). The panel's open state and any row-seeded draft are the viewer's own transient
+ * state. [toolPanelWidthRatio] is the host-owned, persisted width of that docked panel expressed as a
+ * fraction of the window (so it scales with the window rather than pinning to a fixed dp);
+ * [onToolPanelWidthRatioChange] hands back a new fraction as the user drags the panel's resize handle.
  */
 @Composable
 fun WailoApp(
@@ -51,6 +55,8 @@ fun WailoApp(
     onLoadMapLocalBody: suspend (MapLocalRuleDef) -> ByteArray = { ByteArray(0) },
     onSaveMapLocalBody: suspend (MapLocalRuleDef, ByteArray) -> Unit = { _, _ -> },
     onPickMapLocalFile: suspend () -> PickedFile? = { null },
+    toolPanelWidthRatio: Float = ToolPanelLayout.DefaultWidthRatio,
+    onToolPanelWidthRatioChange: (Float) -> Unit = {},
 ) {
     WailoTheme(darkTheme = darkTheme) {
         val density = LocalDensity.current
@@ -77,6 +83,8 @@ fun WailoApp(
                 onLoadMapLocalBody = onLoadMapLocalBody,
                 onSaveMapLocalBody = onSaveMapLocalBody,
                 onPickMapLocalFile = onPickMapLocalFile,
+                toolPanelWidthRatio = toolPanelWidthRatio,
+                onToolPanelWidthRatioChange = onToolPanelWidthRatioChange,
             )
         }
     }

@@ -409,8 +409,9 @@ private fun RuleEditor(
         // rule's on/off and the dismiss stay pinned above the payload area.
         Row(
             Modifier.fillMaxWidth()
+                .height(TopBarHeight)
                 .background(MaterialTheme.colorScheme.surfaceContainer)
-                .padding(start = 4.dp, end = 8.dp, top = 8.dp, bottom = 8.dp),
+                .padding(start = 4.dp, end = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             // Back returns to the rule list (the panel's other page); Close dismisses the whole panel.

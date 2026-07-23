@@ -77,6 +77,8 @@ internal fun WailoViewer(
     onLoadMapLocalBody: suspend (MapLocalRuleDef) -> ByteArray,
     onSaveMapLocalBody: suspend (MapLocalRuleDef, ByteArray) -> Unit,
     onPickMapLocalFile: suspend () -> PickedFile?,
+    toolPanelWidthRatio: Float,
+    onToolPanelWidthRatioChange: (Float) -> Unit,
 ) {
     // Transient view state (not persisted): nothing is selected when the app opens.
     var selectedId by remember { mutableStateOf<String?>(null) }
@@ -96,17 +98,18 @@ internal fun WailoViewer(
         if (host == null) entries else entries.filter { requestHost(it.exchange.request?.url ?: "") == host }
     }
 
-    // Map Local tool panel: its open/close, the current draft, and the panel width are transient view
+    // Map Local tool panel: its open/close, the current draft, and the body seed are transient view
     // state (like the selection/filter above). The host owns the rules and their persistence — the
     // panel only renders them (ADR-0013/0021).
     var mapLocalOpen by remember { mutableStateOf(false) }
     var mapLocalDraft by remember { mutableStateOf<MapLocalRuleDef?>(null) }
     var mapLocalBodySeed by remember { mutableStateOf<ByteArray?>(null) }
-    var mapLocalWidth by remember { mutableStateOf(460.dp) }
-    // The capture-allowlist panel shares the single docked tool slot with Map Local — opening one
-    // closes the other — so the layout never has to reason about two side panels at once.
+    // The capture-allowlist panel shares the single docked tool slot with Map Local — opening one closes
+    // the other — so the layout never reasons about two side panels at once, and both size themselves from
+    // the one host-owned [toolPanelWidthRatio]: a width dragged for either panel persists across restarts
+    // and carries over to the other. It's a fraction of the window, not a fixed dp, so the panel scales
+    // with the window (clamped to keep both panel and content usable, see ToolPanelLayout).
     var captureOpen by remember { mutableStateOf(false) }
-    var captureWidth by remember { mutableStateOf(420.dp) }
     val density = LocalDensity.current
 
     Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
@@ -183,42 +186,38 @@ internal fun WailoViewer(
                         }
                     }
                 }
-                // The Map Local tool panel docks to the right, resizable, between the content and the
-                // tool rail — the Android Studio tool-window model.
-                if (mapLocalOpen) {
-                    val maxPanel = (totalWidth - 320.dp).coerceAtLeast(MinPanelWidth)
-                    val panelWidth = mapLocalWidth.coerceIn(MinPanelWidth, maxPanel)
+                // The docked tool panel — Map Local or the capture allowlist, never both — sits to the
+                // right, resizable, between the content and the tool rail (the Android Studio tool-window
+                // model). One [toolPanelWidthRatio] backs the single slot, so a width dragged for one panel
+                // is exactly the width the other opens at, and it persists across restarts.
+                if (mapLocalOpen || captureOpen) {
+                    val panelWidth = ToolPanelLayout.widthFor(toolPanelWidthRatio, totalWidth)
                     PanelResizeHandle { deltaPx ->
-                        mapLocalWidth = (panelWidth - with(density) { deltaPx.toDp() })
-                            .coerceIn(MinPanelWidth, maxPanel)
+                        // Drag the handle left (negative delta) to widen; convert the new width back to a
+                        // window fraction so it scales with the window and the host can persist it.
+                        val dragged = panelWidth - with(density) { deltaPx.toDp() }
+                        onToolPanelWidthRatioChange(ToolPanelLayout.ratioFor(dragged, totalWidth))
                     }
                     Box(Modifier.width(panelWidth).fillMaxHeight()) {
-                        MapLocalManager(
-                            nodes = mapLocalNodes,
-                            initialDraft = mapLocalDraft,
-                            initialBodySeed = mapLocalBodySeed,
-                            onLayoutChange = onMapLocalLayoutChange,
-                            onClose = { mapLocalOpen = false },
-                            onLoadBody = onLoadMapLocalBody,
-                            onSaveBody = onSaveMapLocalBody,
-                            onPickFile = onPickMapLocalFile,
-                        )
-                    }
-                }
-                if (captureOpen) {
-                    val maxPanel = (totalWidth - 320.dp).coerceAtLeast(MinPanelWidth)
-                    val panelWidth = captureWidth.coerceIn(MinPanelWidth, maxPanel)
-                    PanelResizeHandle { deltaPx ->
-                        captureWidth = (panelWidth - with(density) { deltaPx.toDp() })
-                            .coerceIn(MinPanelWidth, maxPanel)
-                    }
-                    Box(Modifier.width(panelWidth).fillMaxHeight()) {
-                        CaptureAllowlistManager(
-                            unlockedHosts = unlockedHosts,
-                            onUnlockHost = onUnlockHost,
-                            onLockHost = onLockHost,
-                            onClose = { captureOpen = false },
-                        )
+                        if (mapLocalOpen) {
+                            MapLocalManager(
+                                nodes = mapLocalNodes,
+                                initialDraft = mapLocalDraft,
+                                initialBodySeed = mapLocalBodySeed,
+                                onLayoutChange = onMapLocalLayoutChange,
+                                onClose = { mapLocalOpen = false },
+                                onLoadBody = onLoadMapLocalBody,
+                                onSaveBody = onSaveMapLocalBody,
+                                onPickFile = onPickMapLocalFile,
+                            )
+                        } else {
+                            CaptureAllowlistManager(
+                                unlockedHosts = unlockedHosts,
+                                onUnlockHost = onUnlockHost,
+                                onLockHost = onLockHost,
+                                onClose = { captureOpen = false },
+                            )
+                        }
                     }
                 }
                 ColumnDivider()
@@ -249,7 +248,6 @@ internal fun WailoViewer(
 }
 
 private val ToolRailWidth = 48.dp
-private val MinPanelWidth = 340.dp
 
 // Response headers not carried into a rule seeded from a row: they describe the live transfer, not the
 // payload, so they'd be wrong (or break the mock) once the desktop serves its own bytes. The host
@@ -310,7 +308,7 @@ private fun ToolRail(
         RailDivider()
         ToolRailButton(
             icon = Res.drawable.ic_lock,
-            contentDescription = "Capture allowlist",
+            contentDescription = "Capture Allowlist",
             selected = captureOpen,
             onClick = onToggleCapture,
         )
@@ -391,8 +389,9 @@ private fun TopBar(
 ) {
     Row(
         Modifier.fillMaxWidth()
+            .height(TopBarHeight)
             .background(MaterialTheme.colorScheme.surfaceContainer)
-            .padding(horizontal = 8.dp, vertical = 4.dp),
+            .padding(horizontal = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         // Pause/resume recording; the icon shows the action, not the current state. The server keeps

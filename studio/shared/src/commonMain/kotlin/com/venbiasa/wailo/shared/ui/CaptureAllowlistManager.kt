@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
@@ -56,9 +57,9 @@ internal fun CaptureAllowlistManager(
 ) {
     val focusManager = LocalFocusManager.current
     // A background surface with a surfaceContainer header band (not a fully-tinted panel) so the top bar
-    // matches Map Local's exactly (same fill and 48.dp height). Tapping anywhere off the host field drops
-    // its focus — the click-away counterpart to Esc; child controls (Close, Unlock, the field) hit-test
-    // first, so this only fires on empty space.
+    // matches the other panels exactly (same fill and the shared [TopBarHeight]). Tapping anywhere off the
+    // host field drops its focus — the click-away counterpart to Esc; child controls (Close, Unlock, the
+    // field) hit-test first, so this only fires on empty space.
     Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
         Column(
             Modifier.fillMaxSize()
@@ -66,8 +67,9 @@ internal fun CaptureAllowlistManager(
         ) {
             Row(
                 Modifier.fillMaxWidth()
+                    .height(TopBarHeight)
                     .background(MaterialTheme.colorScheme.surfaceContainer)
-                    .padding(start = 16.dp, end = 8.dp, top = 6.dp, bottom = 6.dp),
+                    .padding(start = 16.dp, end = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(

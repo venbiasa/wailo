@@ -113,8 +113,9 @@ internal fun RuleListPage(
         Column(Modifier.fillMaxSize()) {
             Row(
                 Modifier.fillMaxWidth()
+                    .height(TopBarHeight)
                     .background(MaterialTheme.colorScheme.surfaceContainer)
-                    .padding(start = 16.dp, end = 8.dp, top = 6.dp, bottom = 6.dp),
+                    .padding(start = 16.dp, end = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text("Map Local", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurface)
