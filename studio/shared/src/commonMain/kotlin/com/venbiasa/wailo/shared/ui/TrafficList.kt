@@ -183,6 +183,12 @@ internal fun TrafficList(
                     listState = listState,
                     modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight(),
                 )
+                // Bottom edge: appears only when the columns are wider than the viewport (the header and
+                // rows share this hScroll, so the whole table tracks it).
+                HorizontalScrollbar(
+                    scrollState = hScroll,
+                    modifier = Modifier.align(Alignment.BottomStart).fillMaxWidth(),
+                )
             }
         }
         if (!atBottom) {

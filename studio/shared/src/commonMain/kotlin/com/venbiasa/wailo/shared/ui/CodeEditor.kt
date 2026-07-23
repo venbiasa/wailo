@@ -25,6 +25,7 @@ import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -38,6 +39,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.geometry.Offset
@@ -73,6 +75,7 @@ import com.venbiasa.wailo.shared.format.jsonHighlightSpans
 import com.venbiasa.wailo.shared.resources.Res
 import com.venbiasa.wailo.shared.resources.ic_arrow_back
 import com.venbiasa.wailo.shared.resources.ic_arrow_drop_down
+import com.venbiasa.wailo.shared.resources.ic_wrap_text
 import com.venbiasa.wailo.shared.theme.LocalWailoColors
 import kotlin.math.abs
 import kotlin.math.floor
@@ -156,6 +159,9 @@ internal fun CodeEditor(
     var findOpen by remember { mutableStateOf(false) }
     var findQuery by remember { mutableStateOf("") }
     var viewportWidthPx by remember { mutableStateOf(0) }
+    // Soft wrap on by default: long lines reflow onto extra visual rows at the viewport edge instead of
+    // scrolling sideways. Held per editor instance (not persisted) and flipped by the corner toggle.
+    var wrap by remember { mutableStateOf(true) }
 
     // Read as snapshot dependencies so the whole editor recomposes on edits (the LazyColumn still only
     // measures visible rows). The gutter sizes to the widest line number; content width to the longest line.
@@ -164,6 +170,14 @@ internal fun CodeEditor(
     val gutterDigits = maxOf(2, lineCount.toString().length)
     val gutterWidthDp = charWidthDp * gutterDigits + 20.dp
     val contentWidthDp = charWidthDp * (state.maxLineLength + 1) + 8.dp
+
+    // The cell count that fits after the gutter + fold column (leaving room for the overlay scrollbar) is
+    // where a wrapped line breaks. Null means "don't wrap" — wrap off, or the viewport not measured yet —
+    // and the whole editor then falls back to its original "one physical line = one fixed-height row" grid.
+    val gutterAndFoldPx = charWidthPx * gutterDigits + with(density) { 20.dp.toPx() + FOLD_COL_WIDTH.toPx() }
+    val scrollbarReservePx = with(density) { 14.dp.toPx() }
+    val contentViewportPx = viewportWidthPx - gutterAndFoldPx - scrollbarReservePx
+    val wrapCols: Int? = if (wrap && contentViewportPx >= charWidthPx) wrapColumns(contentViewportPx, charWidthPx) else null
 
     // Folding. Regions are recomputed from the (structure of the) document on every edit — cheap under the
     // size cap, disabled above it — while `foldedStarts` (the opener lines the user collapsed) survives edits
@@ -202,7 +216,7 @@ internal fun CodeEditor(
 
     // Keep the caret line composed (so its row and this frame's edits stay live) and on-screen both ways.
     // With folds active the list index is the caret's position in `visibleLines`, not its raw line number.
-    LaunchedEffect(caret, viewportWidthPx, visibleLines) {
+    LaunchedEffect(caret, viewportWidthPx, visibleLines, wrapCols) {
         val targetIndex = if (visibleLines == null) {
             caret.line
         } else {
@@ -211,8 +225,12 @@ internal fun CodeEditor(
         if (listState.layoutInfo.visibleItemsInfo.none { it.index == targetIndex }) {
             listState.scrollToItem(targetIndex)
         }
-        val gutterPx = charWidthPx * gutterDigits + with(density) { 20.dp.toPx() + FOLD_COL_WIDTH.toPx() }
-        val contentViewport = (viewportWidthPx - gutterPx).coerceAtLeast(1f)
+        // Wrapped lines never overflow horizontally, so there's no sideways follow — just park the scroll at 0.
+        if (wrapCols != null) {
+            if (hScroll.value != 0) hScroll.scrollTo(0)
+            return@LaunchedEffect
+        }
+        val contentViewport = (viewportWidthPx - gutterAndFoldPx).coerceAtLeast(1f)
         val caretX = caret.col * charWidthPx
         val target = when {
             caretX < hScroll.value -> caretX
@@ -442,6 +460,33 @@ internal fun CodeEditor(
         return true
     }
 
+    // Maps a pointer drag (relative to the origin line's content box) to a document position. Off wrap it's
+    // the original arithmetic — one physical line per fixed row — so nothing about the plain grid changes.
+    // On wrap, uneven row heights mean a y-offset can't be divided by a constant, so it walks the list's
+    // measured item offsets: origin item top + local y → an absolute viewport y → the item under it → the
+    // visual row within that item → the column.
+    fun resolveDrag(originLine: Int, localX: Float, localY: Float): TextPos {
+        val cols = wrapCols
+        if (cols == null) {
+            val line = originLine + floor(localY / lineHeightPx).toInt()
+            val col = (localX / charWidthPx).roundToInt().coerceAtLeast(0)
+            return TextPos(line, col)
+        }
+        val info = listState.layoutInfo
+        val originRow = visibleLines?.indexOf(originLine)?.takeIf { it >= 0 } ?: originLine
+        val originItem = info.visibleItemsInfo.firstOrNull { it.index == originRow }
+        val absY = (originItem?.offset ?: 0) + localY
+        val hit = info.visibleItemsInfo.firstOrNull { absY >= it.offset && absY < it.offset + it.size }
+            ?: if (absY < (info.visibleItemsInfo.firstOrNull()?.offset ?: 0)) info.visibleItemsInfo.firstOrNull()
+            else info.visibleItemsInfo.lastOrNull()
+        if (hit == null) return TextPos(originLine, 0)
+        val line = visibleLines?.getOrNull(hit.index) ?: hit.index
+        val len = state.buffer.lineLength(line)
+        val vr = floor((absY - hit.offset).coerceAtLeast(0f) / lineHeightPx).toInt()
+        val colInRow = (localX / charWidthPx).roundToInt()
+        return TextPos(line, visualPosToCol(vr, colInRow, len, cols))
+    }
+
     Column(modifier.background(scheme.surface)) {
         if (findOpen) {
             FindBar(
@@ -481,6 +526,8 @@ internal fun CodeEditor(
                         gutterWidthDp = gutterWidthDp,
                         contentWidthDp = contentWidthDp,
                         hScroll = hScroll,
+                        wrapCols = wrapCols,
+                        resolveDrag = ::resolveDrag,
                         caretOn = caretOn && focused,
                         focused = focused,
                         foldable = foldRegions.containsKey(index),
@@ -505,6 +552,56 @@ internal fun CodeEditor(
                     )
                 }
             }
+            // Self-hiding desktop scrollbars: they paint a thumb only while the body overflows. The
+            // horizontal one exists only off wrap — wrapped lines never overflow sideways.
+            VerticalListScrollbar(
+                listState = listState,
+                modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight(),
+            )
+            if (wrapCols == null) {
+                HorizontalScrollbar(
+                    scrollState = hScroll,
+                    modifier = Modifier.align(Alignment.BottomStart).fillMaxWidth(),
+                )
+            }
+            WrapToggle(
+                enabled = wrap,
+                onToggle = {
+                    wrap = !wrap
+                    focusRequester.requestFocus()
+                },
+                modifier = Modifier.align(Alignment.TopEnd).padding(top = 4.dp, end = 14.dp),
+            )
+        }
+    }
+}
+
+// The soft-wrap toggle: a compact icon chip floated in the editor's top-right corner (clear of the
+// scrollbar). Tinted with the primary color while wrap is on so its state reads at a glance.
+@Composable
+private fun WrapToggle(enabled: Boolean, onToggle: () -> Unit, modifier: Modifier) {
+    val scheme = MaterialTheme.colorScheme
+    // The align/padding [modifier] must ride a node that is a *direct* child of the editor's Box. HoverTooltip
+    // (TooltipArea) emits its own layout node, which would otherwise be that child and swallow the alignment —
+    // dropping the chip to the default top-left. So positioning lives on this wrapper Box; the tooltip + chip
+    // sit inside it.
+    Box(modifier) {
+        HoverTooltip(if (enabled) "Soft wrap: on" else "Soft wrap: off") {
+            Box(
+                Modifier
+                    .size(28.dp)
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(scheme.surfaceContainer.copy(alpha = 0.9f))
+                    .clickable(onClick = onToggle),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    vectorResource(Res.drawable.ic_wrap_text),
+                    contentDescription = if (enabled) "Turn soft wrap off" else "Turn soft wrap on",
+                    tint = if (enabled) scheme.primary else scheme.onSurfaceVariant,
+                    modifier = Modifier.size(16.dp),
+                )
+            }
         }
     }
 }
@@ -523,6 +620,8 @@ private fun EditorLineRow(
     gutterWidthDp: Dp,
     contentWidthDp: Dp,
     hScroll: ScrollState,
+    wrapCols: Int?,
+    resolveDrag: (Int, Float, Float) -> TextPos,
     caretOn: Boolean,
     focused: Boolean,
     foldable: Boolean,
@@ -535,6 +634,11 @@ private fun EditorLineRow(
 ) {
     val scheme = MaterialTheme.colorScheme
     val lineText = state.lineAt(index)
+    val len = lineText.length
+    // Under wrap a physical line spans [rows] visual rows; off wrap it's always one. The row's fixed height
+    // scales with it, and the caret/selection/fold overlays below place themselves on the (row, colInRow)
+    // grid via [caretVisualPos] so they land on the right wrapped row.
+    val rows = visualRowCount(len, wrapCols)
     val caret = state.caret
     val selection = state.selectionRange()
     val isCaretLine = index == caret.line
@@ -550,47 +654,55 @@ private fun EditorLineRow(
         selection.first != selection.second &&
         selection.first <= foldPoint && selection.second >= foldPoint
 
-    Row(Modifier.fillMaxWidth().height(lineHeightDp)) {
+    Row(Modifier.fillMaxWidth().height(lineHeightDp * rows)) {
+        // The gutter number sits on the first visual row (top), so a wrapped line is numbered once, at its
+        // opener, rather than floating in the vertical center of its whole wrapped block.
         Box(
             Modifier.width(gutterWidthDp).fillMaxHeight()
                 .background(scheme.surfaceContainer)
                 .padding(end = 8.dp),
-            contentAlignment = Alignment.CenterEnd,
+            contentAlignment = Alignment.TopEnd,
         ) {
-            Text(
-                (index + 1).toString(),
-                // Inactive numbers use onSurfaceVariant (as the JSON preview does) rather than the faint
-                // `outline`, which was too low-contrast to read; the focused caret's line brightens to onSurface.
-                style = textStyle.copy(color = if (activeCaretLine) scheme.onSurface else scheme.onSurfaceVariant),
-                maxLines = 1,
-            )
+            Box(Modifier.height(lineHeightDp), contentAlignment = Alignment.CenterEnd) {
+                Text(
+                    (index + 1).toString(),
+                    // Inactive numbers use onSurfaceVariant (as the JSON preview does) rather than the faint
+                    // `outline`, which was too low-contrast to read; the focused caret's line brightens to onSurface.
+                    style = textStyle.copy(color = if (activeCaretLine) scheme.onSurface else scheme.onSurfaceVariant),
+                    maxLines = 1,
+                )
+            }
         }
-        // Fold gutter: a disclosure arrow on opener lines (down = expanded, right = collapsed). Fixed width
-        // so text left-edges stay aligned whether or not a line is foldable.
+        // Fold gutter: a disclosure arrow on opener lines (down = expanded, right = collapsed), on the first
+        // visual row. Fixed width so text left-edges stay aligned whether or not a line is foldable.
         Box(
             Modifier.width(FOLD_COL_WIDTH).fillMaxHeight().background(scheme.surfaceContainer),
-            contentAlignment = Alignment.Center,
+            contentAlignment = Alignment.TopCenter,
         ) {
             if (foldable) {
-                Icon(
-                    vectorResource(Res.drawable.ic_arrow_drop_down),
-                    contentDescription = if (folded) "Expand block" else "Collapse block",
-                    tint = scheme.onSurfaceVariant,
-                    modifier = Modifier.size(16.dp)
-                        .rotate(if (folded) -90f else 0f)
-                        .clickable(onClick = onToggleFold),
-                )
+                Box(Modifier.height(lineHeightDp), contentAlignment = Alignment.Center) {
+                    Icon(
+                        vectorResource(Res.drawable.ic_arrow_drop_down),
+                        contentDescription = if (folded) "Expand block" else "Collapse block",
+                        tint = scheme.onSurfaceVariant,
+                        modifier = Modifier.size(16.dp)
+                            .rotate(if (folded) -90f else 0f)
+                            .clickable(onClick = onToggleFold),
+                    )
+                }
             }
         }
         Box(
             Modifier.weight(1f).fillMaxHeight()
                 .background(if (activeCaretLine && selection == null) scheme.onSurface.copy(alpha = 0.05f) else Color.Transparent)
                 .clipToBounds()
-                .horizontalScroll(hScroll),
+                // Wrapped content fills the viewport and reflows; only the plain grid scrolls sideways.
+                .let { if (wrapCols == null) it.horizontalScroll(hScroll) else it },
         ) {
             Box(
-                Modifier.width(contentWidthDp).fillMaxHeight()
-                    .pointerInput(index, lineText, charWidthPx, lineHeightPx, folded) {
+                (if (wrapCols == null) Modifier.width(contentWidthDp) else Modifier.fillMaxWidth())
+                    .fillMaxHeight()
+                    .pointerInput(index, lineText, charWidthPx, lineHeightPx, folded, wrapCols) {
                         // Caret moves on pointer-DOWN (not up), so a click lands instantly instead of waiting
                         // out the double-tap window `detectTapGestures` imposes. Shift+click extends the current
                         // selection to the hit; a second quick press on the same spot selects the word; moving
@@ -601,15 +713,21 @@ private fun EditorLineRow(
                             while (true) {
                                 val down = awaitFirstDown(requireUnconsumed = false)
                                 val shift = currentEvent.keyboardModifiers.isShiftPressed
+                                // The (visual row, column-in-row) hit — the inverse of how the caret is drawn.
+                                // Off wrap it collapses to row 0 and a straight column.
+                                val hitRow = if (wrapCols == null) 0 else floor(down.position.y / lineHeightPx).toInt()
+                                val hitColInRow = (down.position.x / charWidthPx).roundToInt()
                                 // On a collapsed row, only a hit on the `⋯` chip (the cells right after the
                                 // opener text, before the close bracket) expands — clicking the opener text or
                                 // the close bracket just places a caret, as the user asked.
-                                val xCells = down.position.x / charWidthPx
-                                if (folded && !shift && xCells >= lineText.length && xCells < lineText.length + DOTS_CELLS) {
+                                val chip = caretVisualPos(len, len, wrapCols)
+                                if (folded && !shift && hitRow == chip.row &&
+                                    hitColInRow >= chip.colInRow && hitColInRow < chip.colInRow + DOTS_CELLS
+                                ) {
                                     onToggleFold()
                                     continue
                                 }
-                                val downCol = colAt(down.position.x, charWidthPx, lineText.length)
+                                val downCol = visualPosToCol(hitRow, hitColInRow, len, wrapCols)
                                 val isDoubleClick = !shift &&
                                     down.uptimeMillis - lastDownTime < viewConfiguration.doubleTapTimeoutMillis &&
                                         abs(downCol - lastDownCol) <= 1
@@ -633,9 +751,7 @@ private fun EditorLineRow(
                                     }
                                 }
                                 drag(down.id) { change ->
-                                    val line = index + floor(change.position.y / lineHeightPx).toInt()
-                                    val col = (change.position.x / charWidthPx).roundToInt().coerceAtLeast(0)
-                                    onDragSelect(dragAnchor, TextPos(line, col))
+                                    onDragSelect(dragAnchor, resolveDrag(index, change.position.x, change.position.y))
                                     change.consume()
                                 }
                             }
@@ -644,37 +760,61 @@ private fun EditorLineRow(
             ) {
                 if (selection != null && index >= selection.first.line && index <= selection.second.line) {
                     val startCol = if (index == selection.first.line) selection.first.col else 0
-                    val endCol = if (index == selection.second.line) selection.second.col else lineText.length
-                    // A half-cell of slack past a fully-covered line's end shows the newline is in the range.
-                    val slack = if (index != selection.second.line) charWidthDp * 0.5f else 0.dp
-                    Box(
-                        Modifier.offset(x = charWidthDp * startCol)
-                            .width(charWidthDp * (endCol - startCol).coerceAtLeast(0) + slack)
-                            .fillMaxHeight()
-                            .background(scheme.primary.copy(alpha = 0.28f)),
-                    )
+                    val endCol = if (index == selection.second.line) selection.second.col else len
+                    // One highlight box per visual row: the slice of [startCol, endCol] that falls on that row.
+                    // A half-cell of slack past a fully-covered line's end (its last row) shows the trailing
+                    // newline is inside the range.
+                    for (r in 0 until rows) {
+                        val rowStart = if (wrapCols == null) 0 else r * wrapCols
+                        val rowEnd = if (wrapCols == null) len else minOf((r + 1) * wrapCols, len)
+                        val segStart = maxOf(startCol, rowStart)
+                        val segEnd = minOf(endCol, rowEnd)
+                        val slack = if (r == rows - 1 && index != selection.second.line) charWidthDp * 0.5f else 0.dp
+                        if (segEnd > segStart || slack > 0.dp) {
+                            Box(
+                                Modifier.offset(x = charWidthDp * (segStart - rowStart), y = lineHeightDp * r)
+                                    .width(charWidthDp * (segEnd - segStart).coerceAtLeast(0) + slack)
+                                    .height(lineHeightDp)
+                                    .background(scheme.primary.copy(alpha = 0.28f)),
+                            )
+                        }
+                    }
                 }
                 // The collapsed-block highlight covers the `⋯` chip + close bracket, so a fold that's inside a
                 // selection reads as selected across its whole visible extent.
                 if (foldBodySelected) {
+                    val chip = caretVisualPos(len, len, wrapCols)
                     Box(
-                        Modifier.offset(x = charWidthDp * lineText.length)
+                        Modifier.offset(x = charWidthDp * chip.colInRow, y = lineHeightDp * chip.row)
                             .width(charWidthDp * (DOTS_CELLS + 1))
-                            .fillMaxHeight()
+                            .height(lineHeightDp)
                             .background(scheme.primary.copy(alpha = 0.28f)),
                     )
                 }
-                Text(annotated, style = textStyle, softWrap = false, maxLines = 1)
-                // A collapsed opener already drew its own `{`/`[`; pull the matching close up onto this row with
+                if (wrapCols == null) {
+                    Text(annotated, style = textStyle, softWrap = false, maxLines = 1)
+                } else {
+                    // One Text per visual row, sliced on the exact column boundaries the caret/selection math
+                    // uses — so glyphs stay locked to the grid (Compose's own word-wrap would break elsewhere).
+                    Column {
+                        for (r in 0 until rows) {
+                            val s = r * wrapCols
+                            val e = minOf(s + wrapCols, len)
+                            Text(annotated.subSequence(s, e), style = textStyle, softWrap = false, maxLines = 1)
+                        }
+                    }
+                }
+                // A collapsed opener already drew its own `{`/`[`; pull the matching close up onto its row with
                 // three dots between them, so it reads as one `{ ⋯ }` unit. The dots are drawn (not a glyph) so
                 // they sit dead-center between the brackets both ways, and the chip is the only expand target.
                 if (folded) {
                     val dotColor = scheme.onSurfaceVariant
+                    val chip = caretVisualPos(len, len, wrapCols)
                     Row(
-                        Modifier.offset(x = charWidthDp * lineText.length).fillMaxHeight(),
+                        Modifier.offset(x = charWidthDp * chip.colInRow, y = lineHeightDp * chip.row).height(lineHeightDp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Canvas(Modifier.width(charWidthDp * DOTS_CELLS).fillMaxHeight()) {
+                        Canvas(Modifier.width(charWidthDp * DOTS_CELLS).height(lineHeightDp)) {
                             val r = 1.3.dp.toPx()
                             val step = 4.dp.toPx()
                             val cy = size.height / 2f
@@ -687,10 +827,11 @@ private fun EditorLineRow(
                     }
                 }
                 if (isCaretLine && caretOn) {
+                    val cp = caretVisualPos(caret.col, len, wrapCols)
                     Box(
-                        Modifier.offset(x = charWidthDp * caret.col)
+                        Modifier.offset(x = charWidthDp * cp.colInRow, y = lineHeightDp * cp.row)
                             .width(2.dp)
-                            .fillMaxHeight()
+                            .height(lineHeightDp)
                             .background(scheme.primary),
                     )
                 }
@@ -759,9 +900,6 @@ private fun FindBar(
         CloseButton(onClose, contentDescription = "Close find")
     }
 }
-
-private fun colAt(x: Float, charWidthPx: Float, lineLength: Int): Int =
-    (x / charWidthPx).roundToInt().coerceIn(0, lineLength)
 
 // The word span `[start, end)` around [col] for double-click selection: a run of identifier chars
 // (letters/digits/`_`), else the single char clicked. Clicking at end-of-word picks the char to the left.
