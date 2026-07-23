@@ -8,6 +8,8 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
+import androidx.compose.ui.graphics.painter.BitmapPainter
+import androidx.compose.ui.graphics.toComposeImageBitmap
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.isMetaPressed
@@ -37,11 +39,14 @@ import java.awt.Dimension
 import java.awt.EventQueue
 import java.awt.FileDialog
 import java.awt.Frame
+import java.awt.Taskbar
+import java.awt.image.BufferedImage
 import java.io.File
 import java.io.FilenameFilter
 import java.net.DatagramSocket
 import java.net.InetAddress
 import java.util.TimeZone
+import javax.imageio.ImageIO
 import kotlin.coroutines.resume
 import kotlin.time.Duration.Companion.milliseconds
 
@@ -177,6 +182,16 @@ private fun runWailo() = application {
             .collect { PanelWidthStore.save(it) }
     }
 
+    // The app icon: one bitmap drives the Compose window/taskbar icon and — because macOS surfaces the
+    // Dock icon through AWT's Taskbar rather than the window icon — the Dock too, so the dev run shows
+    // the real mark. A packaged app takes its icon from nativeDistributions instead (build.gradle.kts).
+    val appIcon = remember { loadAppIcon() }
+    val appIconPainter = remember(appIcon) { appIcon?.let { BitmapPainter(it.toComposeImageBitmap()) } }
+    LaunchedEffect(appIcon) {
+        val image = appIcon ?: return@LaunchedEffect
+        runCatching { if (Taskbar.isTaskbarSupported()) Taskbar.getTaskbar().iconImage = image }
+    }
+
     // Window geometry survives restarts (host concern, like the theme/scale/bookmarks above). Seeded
     // from the last floating size/position; first run falls back to Compose's default size and lets
     // the OS place the window.
@@ -205,6 +220,7 @@ private fun runWailo() = application {
         },
         state = windowState,
         title = "Wailo",
+        icon = appIconPainter,
         // Preview so the shortcut wins even when a child (e.g. a text field) holds focus. Cmd+= and
         // Cmd++ share the Equals key on most layouts; NumPad variants are handled for full keyboards.
         onPreviewKeyEvent = { event ->
@@ -263,6 +279,15 @@ private fun runWailo() = application {
         )
     }
 }
+
+/**
+ * The Wailo app icon (the mark on the near-black accent), loaded from the classpath resource baked in
+ * at src/main/resources/icons/wailo.png. Returns null — falling back to the platform default — only if
+ * the resource is somehow missing, so a bad icon can never keep the window from opening.
+ */
+private fun loadAppIcon(): BufferedImage? = runCatching {
+    object {}.javaClass.getResourceAsStream("/icons/wailo.png")?.use(ImageIO::read)
+}.getOrNull()
 
 // The common Map Local body file types, used to gently filter the native picker.
 private val BodyFileExtensions = setOf(

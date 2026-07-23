@@ -1,3 +1,4 @@
+import org.jetbrains.compose.desktop.application.dsl.TargetFormat
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
@@ -20,6 +21,19 @@ kotlin {
 compose.desktop {
     application {
         mainClass = "com.venbiasa.wailo.desktop.MainKt"
+
+        nativeDistributions {
+            targetFormats(TargetFormat.Dmg, TargetFormat.Msi, TargetFormat.Deb)
+            packageName = "Wailo"
+            packageVersion = "1.0.0"
+
+            // Per-platform launcher icons for the packaged app. The runtime window/Dock icon is set
+            // separately in Main.kt (dev runs don't go through packaging); these files share the same
+            // Wailo mark. Linux reuses the runtime PNG so there's a single source of truth for it.
+            macOS { iconFile.set(project.file("icons/wailo.icns")) }
+            windows { iconFile.set(project.file("icons/wailo.ico")) }
+            linux { iconFile.set(project.file("src/main/resources/icons/wailo.png")) }
+        }
     }
 }
 
