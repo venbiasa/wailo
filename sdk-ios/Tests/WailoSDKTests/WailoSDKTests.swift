@@ -13,7 +13,8 @@ final class WailoSDKTests: XCTestCase {
             started_at_epoch_ms: 1_000,
             duration_ms: 42,
             error: "",
-            edited: false
+            edited: false,
+            bodies_omitted: false
         ) {
             $0.request = HttpRequest(
                 method: "GET",
@@ -59,8 +60,78 @@ final class WailoSDKTests: XCTestCase {
         let a = CountingSink()
         let b = CountingSink()
         let sink = a + b
-        sink.onExchange(HttpExchange(id: "1", started_at_epoch_ms: 0, duration_ms: 0, error: "", edited: false))
+        sink.onExchange(HttpExchange(id: "1", started_at_epoch_ms: 0, duration_ms: 0, error: "", edited: false, bodies_omitted: false))
         XCTAssertEqual(a.count, 1)
         XCTAssertEqual(b.count, 1)
+    }
+
+    /// The bodies_omitted flag rides the wire like any other field, so a metadata-only capture decodes
+    /// back as metadata-only on the desktop.
+    func testBodiesOmittedRoundTrips() throws {
+        let exchange = HttpExchange(
+            id: "m1",
+            started_at_epoch_ms: 5,
+            duration_ms: 1,
+            error: "",
+            edited: false,
+            bodies_omitted: true
+        )
+        let data = try ProtoEncoder().encode(Envelope { $0.message = .exchange(exchange) })
+        let decoded = try ProtoDecoder().decode(Envelope.self, from: data)
+        guard case let .exchange(decodedExchange) = decoded.message else {
+            return XCTFail("expected an exchange envelope")
+        }
+        XCTAssertTrue(decodedExchange.bodies_omitted)
+    }
+
+    // MARK: - Capture allowlist (WailoCaptureConfigStore)
+
+    /// Only hosts on the allowlist have their bodies captured; `*` is a wildcard and matching is
+    /// case-insensitive. An empty allowlist (the default) and a nil/empty host never match.
+    func testCaptureConfigStoreMatching() {
+        let store = WailoCaptureConfigStore()
+
+        // Empty allowlist: nothing is unlocked.
+        XCTAssertFalse(store.isBodyAllowed(host: "example.com"))
+
+        store.replace(["example.com", "*.api.test"])
+        XCTAssertTrue(store.isBodyAllowed(host: "example.com"))
+        // Exact match only — a subdomain of a non-wildcard entry is not covered.
+        XCTAssertFalse(store.isBodyAllowed(host: "www.example.com"))
+        // Wildcard covers any subdomain run.
+        XCTAssertTrue(store.isBodyAllowed(host: "v1.api.test"))
+        XCTAssertTrue(store.isBodyAllowed(host: "a.b.api.test"))
+        // Host comparison is case-insensitive.
+        XCTAssertTrue(store.isBodyAllowed(host: "EXAMPLE.com"))
+        // Unrelated host, nil, and empty never match.
+        XCTAssertFalse(store.isBodyAllowed(host: "other.test"))
+        XCTAssertFalse(store.isBodyAllowed(host: nil))
+        XCTAssertFalse(store.isBodyAllowed(host: ""))
+
+        // A fresh snapshot replaces wholesale (no merge): the old entry is gone.
+        store.replace(["only.test"])
+        XCTAssertFalse(store.isBodyAllowed(host: "example.com"))
+        XCTAssertTrue(store.isBodyAllowed(host: "only.test"))
+    }
+
+    /// The interceptor's body-gating: a locked host captures no bytes (metadata only); an unlocked host
+    /// captures the full body, and with no cap (the default) it is never truncated.
+    func testBodyGatingOmitsForLockedCapturesForUnlocked() {
+        let body = Data(repeating: 0x41, count: 6 * 1024 * 1024) // 6 MB
+
+        // Locked host: no bytes captured, not flagged truncated (it was omitted, not cut).
+        let (lockedBytes, lockedTruncated) = WailoURLProtocol.capturedBody(body, allowed: false, cap: nil)
+        XCTAssertEqual(lockedBytes.count, 0)
+        XCTAssertFalse(lockedTruncated)
+
+        // Unlocked host, no cap: the whole 6 MB body is captured untruncated.
+        let (unlockedBytes, unlockedTruncated) = WailoURLProtocol.capturedBody(body, allowed: true, cap: nil)
+        XCTAssertEqual(unlockedBytes.count, body.count)
+        XCTAssertFalse(unlockedTruncated)
+
+        // A cap still truncates an unlocked host's oversized body.
+        let (cappedBytes, cappedTruncated) = WailoURLProtocol.capturedBody(body, allowed: true, cap: 1024)
+        XCTAssertEqual(cappedBytes.count, 1024)
+        XCTAssertTrue(cappedTruncated)
     }
 }

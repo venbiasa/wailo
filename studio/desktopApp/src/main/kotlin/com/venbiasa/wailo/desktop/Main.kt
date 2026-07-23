@@ -66,7 +66,16 @@ private fun runWailo() = application {
     // Map the engine's rows into the viewer's model at this boundary — `shared` must not depend on
     // `engine` (module firewall), so the two `Captured*` types are bridged here rather than shared.
     val entries = remember(rows) {
-        rows.map { FlowEntry(it.deviceName, it.appId, it.platform, it.exchange, edited = it.exchange.edited) }
+        rows.map {
+            FlowEntry(
+                it.deviceName,
+                it.appId,
+                it.platform,
+                it.exchange,
+                edited = it.exchange.edited,
+                bodiesOmitted = it.exchange.bodies_omitted,
+            )
+        }
     }
     // The viewer formats timestamps in commonMain (no java.time), so pass the host's zone offset.
     val zoneOffsetMillis = remember { TimeZone.getDefault().getOffset(System.currentTimeMillis()) }
@@ -103,6 +112,28 @@ private fun runWailo() = application {
             bookmarks = bookmarks - host
             BookmarkStore.save(bookmarks)
         }
+    }
+
+    // Unlocked hosts whose request/response bodies are captured (metadata is always captured). Host-owned
+    // and persisted like bookmarks; `shared` gets the list plus unlock/lock callbacks and stays stateless.
+    // The engine pushes this to devices, so only these hosts stream bodies (Proxyman-style "unlock").
+    var unlockedHosts by remember { mutableStateOf(CaptureAllowlistStore.load()) }
+    val unlockHost = { host: String ->
+        if (host.isNotBlank() && host !in unlockedHosts) {
+            unlockedHosts = unlockedHosts + host
+            CaptureAllowlistStore.save(unlockedHosts)
+        }
+    }
+    val lockHost = { host: String ->
+        if (host in unlockedHosts) {
+            unlockedHosts = unlockedHosts - host
+            CaptureAllowlistStore.save(unlockedHosts)
+        }
+    }
+    // Push the allowlist on first composition and every change; the engine re-pushes to any device that
+    // hasn't acked it (like the Map Local rules below). Devices apply the newest snapshot they receive.
+    LaunchedEffect(unlockedHosts) {
+        engine.updateAllowlist(unlockedHosts)
     }
 
     // Map Local layout (groups + rules, in priority order): host-owned and persisted (like bookmarks).
@@ -207,6 +238,9 @@ private fun runWailo() = application {
             bookmarks = bookmarks,
             onAddBookmark = addBookmark,
             onRemoveBookmark = removeBookmark,
+            unlockedHosts = unlockedHosts,
+            onUnlockHost = unlockHost,
+            onLockHost = lockHost,
             mapLocalNodes = mapLocalNodes,
             onMapLocalLayoutChange = onLayoutChange,
             onLoadMapLocalBody = { rule -> withContext(Dispatchers.IO) { MapLocalStore.loadInlineBody(rule) } },

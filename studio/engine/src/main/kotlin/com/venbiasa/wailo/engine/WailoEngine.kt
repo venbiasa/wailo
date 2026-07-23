@@ -2,6 +2,7 @@ package com.venbiasa.wailo.engine
 
 import com.venbiasa.wailo.protocol.BodyRequest
 import com.venbiasa.wailo.protocol.BodyResponse
+import com.venbiasa.wailo.protocol.CaptureAllowlist
 import com.venbiasa.wailo.protocol.Envelope
 import com.venbiasa.wailo.protocol.Header
 import com.venbiasa.wailo.protocol.Hello
@@ -86,6 +87,15 @@ class WailoEngine(
     /** The active Map Local rules (match-metadata only) currently pushed to devices. Frontends observe this. */
     val rules: StateFlow<RuleSet> = _rules.asStateFlow()
 
+    private val _allowlist = MutableStateFlow(CaptureAllowlist())
+
+    /**
+     * Hosts whose request/response bodies devices capture. Metadata is always captured; this gates only
+     * body bytes (Proxyman-style "unlock"), so memory stays bounded to the unlocked hosts. Pushed to
+     * devices like [rules]; frontends observe this. Empty means capture no bodies (the default).
+     */
+    val allowlist: StateFlow<CaptureAllowlist> = _allowlist.asStateFlow()
+
     /** Set by the frontend (the desktop) to resolve a matched rule's body on demand. */
     @Volatile
     var bodyProvider: MapLocalBodyProvider? = null
@@ -93,6 +103,9 @@ class WailoEngine(
     // Monotonic version stamped on every snapshot; the device echoes it in a RuleAck. Only used for
     // ack-matching/retry, never to gate the device's apply, so a restart resetting it is harmless.
     private val epochCounter = AtomicLong(0)
+
+    // Separate monotonic version for the capture allowlist, acked independently of the rule epoch.
+    private val allowlistEpochCounter = AtomicLong(0)
 
     // Live device connections + how far each is acked, so a rule change reaches every attached SDK and a
     // silently lost push is re-sent. Concurrent because Ktor runs one handler coroutine per connection.
@@ -107,6 +120,7 @@ class WailoEngine(
     /** Per-connection sync state: the highest snapshot epoch this device has acknowledged applying. */
     private class SessionState {
         val ackedEpoch = AtomicLong(-1)
+        val ackedAllowlistEpoch = AtomicLong(-1)
     }
 
     fun start() {
@@ -121,8 +135,10 @@ class WailoEngine(
                     // snapshot self-repairs without waiting for the next edit or reconnect (ADR-0019).
                     val reconciler = launch { reconcile(this@webSocket, state) }
                     try {
-                        // Sync the freshly connected (or reconnected) device with the current rules.
+                        // Sync the freshly connected (or reconnected) device with the current rules
+                        // and capture allowlist.
                         pushRules(this)
+                        pushAllowlist(this)
                         var hello: Hello? = null
                         for (frame in incoming) {
                             if (frame !is Frame.Binary) continue
@@ -131,6 +147,9 @@ class WailoEngine(
                             envelope.exchange?.let { record(hello, it) }
                             envelope.rule_ack?.let { ack ->
                                 state.ackedEpoch.updateAndGet { cur -> maxOf(cur, ack.epoch) }
+                            }
+                            envelope.capture_allowlist_ack?.let { ack ->
+                                state.ackedAllowlistEpoch.updateAndGet { cur -> maxOf(cur, ack.epoch) }
                             }
                             // Serve bodies off the read loop so a slow file read can't stall this
                             // connection's incoming frames; the sendMutex still serializes the reply.
@@ -179,12 +198,32 @@ class WailoEngine(
         }
     }
 
+    /**
+     * Replace the set of hosts whose bodies devices capture and push the new snapshot to every device.
+     * Stamps a fresh [CaptureAllowlist.epoch] so devices can ack it and the reconciler can detect a lost
+     * push. Metadata is always captured regardless; this gates only body bytes (Proxyman-style "unlock").
+     */
+    fun updateAllowlist(hostPatterns: List<String>) {
+        _allowlist.value = CaptureAllowlist(host_patterns = hostPatterns, epoch = allowlistEpochCounter.incrementAndGet())
+        scope.launch { sessions.keys.forEach { pushAllowlist(it) } }
+    }
+
+    // Mirrors pushRules: reads _allowlist under the lock at send time so a connect-push racing a
+    // broadcast still converges on the newest snapshot.
+    private suspend fun pushAllowlist(session: DefaultWebSocketServerSession) {
+        sendMutex.withLock {
+            val bytes = Envelope(capture_allowlist = _allowlist.value).encode()
+            runCatching { session.outgoing.send(Frame.Binary(true, bytes)) }
+        }
+    }
+
     // Re-push the current snapshot to a device that hasn't acked it yet. Cancelled when the connection
     // ends (the launching coroutine is a child of the session handler).
     private suspend fun reconcile(session: DefaultWebSocketServerSession, state: SessionState) {
         while (true) {
             delay(ackRetryMs)
             if (state.ackedEpoch.get() < _rules.value.epoch) pushRules(session)
+            if (state.ackedAllowlistEpoch.get() < _allowlist.value.epoch) pushAllowlist(session)
         }
     }
 

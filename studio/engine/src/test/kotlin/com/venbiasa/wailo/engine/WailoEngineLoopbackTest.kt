@@ -2,6 +2,8 @@ package com.venbiasa.wailo.engine
 
 import com.venbiasa.wailo.protocol.BodyRequest
 import com.venbiasa.wailo.protocol.BodyResponse
+import com.venbiasa.wailo.protocol.CaptureAllowlist
+import com.venbiasa.wailo.protocol.CaptureAllowlistAck
 import com.venbiasa.wailo.protocol.Envelope
 import com.venbiasa.wailo.protocol.Header
 import com.venbiasa.wailo.protocol.Hello
@@ -137,6 +139,78 @@ class WailoEngineLoopbackTest {
             }
         }
         assertEquals(0, extraAfterAck, "an acked snapshot must not be re-pushed")
+    }
+
+    @Test
+    fun connectedClientReceivesAllowlistSnapshotWithEpoch() = runBlocking {
+        engine.start()
+        // The capture allowlist follows the same connect-time delivery + versioning as the rule set.
+        engine.updateAllowlist(listOf("example.com", "*.api.test"))
+
+        val received = withTimeoutOrNull(5_000) {
+            var snapshot: CaptureAllowlist? = null
+            client.webSocket(host = "localhost", port = port, path = "/") {
+                send(Frame.Binary(true, Envelope(hello = HELLO).encode()))
+                for (frame in incoming) {
+                    if (frame !is Frame.Binary) continue
+                    Envelope.ADAPTER.decode(frame.readBytes()).capture_allowlist?.let {
+                        snapshot = it
+                        return@webSocket
+                    }
+                }
+            }
+            snapshot
+        }
+
+        assertNotNull(received)
+        assertEquals(listOf("example.com", "*.api.test"), received.host_patterns)
+        assertTrue(received.epoch > 0)
+    }
+
+    @Test
+    fun unackedAllowlistIsRepushed() = runBlocking {
+        engine.start()
+        engine.updateAllowlist(listOf("example.com"))
+
+        // Never ack: the engine must keep re-pushing the allowlist (anti-entropy), like the rule set.
+        var pushes = 0
+        client.webSocket(host = "localhost", port = port, path = "/") {
+            send(Frame.Binary(true, Envelope(hello = HELLO).encode()))
+            withTimeoutOrNull(1_500) {
+                for (frame in incoming) {
+                    if (frame !is Frame.Binary) continue
+                    Envelope.ADAPTER.decode(frame.readBytes()).capture_allowlist?.let { pushes++ }
+                }
+            }
+        }
+        assertTrue(pushes >= 2, "an unacked allowlist must be re-pushed; saw $pushes push(es)")
+    }
+
+    @Test
+    fun ackedAllowlistIsNotRepushed() = runBlocking {
+        engine.start()
+        engine.updateAllowlist(listOf("example.com"))
+
+        // Ack the first allowlist snapshot; the engine must then stop re-pushing it.
+        var extraAfterAck = 0
+        client.webSocket(host = "localhost", port = port, path = "/") {
+            send(Frame.Binary(true, Envelope(hello = HELLO).encode()))
+            var acked = false
+            withTimeoutOrNull(1_500) {
+                for (frame in incoming) {
+                    if (frame !is Frame.Binary) continue
+                    Envelope.ADAPTER.decode(frame.readBytes()).capture_allowlist?.let { snapshot ->
+                        if (acked) {
+                            extraAfterAck++
+                        } else {
+                            send(Frame.Binary(true, Envelope(capture_allowlist_ack = CaptureAllowlistAck(epoch = snapshot.epoch)).encode()))
+                            acked = true
+                        }
+                    }
+                }
+            }
+        }
+        assertEquals(0, extraAfterAck, "an acked allowlist must not be re-pushed")
     }
 
     @Test

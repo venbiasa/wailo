@@ -35,7 +35,10 @@ public final class WailoURLProtocol: URLProtocol {
     // so plain statics are safe here.
     nonisolated(unsafe) static var sink: CaptureSink?
     nonisolated(unsafe) static var bodyFetcher: WailoBodyFetcher?
-    nonisolated(unsafe) static var maxBodyBytes = 256 * 1024
+    // Optional cap on captured body bytes; nil (the default) captures the full body. Body capture is
+    // gated per host by the CaptureAllowlist, so memory is bounded by *which* hosts are unlocked rather
+    // than by a per-body ceiling. Larger-than-cap bodies (when a cap is set) are truncated, not dropped.
+    nonisolated(unsafe) static var maxBodyBytes: Int? = nil
 
     private lazy var session = URLSession(configuration: .ephemeral)
     // Not named `task`: URLProtocol already declares a read-only `task` property.
@@ -143,16 +146,20 @@ public final class WailoURLProtocol: URLProtocol {
     private func emit(response: URLResponse?, body: Data?, error: Error?, edited: Bool = false) {
         guard let sink = WailoURLProtocol.sink else { return }
         let durationMs = Int64((DispatchTime.now().uptimeNanoseconds &- startNanos) / 1_000_000)
-        let capturedRequest = captureRequest()
+        // Bodies are captured only for hosts the desktop has unlocked (CaptureAllowlist); everything
+        // else records metadata only, flagged bodies_omitted so the desktop can offer to unlock.
+        let bodiesAllowed = WailoCaptureConfigStore.shared.isBodyAllowed(host: request.url?.host)
+        let capturedRequest = captureRequest(bodiesAllowed: bodiesAllowed)
         let httpResponse = response as? HTTPURLResponse
-        let capturedResponse = httpResponse.map { captureResponse($0, body: body) }
+        let capturedResponse = httpResponse.map { captureResponse($0, body: body, bodiesAllowed: bodiesAllowed) }
 
         let exchange = HttpExchange(
             id: UUID().uuidString,
             started_at_epoch_ms: startedAtEpochMs,
             duration_ms: durationMs,
             error: error.map { ($0 as NSError).localizedDescription } ?? "",
-            edited: edited
+            edited: edited,
+            bodies_omitted: !bodiesAllowed
         ) {
             $0.request = capturedRequest
             $0.response = capturedResponse
@@ -160,17 +167,16 @@ public final class WailoURLProtocol: URLProtocol {
         sink.onExchange(exchange)
     }
 
-    private func captureRequest() -> HttpRequest {
-        let cap = WailoURLProtocol.maxBodyBytes
+    private func captureRequest(bodiesAllowed: Bool) -> HttpRequest {
         // Bodies sent via httpBodyStream are not readable here (documented blind spot).
         let full = request.httpBody ?? Data()
-        let truncated = full.count > cap
-        let captured = truncated ? full.prefix(cap) : full
+        let (captured, truncated) = WailoURLProtocol.capturedBody(full, allowed: bodiesAllowed)
         let headers = (request.allHTTPHeaderFields ?? [:]).map { Header(name: $0.key, value: $0.value) }
         return HttpRequest(
             method: request.httpMethod ?? "GET",
             url: request.url?.absoluteString ?? "",
-            body: Data(captured),
+            body: captured,
+            // Keep the declared size even when bodies are omitted, so the size column stays meaningful.
             body_size: Int64(full.count),
             body_truncated: truncated
         ) {
@@ -178,22 +184,30 @@ public final class WailoURLProtocol: URLProtocol {
         }
     }
 
-    private func captureResponse(_ response: HTTPURLResponse, body: Data?) -> HttpResponse {
-        let cap = WailoURLProtocol.maxBodyBytes
+    private func captureResponse(_ response: HTTPURLResponse, body: Data?, bodiesAllowed: Bool) -> HttpResponse {
         let declaredSize = response.expectedContentLength // -1 when unknown
         let full = body ?? Data()
-        let captured = full.count > cap ? full.prefix(cap) : full
-        let truncated = declaredSize >= 0 ? declaredSize > Int64(cap) : full.count >= cap
+        let (captured, truncated) = WailoURLProtocol.capturedBody(full, allowed: bodiesAllowed)
         let headers = response.allHeaderFields.map { Header(name: "\($0.key)", value: "\($0.value)") }
         return HttpResponse(
             code: Int32(response.statusCode),
             // URLSession never exposes the HTTP status line's reason phrase
             message: "",
-            body: Data(captured),
+            body: captured,
             body_size: declaredSize,
             body_truncated: truncated
         ) {
             $0.headers = headers
         }
+    }
+
+    /// The body bytes to capture: nothing (metadata only) when the host isn't unlocked; otherwise the
+    /// full body, truncated only if a `maxBodyBytes` cap is set (nil = unlimited, the default). Returns
+    /// the captured bytes and whether they were truncated. Static + internal so the gating is unit
+    /// testable without driving a full URLProtocol/network flow; [cap] defaults to the current cap.
+    static func capturedBody(_ full: Data, allowed: Bool, cap: Int? = maxBodyBytes) -> (Data, Bool) {
+        guard allowed else { return (Data(), false) }
+        guard let cap, full.count > cap else { return (full, false) }
+        return (Data(full.prefix(cap)), true)
     }
 }

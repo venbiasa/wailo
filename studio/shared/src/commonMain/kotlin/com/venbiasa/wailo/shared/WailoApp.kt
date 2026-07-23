@@ -21,6 +21,8 @@ import com.venbiasa.wailo.shared.ui.WailoViewer
  * traffic is being recorded, and [onToggleCapture]/[onClear] drive the top bar (the engine lives in the
  * host, not here). [bookmarks] are the persisted, host-owned bookmarked hosts; [onAddBookmark]/
  * [onRemoveBookmark] let the viewer mutate that set (the host owns its persistence, ADR-0013).
+ * [unlockedHosts] are the persisted host patterns whose request/response bodies are captured (metadata is
+ * always captured); [onUnlockHost]/[onLockHost] mutate that allowlist, which the host pushes to devices.
  * [mapLocalNodes] are the host-owned, persisted Map Local layout (groups + rules, in priority order) the
  * right-side tool panel renders (ADR-0021/0026); [onMapLocalLayoutChange] hands back a new layout for any
  * structural change, and [onLoadMapLocalBody]/[onSaveMapLocalBody] read/persist a rule's authored body as
@@ -41,6 +43,9 @@ fun WailoApp(
     bookmarks: List<String> = emptyList(),
     onAddBookmark: (String) -> Unit = {},
     onRemoveBookmark: (String) -> Unit = {},
+    unlockedHosts: List<String> = emptyList(),
+    onUnlockHost: (String) -> Unit = {},
+    onLockHost: (String) -> Unit = {},
     mapLocalNodes: List<MapLocalNode> = emptyList(),
     onMapLocalLayoutChange: (List<MapLocalNode>) -> Unit = {},
     onLoadMapLocalBody: suspend (MapLocalRuleDef) -> ByteArray = { ByteArray(0) },
@@ -64,6 +69,9 @@ fun WailoApp(
                 bookmarks = bookmarks,
                 onAddBookmark = onAddBookmark,
                 onRemoveBookmark = onRemoveBookmark,
+                unlockedHosts = unlockedHosts,
+                onUnlockHost = onUnlockHost,
+                onLockHost = onLockHost,
                 mapLocalNodes = mapLocalNodes,
                 onMapLocalLayoutChange = onMapLocalLayoutChange,
                 onLoadMapLocalBody = onLoadMapLocalBody,

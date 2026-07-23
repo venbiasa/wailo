@@ -4,10 +4,11 @@ import Wire
 
 /**
  * One Envelope per WebSocket frame. Device -> desktop: the client opens with a Hello, then streams
- * exchanges, plus a RuleAck after applying rules and a BodyRequest when a Map Local rule matches.
- * Desktop -> device: pushes a RuleSet (match-metadata) right after the Hello and whenever rules change,
- * and replies to a BodyRequest with a BodyResponse (ADR-0019). The receiver keys on which oneof field
- * is set; new kinds are a oneof extension (ADR-0008), so this stays backward-compatible.
+ * exchanges, plus a RuleAck after applying rules, a CaptureAllowlistAck after applying the allowlist,
+ * and a BodyRequest when a Map Local rule matches. Desktop -> device: pushes a RuleSet (match-metadata)
+ * and a CaptureAllowlist right after the Hello and whenever they change, and replies to a BodyRequest
+ * with a BodyResponse (ADR-0019). The receiver keys on which oneof field is set; new kinds are a oneof
+ * extension (ADR-0008), so this stays backward-compatible.
  */
 public struct Envelope {
 
@@ -62,6 +63,8 @@ extension Envelope : Proto3Codable {
             case 4: message = .rule_ack(try protoReader.decode(RuleAck.self))
             case 5: message = .body_request(try protoReader.decode(BodyRequest.self))
             case 6: message = .body_response(try protoReader.decode(BodyResponse.self))
+            case 7: message = .capture_allowlist(try protoReader.decode(CaptureAllowlist.self))
+            case 8: message = .capture_allowlist_ack(try protoReader.decode(CaptureAllowlistAck.self))
             default: try protoReader.readUnknownField(tag: tag)
             }
         }
@@ -104,6 +107,14 @@ extension Envelope : Codable {
             self.message = .body_response(body_response)
         } else if let body_response = try container.decodeIfPresent(BodyResponse.self, forKey: "body_response") {
             self.message = .body_response(body_response)
+        } else if let capture_allowlist = try container.decodeIfPresent(CaptureAllowlist.self, forKey: "captureAllowlist") {
+            self.message = .capture_allowlist(capture_allowlist)
+        } else if let capture_allowlist = try container.decodeIfPresent(CaptureAllowlist.self, forKey: "capture_allowlist") {
+            self.message = .capture_allowlist(capture_allowlist)
+        } else if let capture_allowlist_ack = try container.decodeIfPresent(CaptureAllowlistAck.self, forKey: "captureAllowlistAck") {
+            self.message = .capture_allowlist_ack(capture_allowlist_ack)
+        } else if let capture_allowlist_ack = try container.decodeIfPresent(CaptureAllowlistAck.self, forKey: "capture_allowlist_ack") {
+            self.message = .capture_allowlist_ack(capture_allowlist_ack)
         } else {
             self.message = nil
         }
@@ -120,6 +131,8 @@ extension Envelope : Codable {
         case .rule_ack(let rule_ack): try container.encode(rule_ack, forKey: preferCamelCase ? "ruleAck" : "rule_ack")
         case .body_request(let body_request): try container.encode(body_request, forKey: preferCamelCase ? "bodyRequest" : "body_request")
         case .body_response(let body_response): try container.encode(body_response, forKey: preferCamelCase ? "bodyResponse" : "body_response")
+        case .capture_allowlist(let capture_allowlist): try container.encode(capture_allowlist, forKey: preferCamelCase ? "captureAllowlist" : "capture_allowlist")
+        case .capture_allowlist_ack(let capture_allowlist_ack): try container.encode(capture_allowlist_ack, forKey: preferCamelCase ? "captureAllowlistAck" : "capture_allowlist_ack")
         case Optional.none: break
         }
     }
@@ -140,6 +153,8 @@ extension Envelope {
         case rule_ack(RuleAck)
         case body_request(BodyRequest)
         case body_response(BodyResponse)
+        case capture_allowlist(CaptureAllowlist)
+        case capture_allowlist_ack(CaptureAllowlistAck)
 
         fileprivate func encode(to protoWriter: ProtoWriter) throws {
             switch self {
@@ -149,6 +164,8 @@ extension Envelope {
             case .rule_ack(let rule_ack): try protoWriter.encode(tag: 4, value: rule_ack)
             case .body_request(let body_request): try protoWriter.encode(tag: 5, value: body_request)
             case .body_response(let body_response): try protoWriter.encode(tag: 6, value: body_response)
+            case .capture_allowlist(let capture_allowlist): try protoWriter.encode(tag: 7, value: capture_allowlist)
+            case .capture_allowlist_ack(let capture_allowlist_ack): try protoWriter.encode(tag: 8, value: capture_allowlist_ack)
             }
         }
 

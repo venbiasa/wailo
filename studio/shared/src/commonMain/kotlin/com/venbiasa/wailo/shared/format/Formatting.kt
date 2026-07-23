@@ -201,6 +201,45 @@ internal fun urlSegments(url: String): List<UrlSegment> {
 internal fun requestHost(url: String): String =
     urlSegments(url).firstOrNull { it.part == UrlPart.Host }?.text ?: ""
 
+/**
+ * Whether [host] matches a capture-allowlist [pattern]: `*` matches any run of characters, everything
+ * else is literal, compared case-insensitively against the whole host. Mirrors the device-side matcher
+ * (WailoRuleStore / WailoCaptureConfigStore) so the desktop's lock indicator agrees with what the SDK
+ * actually captures. An empty pattern or host never matches.
+ */
+internal fun hostMatchesPattern(pattern: String, host: String): Boolean {
+    if (pattern.isEmpty() || host.isEmpty()) return false
+    val regex = buildString {
+        append('^')
+        pattern.split('*').forEachIndexed { index, literal ->
+            if (index > 0) append(".*")
+            append(Regex.escape(literal))
+        }
+        append('$')
+    }
+    return Regex(regex, RegexOption.IGNORE_CASE).matches(host)
+}
+
+/** Whether any allowlist [patterns] entry unlocks [host] for body capture. */
+internal fun isHostUnlocked(patterns: List<String>, host: String): Boolean =
+    patterns.any { hostMatchesPattern(it, host) }
+
+/**
+ * Whether [pattern] is a plausible capture-allowlist entry, gating the manager's manual "Unlock" input
+ * so a stray token (e.g. a lone "s") can't be added. Accepts a domain/IP (has a dot), an explicit
+ * wildcard pattern (contains `*`), or the well-known single-label dev host `localhost`; only host
+ * characters are allowed (letters, digits, `.`, `-`, `*`), with no leading/trailing dot or hyphen and no
+ * empty labels. Hosts unlocked from a real traffic row bypass this — they're already concrete hosts.
+ */
+internal fun isValidHostPattern(pattern: String): Boolean {
+    val host = pattern.trim()
+    if (host.isEmpty()) return false
+    if (!host.all { it.isLetterOrDigit() || it == '.' || it == '-' || it == '*' }) return false
+    if (host.startsWith('.') || host.endsWith('.') || host.startsWith('-') || host.endsWith('-')) return false
+    if (host.contains("..")) return false
+    return host.contains('.') || host.contains('*') || host.equals("localhost", ignoreCase = true)
+}
+
 /** Human-readable byte size (`—` for empty/unknown, `340 B`, `1.2 KB`, `3.4 MB`, …). */
 internal fun formatBytes(bytes: Long): String {
     if (bytes <= 0) return "—"

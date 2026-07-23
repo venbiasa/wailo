@@ -48,6 +48,7 @@ import com.venbiasa.wailo.shared.resources.Res
 import com.venbiasa.wailo.shared.resources.ic_dark_mode
 import com.venbiasa.wailo.shared.resources.ic_delete
 import com.venbiasa.wailo.shared.resources.ic_light_mode
+import com.venbiasa.wailo.shared.resources.ic_lock
 import com.venbiasa.wailo.shared.resources.ic_pause
 import com.venbiasa.wailo.shared.resources.ic_play_arrow
 import com.venbiasa.wailo.shared.resources.ic_rule
@@ -68,6 +69,9 @@ internal fun WailoViewer(
     bookmarks: List<String>,
     onAddBookmark: (String) -> Unit,
     onRemoveBookmark: (String) -> Unit,
+    unlockedHosts: List<String>,
+    onUnlockHost: (String) -> Unit,
+    onLockHost: (String) -> Unit,
     mapLocalNodes: List<MapLocalNode>,
     onMapLocalLayoutChange: (List<MapLocalNode>) -> Unit,
     onLoadMapLocalBody: suspend (MapLocalRuleDef) -> ByteArray,
@@ -99,6 +103,10 @@ internal fun WailoViewer(
     var mapLocalDraft by remember { mutableStateOf<MapLocalRuleDef?>(null) }
     var mapLocalBodySeed by remember { mutableStateOf<ByteArray?>(null) }
     var mapLocalWidth by remember { mutableStateOf(460.dp) }
+    // The capture-allowlist panel shares the single docked tool slot with Map Local — opening one
+    // closes the other — so the layout never has to reason about two side panels at once.
+    var captureOpen by remember { mutableStateOf(false) }
+    var captureWidth by remember { mutableStateOf(420.dp) }
     val density = LocalDensity.current
 
     Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
@@ -138,6 +146,9 @@ internal fun WailoViewer(
                                 bookmarks = bookmarks,
                                 onAddBookmark = onAddBookmark,
                                 onRemoveBookmark = onRemoveBookmark,
+                                unlockedHosts = unlockedHosts,
+                                onUnlockHost = onUnlockHost,
+                                onLockHost = onLockHost,
                                 // A row's "Map Local…" seeds a fresh draft (exact URL + method + the
                                 // captured body's bytes — JSON or image) and opens the tool panel — no
                                 // separate window (ADR-0021).
@@ -164,6 +175,8 @@ internal fun WailoViewer(
                             }
                             DetailPanel(
                                 entry = selected,
+                                unlockedHosts = unlockedHosts,
+                                onUnlockHost = onUnlockHost,
                                 modifier = Modifier.fillMaxWidth().height(detailHeight.coerceIn(minDetail, maxDetail)),
                                 onClose = { selectedId = null },
                             )
@@ -192,6 +205,22 @@ internal fun WailoViewer(
                         )
                     }
                 }
+                if (captureOpen) {
+                    val maxPanel = (totalWidth - 320.dp).coerceAtLeast(MinPanelWidth)
+                    val panelWidth = captureWidth.coerceIn(MinPanelWidth, maxPanel)
+                    PanelResizeHandle { deltaPx ->
+                        captureWidth = (panelWidth - with(density) { deltaPx.toDp() })
+                            .coerceIn(MinPanelWidth, maxPanel)
+                    }
+                    Box(Modifier.width(panelWidth).fillMaxHeight()) {
+                        CaptureAllowlistManager(
+                            unlockedHosts = unlockedHosts,
+                            onUnlockHost = onUnlockHost,
+                            onLockHost = onLockHost,
+                            onClose = { captureOpen = false },
+                        )
+                    }
+                }
                 ColumnDivider()
                 ToolRail(
                     darkTheme = darkTheme,
@@ -205,7 +234,13 @@ internal fun WailoViewer(
                             mapLocalDraft = null
                             mapLocalBodySeed = null
                             mapLocalOpen = true
+                            captureOpen = false
                         }
+                    },
+                    captureOpen = captureOpen,
+                    onToggleCapture = {
+                        captureOpen = !captureOpen
+                        if (captureOpen) mapLocalOpen = false
                     },
                 )
             }
@@ -252,6 +287,8 @@ private fun ToolRail(
     onToggleDarkTheme: () -> Unit,
     mapLocalOpen: Boolean,
     onToggleMapLocal: () -> Unit,
+    captureOpen: Boolean,
+    onToggleCapture: () -> Unit,
 ) {
     Column(
         Modifier.fillMaxHeight()
@@ -271,6 +308,12 @@ private fun ToolRail(
             onClick = onToggleDarkTheme,
         )
         RailDivider()
+        ToolRailButton(
+            icon = Res.drawable.ic_lock,
+            contentDescription = "Capture allowlist",
+            selected = captureOpen,
+            onClick = onToggleCapture,
+        )
         ToolRailButton(
             icon = Res.drawable.ic_rule,
             contentDescription = "Map Local",

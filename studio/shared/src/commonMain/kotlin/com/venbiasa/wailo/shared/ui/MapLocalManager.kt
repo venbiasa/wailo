@@ -271,12 +271,18 @@ private fun RuleEditor(
     var editorTab by remember { mutableStateOf(EditorTab.Body) }
     var saving by remember { mutableStateOf(false) }
 
-    // Save-blocking validation, surfaced live as an error indicator on each field. A rule needs a name
-    // to identify it in the list; the status code must be a real HTTP status (100–599), so a typo like
-    // an empty or out-of-range value can't ride through to a served response.
-    val nameError = name.isBlank()
-    val statusCodeError = statusCode.toIntOrNull().let { it == null || it !in VALID_STATUS_CODES }
-    val canSave = !saving && !nameError && !statusCodeError && urlPattern.isNotBlank()
+    // Validate on Save, not while typing: nothing flashes red until the user actually attempts a save.
+    // [showErrors] flips on the first invalid attempt; from then on the offending fields reveal their
+    // error live (computed instantly) so they clear as the user fixes them. A rule needs a name to
+    // identify it in the list; the status code must be a real HTTP status (100–599); a URL pattern is
+    // required to match against.
+    var showErrors by remember { mutableStateOf(false) }
+    val nameInvalid = name.isBlank()
+    val statusCodeInvalid = statusCode.toIntOrNull().let { it == null || it !in VALID_STATUS_CODES }
+    val urlInvalid = urlPattern.isBlank()
+    val nameError = showErrors && nameInvalid
+    val statusCodeError = showErrors && statusCodeInvalid
+    val urlError = showErrors && urlInvalid
 
     val scope = rememberCoroutineScope()
 
@@ -369,9 +375,13 @@ private fun RuleEditor(
     )
 
     fun save() {
-        // Guard the same validity the Save button enforces, so a stray call can't persist an unnamed
-        // rule or an out-of-range status code.
-        if (!canSave) return
+        if (saving) return
+        // Validate on submit: reveal the field errors and abort if anything's off (an unnamed rule, an
+        // out-of-range status code, or a missing URL pattern), otherwise persist.
+        if (nameInvalid || statusCodeInvalid || urlInvalid) {
+            showErrors = true
+            return
+        }
         saving = true
         val rule = buildRule()
         // Snapshot the body source now (off-composition reads in the coroutine would be stale/illegal).
@@ -448,12 +458,17 @@ private fun RuleEditor(
                     isError = nameError,
                 )
             }
-            LabeledField("URL pattern", Modifier.fillMaxWidth()) {
+            LabeledField(
+                "URL pattern",
+                Modifier.fillMaxWidth(),
+                error = if (urlError) "URL pattern can\u2019t be empty" else null,
+            ) {
                 CompactOutlinedTextField(
                     value = urlPattern,
                     onValueChange = { urlPattern = it },
                     modifier = Modifier.fillMaxWidth(),
                     placeholder = "https://api.example.com/v1/*",
+                    isError = urlError,
                 )
             }
             // Both fields hug their content and sit together at the start of the row rather than
@@ -515,7 +530,7 @@ private fun RuleEditor(
             BodyVerdict(if (isImage) BodyValidity.None else validity, Modifier.weight(1f))
             Button(
                 onClick = { save() },
-                enabled = canSave,
+                enabled = !saving,
             ) {
                 Text("Save")
             }

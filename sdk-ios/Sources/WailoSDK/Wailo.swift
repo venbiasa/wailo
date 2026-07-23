@@ -15,8 +15,6 @@ public enum Wailo {
 
     public static let defaultHost = "localhost"
     public static let defaultPort = 8899
-    /// Per-body capture cap; larger bodies are truncated, not dropped.
-    public static let defaultMaxBodyBytes = 256 * 1024
     private static let platform = "ios"
 
     nonisolated(unsafe) private static var client: WailoClient?
@@ -27,12 +25,15 @@ public enum Wailo {
     ///   `URLSessionConfiguration.default`/`.ephemeral` so sessions built by third-party libraries
     ///   are captured too. When false, only `URLSession.shared` and sessions passed to
     ///   `Wailo.instrument(_:)` are captured.
+    /// - Parameter maxBodyBytes: optional cap on captured body bytes. nil (the default) captures the
+    ///   full body for unlocked hosts. Body capture is gated per host by the desktop's CaptureAllowlist,
+    ///   so memory is bounded by which hosts are unlocked rather than by a per-body ceiling.
     public static func start(
         appId: String = Bundle.main.bundleIdentifier ?? "unknown",
         deviceName: String = defaultDeviceName(),
         host: String = defaultHost,
         port: Int = defaultPort,
-        maxBodyBytes: Int = defaultMaxBodyBytes,
+        maxBodyBytes: Int? = nil,
         alsoLogToConsole: Bool = true,
         instrumentSharedConfigurations: Bool = true
     ) {

@@ -172,6 +172,9 @@ final class WailoClient: NSObject, CaptureSink, WailoBodyFetcher, URLSessionWebS
         case let .rule_set(ruleSet)?:
             WailoRuleStore.shared.replace(ruleSet.rules)
             sendControl(Envelope { $0.message = .rule_ack(RuleAck(epoch: ruleSet.epoch)) })
+        case let .capture_allowlist(list)?:
+            WailoCaptureConfigStore.shared.replace(list.host_patterns)
+            sendControl(Envelope { $0.message = .capture_allowlist_ack(CaptureAllowlistAck(epoch: list.epoch)) })
         case let .body_response(response)?:
             resolvePending(response)
         default:
@@ -179,11 +182,13 @@ final class WailoClient: NSObject, CaptureSink, WailoBodyFetcher, URLSessionWebS
         }
     }
 
-    /// Drop the cached Map Local snapshot. The desktop is the source of truth for the rules, so once
-    /// the connection is gone there is no authority for them: matching must fall back to pass-through
-    /// until a reconnect re-pushes the current set. Idempotent — every failed reconnect lands here.
+    /// Drop the cached desktop snapshots (Map Local rules + capture allowlist). The desktop is the
+    /// source of truth for both, so once the connection is gone there is no authority for them: matching
+    /// falls back to pass-through and body capture falls back to metadata-only until a reconnect
+    /// re-pushes the current set. Idempotent — every failed reconnect lands here.
     private func dropCachedRules() {
         WailoRuleStore.shared.replace([])
+        WailoCaptureConfigStore.shared.replace([])
     }
 
     // MARK: - Map Local body fetch (WailoBodyFetcher)

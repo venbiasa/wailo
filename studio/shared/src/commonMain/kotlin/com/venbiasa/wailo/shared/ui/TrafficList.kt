@@ -82,6 +82,9 @@ internal fun TrafficList(
     bookmarks: List<String>,
     onAddBookmark: (String) -> Unit,
     onRemoveBookmark: (String) -> Unit,
+    unlockedHosts: List<String>,
+    onUnlockHost: (String) -> Unit,
+    onLockHost: (String) -> Unit,
     onMapLocalFromUrl: (String, String, List<Header>, ByteArray?) -> Unit,
 ) {
     val listState = rememberLazyListState()
@@ -172,6 +175,9 @@ internal fun TrafficList(
                             bookmarks = bookmarks,
                             onAddBookmark = onAddBookmark,
                             onRemoveBookmark = onRemoveBookmark,
+                            unlockedHosts = unlockedHosts,
+                            onUnlockHost = onUnlockHost,
+                            onLockHost = onLockHost,
                             onMapLocalFromUrl = onMapLocalFromUrl,
                         )
                         RowDivider()
@@ -271,6 +277,9 @@ private fun TrafficRow(
     bookmarks: List<String>,
     onAddBookmark: (String) -> Unit,
     onRemoveBookmark: (String) -> Unit,
+    unlockedHosts: List<String>,
+    onUnlockHost: (String) -> Unit,
+    onLockHost: (String) -> Unit,
     onMapLocalFromUrl: (String, String, List<Header>, ByteArray?) -> Unit,
 ) {
     val exchange = entry.exchange
@@ -282,17 +291,23 @@ private fun TrafficRow(
     val kind = statusKind(code, hasError)
 
     // Right-click offers bookmarking this row's host (a tick once saved; the slot is reserved when not,
-    // so the label never shifts as it toggles) and mapping its URL to a local file. A row with no
-    // parseable host skips the bookmark entry; one with no URL skips Map Local — an all-empty list is a
-    // plain passthrough (no menu).
+    // so the label never shifts as it toggles), unlocking/locking body capture for the host, and mapping
+    // its URL to a local file. A row with no parseable host skips the bookmark/unlock entries; one with
+    // no URL skips Map Local — an all-empty list is a plain passthrough (no menu).
     val url = request?.url ?: ""
     val host = remember(url) { requestHost(url) }
     val bookmarked = host in bookmarks
+    val unlocked = host in unlockedHosts
     val actions = buildList {
         if (host.isNotEmpty()) {
             add(
                 ContextMenuAction("Bookmark", checked = bookmarked) {
                     if (bookmarked) onRemoveBookmark(host) else onAddBookmark(host)
+                },
+            )
+            add(
+                ContextMenuAction("Capture bodies for host", checked = unlocked) {
+                    if (unlocked) onLockHost(host) else onUnlockHost(host)
                 },
             )
         }

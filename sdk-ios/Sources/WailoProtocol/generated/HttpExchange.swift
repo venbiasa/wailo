@@ -20,6 +20,12 @@ public struct HttpExchange {
      * True when a Map Local (or future rewrite) rule produced this response instead of the network.
      */
     public var edited: Bool
+    /**
+     * True when the device captured metadata only and omitted the request/response bodies because the
+     * host is not on the CaptureAllowlist. Lets the desktop show "unlock to capture" rather than "no
+     * body". The bodies are gated together (per host), so one flag covers the whole exchange.
+     */
+    public var bodies_omitted: Bool
     public var unknownFields: UnknownFields = .init()
 
     public init(
@@ -28,6 +34,7 @@ public struct HttpExchange {
         duration_ms: Int64,
         error: String,
         edited: Bool,
+        bodies_omitted: Bool,
         configure: (inout Self) -> Swift.Void = { _ in }
     ) {
         self.id = id
@@ -35,6 +42,7 @@ public struct HttpExchange {
         self.duration_ms = duration_ms
         self.error = error
         self.edited = edited
+        self.bodies_omitted = bodies_omitted
         configure(&self)
     }
 
@@ -71,6 +79,7 @@ extension HttpExchange : Proto3Codable {
         var response: HttpResponse? = nil
         var error: String = ""
         var edited: Bool = false
+        var bodies_omitted: Bool = false
 
         let token = try protoReader.beginMessage()
         while let tag = try protoReader.nextTag(token: token) {
@@ -82,6 +91,7 @@ extension HttpExchange : Proto3Codable {
             case 5: response = try protoReader.decode(HttpResponse.self)
             case 6: error = try protoReader.decode(String.self)
             case 7: edited = try protoReader.decode(Bool.self)
+            case 8: bodies_omitted = try protoReader.decode(Bool.self)
             default: try protoReader.readUnknownField(tag: tag)
             }
         }
@@ -94,6 +104,7 @@ extension HttpExchange : Proto3Codable {
         self.response = response
         self.error = error
         self.edited = edited
+        self.bodies_omitted = bodies_omitted
     }
 
     public func encode(to protoWriter: ProtoWriter) throws {
@@ -104,6 +115,7 @@ extension HttpExchange : Proto3Codable {
         try protoWriter.encode(tag: 5, value: self.response)
         try protoWriter.encode(tag: 6, value: self.error)
         try protoWriter.encode(tag: 7, value: self.edited)
+        try protoWriter.encode(tag: 8, value: self.bodies_omitted)
         try protoWriter.writeUnknownFields(unknownFields)
     }
 
@@ -121,6 +133,7 @@ extension HttpExchange : Codable {
         self.response = try container.decodeIfPresent(HttpResponse.self, forKey: "response")
         self.error = try container.decode(String.self, forKey: "error")
         self.edited = try container.decode(Bool.self, forKey: "edited")
+        self.bodies_omitted = try container.decode(Bool.self, firstOfKeys: "bodiesOmitted", "bodies_omitted")
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -144,6 +157,9 @@ extension HttpExchange : Codable {
         }
         if includeDefaults || self.edited != false {
             try container.encode(self.edited, forKey: "edited")
+        }
+        if includeDefaults || self.bodies_omitted != false {
+            try container.encode(self.bodies_omitted, forKey: preferCamelCase ? "bodiesOmitted" : "bodies_omitted")
         }
     }
 
