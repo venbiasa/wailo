@@ -6,10 +6,12 @@ import "wailo/capture.proto";
 
 // One Envelope per WebSocket frame. Device -> desktop: the client opens with a Hello, then streams
 // exchanges, plus a RuleAck after applying rules, a CaptureAllowlistAck after applying the allowlist,
-// and a BodyRequest when a Map Local rule matches. Desktop -> device: pushes a RuleSet (match-metadata)
-// and a CaptureAllowlist right after the Hello and whenever they change, and replies to a BodyRequest
-// with a BodyResponse (ADR-0019). The receiver keys on which oneof field is set; new kinds are a oneof
-// extension (ADR-0008), so this stays backward-compatible.
+// a BodyRequest when a Map Local rule matches, a BreakpointRulesAck after applying breakpoint rules,
+// and a BreakpointHit when a breakpoint pauses a request/response. Desktop -> device: pushes a RuleSet
+// (match-metadata), a CaptureAllowlist, and a BreakpointRules snapshot right after the Hello and
+// whenever they change, replies to a BodyRequest with a BodyResponse (ADR-0019), and replies to a
+// BreakpointHit with a BreakpointDecision. The receiver keys on which oneof field is set; new kinds are
+// a oneof extension (ADR-0008), so this stays backward-compatible.
 message Envelope {
   oneof message {
     Hello hello = 1;
@@ -20,6 +22,10 @@ message Envelope {
     BodyResponse body_response = 6;
     CaptureAllowlist capture_allowlist = 7;
     CaptureAllowlistAck capture_allowlist_ack = 8;
+    BreakpointRules breakpoint_rules = 9;
+    BreakpointRulesAck breakpoint_rules_ack = 10;
+    BreakpointHit breakpoint_hit = 11;
+    BreakpointDecision breakpoint_decision = 12;
   }
 }
 

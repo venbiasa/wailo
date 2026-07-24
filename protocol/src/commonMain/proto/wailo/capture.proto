@@ -110,3 +110,72 @@ message BodyResponse {
   repeated Header headers = 4;
   bytes body = 5;
 }
+
+// --- Breakpoints (desktop <-> device control channel) ---
+
+// Which requests to pause and at which phase(s). Pushed desktop -> device as a snapshot like RuleSet:
+// each push replaces the device's set entirely (idempotent), versioned by [epoch] with a
+// BreakpointRulesAck so a lost push self-repairs (anti-entropy). Unlike Map Local — which is automated
+// — a breakpoint is human-in-the-loop: on a match the device holds the in-flight request/response and
+// waits for a desktop decision, so there is no per-request cache/body-fetch, only the hold + reply.
+message BreakpointRules {
+  repeated BreakpointRule rules = 1;
+  uint64 epoch = 2;
+}
+
+// How to *match* a request, plus which phase(s) to break on. The device pauses before sending the
+// request when [on_request] and before delivering the response when [on_response]; a rule with neither
+// set never fires.
+message BreakpointRule {
+  string id = 1;
+  bool enabled = 2;
+  // Wildcard match against the full request URL; `*` matches any run of characters (like MapLocalRule).
+  string url_pattern = 3;
+  // HTTP methods this rule applies to; empty means any method.
+  repeated string methods = 4;
+  // Pause before the request is sent to the network.
+  bool on_request = 5;
+  // Pause before the response is delivered to the app.
+  bool on_response = 6;
+}
+
+// device -> desktop: confirms the device applied the snapshot at [epoch], mirroring RuleAck.
+message BreakpointRulesAck {
+  uint64 epoch = 1;
+}
+
+// Which side of an exchange a breakpoint paused on.
+enum BreakpointPhase {
+  BREAKPOINT_PHASE_REQUEST = 0;
+  BREAKPOINT_PHASE_RESPONSE = 1;
+}
+
+// What the desktop decided for a paused exchange. PROCEED is 0 so a malformed/empty decision fails
+// safe (the request continues) rather than aborting the app's call.
+enum BreakpointAction {
+  BREAKPOINT_ACTION_PROCEED = 0;
+  BREAKPOINT_ACTION_ABORT = 1;
+}
+
+// device -> desktop: a matched exchange is paused; here is its current state. [correlation_id] pairs it
+// with the BreakpointDecision the desktop sends back. [request] is always set (the request being sent,
+// or the one that produced the paused response, for display); [response] is set only for the RESPONSE
+// phase. The device holds the real call open until the decision arrives (or the link drops = fail-open).
+message BreakpointHit {
+  string correlation_id = 1;
+  string rule_id = 2;
+  BreakpointPhase phase = 3;
+  HttpRequest request = 4;
+  HttpResponse response = 5;
+}
+
+// desktop -> device: resume the paused exchange (optionally with edits) or abort it. On PROCEED for a
+// REQUEST-phase hit the device sends [edited_request] (falling back to the original if unset); on
+// PROCEED for a RESPONSE-phase hit it delivers [edited_response]. On ABORT the device fails the app's
+// call. A decision whose [correlation_id] is unknown (already resolved by a disconnect) is ignored.
+message BreakpointDecision {
+  string correlation_id = 1;
+  BreakpointAction action = 2;
+  HttpRequest edited_request = 3;
+  HttpResponse edited_response = 4;
+}

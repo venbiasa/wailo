@@ -147,6 +147,164 @@ final class WailoClientLoopbackTests: XCTestCase {
         XCTAssertTrue(cleared, "a cut connection must clear the cached Map Local rules")
     }
 
+    /// Breakpoint rules ride the same control channel as Map Local (ADR-0027): a `BreakpointRules`
+    /// snapshot pushed by the desktop must land in `WailoBreakpointStore` via the receive loop, and the
+    /// client must ack the snapshot's epoch back so a lost push self-repairs (anti-entropy).
+    func testAppliesBreakpointRulesPushedByServerAndAcksEpoch() throws {
+        WailoBreakpointStore.shared.replace([])
+        defer { WailoBreakpointStore.shared.replace([]) }
+
+        let server = LoopbackWebSocketServer()
+        let port = try server.start()
+        let ackReceived = expectation(description: "breakpoint rule ack")
+        ackReceived.assertForOverFulfill = false
+        server.onEnvelope = { [weak server] envelope in
+            switch envelope.message {
+            case .hello:
+                let rule = BreakpointRule(
+                    id: "bp",
+                    enabled: true,
+                    url_pattern: "https://bp.test/*",
+                    on_request: true,
+                    on_response: false
+                )
+                let push = Envelope { $0.message = .breakpoint_rules(BreakpointRules(epoch: 5) { $0.rules = [rule] }) }
+                if let data = try? ProtoEncoder().encode(push) { server?.push(data) }
+            case let .breakpoint_rules_ack(ack) where ack.epoch == 5:
+                ackReceived.fulfill()
+            default:
+                break
+            }
+        }
+
+        let client = WailoClient(
+            hello: Hello(device_name: "test", app_id: "com.test", platform: "ios"),
+            host: "127.0.0.1",
+            port: Int(port)
+        )
+        client.start()
+        defer { client.stopAndWaitForTeardown() }
+
+        var applied = false
+        for _ in 0..<100 where !applied {
+            if WailoBreakpointStore.shared.match(url: "https://bp.test/a", method: "GET") != nil {
+                applied = true
+            } else {
+                Thread.sleep(forTimeInterval: 0.05)
+            }
+        }
+        XCTAssertTrue(applied, "a BreakpointRules push must reach WailoBreakpointStore")
+        wait(for: [ackReceived], timeout: 10)
+        server.stop()
+    }
+
+    /// The breakpoint hold round-trips over the socket: `pauseRequest` streams a `BreakpointHit`, and the
+    /// desktop's `BreakpointDecision` (correlated by id) resolves the hold. A PROCEED carrying an edited
+    /// request must surface as `.proceed(edited)` so the interceptor sends the desktop's version.
+    func testBreakpointDecisionResolvesPendingHit() throws {
+        let server = LoopbackWebSocketServer()
+        let port = try server.start()
+        let helloReceived = expectation(description: "hello")
+        helloReceived.assertForOverFulfill = false
+        // On a hit, answer PROCEED with an edited request echoing the hit's correlation id.
+        server.onEnvelope = { [weak server] envelope in
+            switch envelope.message {
+            case .hello:
+                helloReceived.fulfill()
+            case let .breakpoint_hit(hit):
+                let decision = Envelope {
+                    $0.message = .breakpoint_decision(BreakpointDecision(
+                        correlation_id: hit.correlation_id,
+                        action: .BREAKPOINT_ACTION_PROCEED
+                    ) {
+                        $0.edited_request = HttpRequest(
+                            method: "POST",
+                            url: "https://edited.test/x",
+                            body: Data("edited".utf8),
+                            body_size: 6,
+                            body_truncated: false
+                        )
+                    })
+                }
+                if let data = try? ProtoEncoder().encode(decision) { server?.push(data) }
+            default:
+                break
+            }
+        }
+
+        let client = WailoClient(
+            hello: Hello(device_name: "test", app_id: "com.test", platform: "ios"),
+            host: "127.0.0.1",
+            port: Int(port)
+        )
+        client.start()
+        defer { client.stopAndWaitForTeardown() }
+        // Wait for the link so the hit is streamed, not failed open for want of a socket.
+        wait(for: [helloReceived], timeout: 10)
+
+        let resolved = expectation(description: "decision resolved")
+        var decided: WailoRequestDecision?
+        client.pauseRequest(
+            ruleId: "bp",
+            request: HttpRequest(method: "GET", url: "https://bp.test/x", body: Data(), body_size: 0, body_truncated: false)
+        ) { decision in
+            decided = decision
+            resolved.fulfill()
+        }
+        wait(for: [resolved], timeout: 10)
+
+        guard case let .proceed(edited) = decided else {
+            XCTFail("expected proceed with edits, got \(String(describing: decided))")
+            server.stop()
+            return
+        }
+        XCTAssertEqual(edited?.method, "POST")
+        XCTAssertEqual(edited?.url, "https://edited.test/x")
+        server.stop()
+    }
+
+    /// Fail-open on disconnect (ADR-0027): a request held at a breakpoint must not hang forever if the
+    /// desktop vanishes mid-decision. When the socket drops with a hit still pending, the hold resolves
+    /// `.proceed(nil)` so the interceptor sends the original request to the real network.
+    func testBreakpointFailsOpenWhenConnectionCut() throws {
+        let server = LoopbackWebSocketServer()
+        let port = try server.start()
+        let hitReceived = expectation(description: "hit received")
+        hitReceived.assertForOverFulfill = false
+        // Receive the hit but never answer; only the drop may resolve the hold.
+        server.onEnvelope = { envelope in
+            if case .breakpoint_hit = envelope.message { hitReceived.fulfill() }
+        }
+
+        let client = WailoClient(
+            hello: Hello(device_name: "test", app_id: "com.test", platform: "ios"),
+            host: "127.0.0.1",
+            port: Int(port),
+            reconnectDelay: 0.2
+        )
+        client.start()
+        defer { client.stopAndWaitForTeardown() }
+
+        let resolved = expectation(description: "hold resolved by disconnect")
+        var decided: WailoRequestDecision?
+        client.pauseRequest(
+            ruleId: "bp",
+            request: HttpRequest(method: "GET", url: "https://bp.test/x", body: Data(), body_size: 0, body_truncated: false)
+        ) { decision in
+            decided = decision
+            resolved.fulfill()
+        }
+        // Only cut the link once the hold is registered (its hit has reached the server).
+        wait(for: [hitReceived], timeout: 10)
+        server.stop()
+
+        wait(for: [resolved], timeout: 10)
+        guard case .proceed(nil) = decided else {
+            XCTFail("expected fail-open proceed(nil), got \(String(describing: decided))")
+            return
+        }
+    }
+
     /// The lazy body-fetch RPC (ADR-0019): a matched request asks the desktop for the body over the
     /// socket, and the desktop's BodyResponse (correlated by id) resolves the fetch. Drives the real
     /// `fetchBody` wire path end to end.

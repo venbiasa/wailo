@@ -87,9 +87,8 @@ internal fun CaptureAllowlistManager(
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
                 MutedText(
-                    "Bodies are captured only for these hosts — everything else records metadata only. " +
-                        "Unlocking is prospective: it captures future requests, not ones already seen. " +
-                        "Use * as a wildcard (e.g. *.example.com).",
+                    "Bodies are captured only for these hosts — everything else records metadata only " +
+                        "(use * as a wildcard, e.g. *.example.com).",
                 )
                 HostInput(onAdd = onUnlockHost)
                 if (unlockedHosts.isEmpty()) {

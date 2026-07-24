@@ -5,10 +5,12 @@ import Wire
 /**
  * One Envelope per WebSocket frame. Device -> desktop: the client opens with a Hello, then streams
  * exchanges, plus a RuleAck after applying rules, a CaptureAllowlistAck after applying the allowlist,
- * and a BodyRequest when a Map Local rule matches. Desktop -> device: pushes a RuleSet (match-metadata)
- * and a CaptureAllowlist right after the Hello and whenever they change, and replies to a BodyRequest
- * with a BodyResponse (ADR-0019). The receiver keys on which oneof field is set; new kinds are a oneof
- * extension (ADR-0008), so this stays backward-compatible.
+ * a BodyRequest when a Map Local rule matches, a BreakpointRulesAck after applying breakpoint rules,
+ * and a BreakpointHit when a breakpoint pauses a request/response. Desktop -> device: pushes a RuleSet
+ * (match-metadata), a CaptureAllowlist, and a BreakpointRules snapshot right after the Hello and
+ * whenever they change, replies to a BodyRequest with a BodyResponse (ADR-0019), and replies to a
+ * BreakpointHit with a BreakpointDecision. The receiver keys on which oneof field is set; new kinds are
+ * a oneof extension (ADR-0008), so this stays backward-compatible.
  */
 public struct Envelope {
 
@@ -65,6 +67,10 @@ extension Envelope : Proto3Codable {
             case 6: message = .body_response(try protoReader.decode(BodyResponse.self))
             case 7: message = .capture_allowlist(try protoReader.decode(CaptureAllowlist.self))
             case 8: message = .capture_allowlist_ack(try protoReader.decode(CaptureAllowlistAck.self))
+            case 9: message = .breakpoint_rules(try protoReader.decode(BreakpointRules.self))
+            case 10: message = .breakpoint_rules_ack(try protoReader.decode(BreakpointRulesAck.self))
+            case 11: message = .breakpoint_hit(try protoReader.decode(BreakpointHit.self))
+            case 12: message = .breakpoint_decision(try protoReader.decode(BreakpointDecision.self))
             default: try protoReader.readUnknownField(tag: tag)
             }
         }
@@ -115,6 +121,22 @@ extension Envelope : Codable {
             self.message = .capture_allowlist_ack(capture_allowlist_ack)
         } else if let capture_allowlist_ack = try container.decodeIfPresent(CaptureAllowlistAck.self, forKey: "capture_allowlist_ack") {
             self.message = .capture_allowlist_ack(capture_allowlist_ack)
+        } else if let breakpoint_rules = try container.decodeIfPresent(BreakpointRules.self, forKey: "breakpointRules") {
+            self.message = .breakpoint_rules(breakpoint_rules)
+        } else if let breakpoint_rules = try container.decodeIfPresent(BreakpointRules.self, forKey: "breakpoint_rules") {
+            self.message = .breakpoint_rules(breakpoint_rules)
+        } else if let breakpoint_rules_ack = try container.decodeIfPresent(BreakpointRulesAck.self, forKey: "breakpointRulesAck") {
+            self.message = .breakpoint_rules_ack(breakpoint_rules_ack)
+        } else if let breakpoint_rules_ack = try container.decodeIfPresent(BreakpointRulesAck.self, forKey: "breakpoint_rules_ack") {
+            self.message = .breakpoint_rules_ack(breakpoint_rules_ack)
+        } else if let breakpoint_hit = try container.decodeIfPresent(BreakpointHit.self, forKey: "breakpointHit") {
+            self.message = .breakpoint_hit(breakpoint_hit)
+        } else if let breakpoint_hit = try container.decodeIfPresent(BreakpointHit.self, forKey: "breakpoint_hit") {
+            self.message = .breakpoint_hit(breakpoint_hit)
+        } else if let breakpoint_decision = try container.decodeIfPresent(BreakpointDecision.self, forKey: "breakpointDecision") {
+            self.message = .breakpoint_decision(breakpoint_decision)
+        } else if let breakpoint_decision = try container.decodeIfPresent(BreakpointDecision.self, forKey: "breakpoint_decision") {
+            self.message = .breakpoint_decision(breakpoint_decision)
         } else {
             self.message = nil
         }
@@ -133,6 +155,10 @@ extension Envelope : Codable {
         case .body_response(let body_response): try container.encode(body_response, forKey: preferCamelCase ? "bodyResponse" : "body_response")
         case .capture_allowlist(let capture_allowlist): try container.encode(capture_allowlist, forKey: preferCamelCase ? "captureAllowlist" : "capture_allowlist")
         case .capture_allowlist_ack(let capture_allowlist_ack): try container.encode(capture_allowlist_ack, forKey: preferCamelCase ? "captureAllowlistAck" : "capture_allowlist_ack")
+        case .breakpoint_rules(let breakpoint_rules): try container.encode(breakpoint_rules, forKey: preferCamelCase ? "breakpointRules" : "breakpoint_rules")
+        case .breakpoint_rules_ack(let breakpoint_rules_ack): try container.encode(breakpoint_rules_ack, forKey: preferCamelCase ? "breakpointRulesAck" : "breakpoint_rules_ack")
+        case .breakpoint_hit(let breakpoint_hit): try container.encode(breakpoint_hit, forKey: preferCamelCase ? "breakpointHit" : "breakpoint_hit")
+        case .breakpoint_decision(let breakpoint_decision): try container.encode(breakpoint_decision, forKey: preferCamelCase ? "breakpointDecision" : "breakpoint_decision")
         case Optional.none: break
         }
     }
@@ -155,6 +181,10 @@ extension Envelope {
         case body_response(BodyResponse)
         case capture_allowlist(CaptureAllowlist)
         case capture_allowlist_ack(CaptureAllowlistAck)
+        case breakpoint_rules(BreakpointRules)
+        case breakpoint_rules_ack(BreakpointRulesAck)
+        case breakpoint_hit(BreakpointHit)
+        case breakpoint_decision(BreakpointDecision)
 
         fileprivate func encode(to protoWriter: ProtoWriter) throws {
             switch self {
@@ -166,6 +196,10 @@ extension Envelope {
             case .body_response(let body_response): try protoWriter.encode(tag: 6, value: body_response)
             case .capture_allowlist(let capture_allowlist): try protoWriter.encode(tag: 7, value: capture_allowlist)
             case .capture_allowlist_ack(let capture_allowlist_ack): try protoWriter.encode(tag: 8, value: capture_allowlist_ack)
+            case .breakpoint_rules(let breakpoint_rules): try protoWriter.encode(tag: 9, value: breakpoint_rules)
+            case .breakpoint_rules_ack(let breakpoint_rules_ack): try protoWriter.encode(tag: 10, value: breakpoint_rules_ack)
+            case .breakpoint_hit(let breakpoint_hit): try protoWriter.encode(tag: 11, value: breakpoint_hit)
+            case .breakpoint_decision(let breakpoint_decision): try protoWriter.encode(tag: 12, value: breakpoint_decision)
             }
         }
 

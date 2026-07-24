@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -120,10 +121,13 @@ private fun MenuItem(action: ContextMenuAction, onClick: () -> Unit) {
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(action.label, style = MaterialTheme.typography.bodyMedium, maxLines = 1)
-        // The tick trails the label on the right; a non-null check reserves the slot even when unticked
-        // so the row width (and the label position) stays put as the item toggles.
+        // A *weighted* spacer pins the tick to the row's trailing edge, so every checkable item's tick
+        // lines up in one column no matter how wide its label is (e.g. "Bookmark" vs the shorter
+        // "Unlock") — a fixed spacer would offset each tick by its own label width. The min keeps a gap
+        // behind even the widest label, and the slot's Box is always present (tick or not) so toggling
+        // the tick never shifts anything.
         if (action.checked != null) {
-            Spacer(Modifier.width(24.dp))
+            Spacer(Modifier.weight(1f).widthIn(min = 24.dp))
             Box(Modifier.size(CheckSlot)) {
                 if (action.checked) {
                     Icon(

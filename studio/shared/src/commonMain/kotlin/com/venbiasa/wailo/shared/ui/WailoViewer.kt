@@ -38,13 +38,18 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import com.venbiasa.wailo.protocol.Header
+import com.venbiasa.wailo.protocol.HttpRequest
+import com.venbiasa.wailo.protocol.HttpResponse
+import com.venbiasa.wailo.shared.BreakpointNode
 import com.venbiasa.wailo.shared.FlowEntry
 import com.venbiasa.wailo.shared.MapLocalHeader
 import com.venbiasa.wailo.shared.MapLocalNode
 import com.venbiasa.wailo.shared.MapLocalRuleDef
+import com.venbiasa.wailo.shared.PausedFlow
 import com.venbiasa.wailo.shared.PickedFile
 import com.venbiasa.wailo.shared.format.requestHost
 import com.venbiasa.wailo.shared.resources.Res
+import com.venbiasa.wailo.shared.resources.ic_breakpoint
 import com.venbiasa.wailo.shared.resources.ic_dark_mode
 import com.venbiasa.wailo.shared.resources.ic_delete
 import com.venbiasa.wailo.shared.resources.ic_light_mode
@@ -77,6 +82,11 @@ internal fun WailoViewer(
     onLoadMapLocalBody: suspend (MapLocalRuleDef) -> ByteArray,
     onSaveMapLocalBody: suspend (MapLocalRuleDef, ByteArray) -> Unit,
     onPickMapLocalFile: suspend () -> PickedFile?,
+    breakpointNodes: List<BreakpointNode>,
+    onBreakpointLayoutChange: (List<BreakpointNode>) -> Unit,
+    pausedFlows: List<PausedFlow>,
+    onResumeBreakpoint: (String, HttpRequest?, HttpResponse?) -> Unit,
+    onAbortBreakpoint: (String) -> Unit,
     toolPanelWidthRatio: Float,
     onToolPanelWidthRatioChange: (Float) -> Unit,
 ) {
@@ -110,6 +120,9 @@ internal fun WailoViewer(
     // and carries over to the other. It's a fraction of the window, not a fixed dp, so the panel scales
     // with the window (clamped to keep both panel and content usable, see ToolPanelLayout).
     var captureOpen by remember { mutableStateOf(false) }
+    // The breakpoints panel shares the same single docked tool slot as Map Local and the capture
+    // allowlist — opening any one closes the others.
+    var breakpointsOpen by remember { mutableStateOf(false) }
     val density = LocalDensity.current
 
     Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
@@ -190,7 +203,7 @@ internal fun WailoViewer(
                 // right, resizable, between the content and the tool rail (the Android Studio tool-window
                 // model). One [toolPanelWidthRatio] backs the single slot, so a width dragged for one panel
                 // is exactly the width the other opens at, and it persists across restarts.
-                if (mapLocalOpen || captureOpen) {
+                if (mapLocalOpen || captureOpen || breakpointsOpen) {
                     val panelWidth = ToolPanelLayout.widthFor(toolPanelWidthRatio, totalWidth)
                     PanelResizeHandle { deltaPx ->
                         // Drag the handle left (negative delta) to widen; convert the new width back to a
@@ -199,8 +212,8 @@ internal fun WailoViewer(
                         onToolPanelWidthRatioChange(ToolPanelLayout.ratioFor(dragged, totalWidth))
                     }
                     Box(Modifier.width(panelWidth).fillMaxHeight()) {
-                        if (mapLocalOpen) {
-                            MapLocalManager(
+                        when {
+                            mapLocalOpen -> MapLocalManager(
                                 nodes = mapLocalNodes,
                                 initialDraft = mapLocalDraft,
                                 initialBodySeed = mapLocalBodySeed,
@@ -210,12 +223,16 @@ internal fun WailoViewer(
                                 onSaveBody = onSaveMapLocalBody,
                                 onPickFile = onPickMapLocalFile,
                             )
-                        } else {
-                            CaptureAllowlistManager(
+                            captureOpen -> CaptureAllowlistManager(
                                 unlockedHosts = unlockedHosts,
                                 onUnlockHost = onUnlockHost,
                                 onLockHost = onLockHost,
                                 onClose = { captureOpen = false },
+                            )
+                            else -> BreakpointManager(
+                                nodes = breakpointNodes,
+                                onLayoutChange = onBreakpointLayoutChange,
+                                onClose = { breakpointsOpen = false },
                             )
                         }
                     }
@@ -234,13 +251,36 @@ internal fun WailoViewer(
                             mapLocalBodySeed = null
                             mapLocalOpen = true
                             captureOpen = false
+                            breakpointsOpen = false
                         }
                     },
                     captureOpen = captureOpen,
                     onToggleCapture = {
                         captureOpen = !captureOpen
-                        if (captureOpen) mapLocalOpen = false
+                        if (captureOpen) {
+                            mapLocalOpen = false
+                            breakpointsOpen = false
+                        }
                     },
+                    breakpointsOpen = breakpointsOpen,
+                    onToggleBreakpoints = {
+                        breakpointsOpen = !breakpointsOpen
+                        if (breakpointsOpen) {
+                            mapLocalOpen = false
+                            captureOpen = false
+                        }
+                    },
+                )
+            }
+            // The paused-traffic editor floats above everything while a device is holding a request or
+            // response at a breakpoint (ADR-0027). One hold is edited at a time; resolving it reveals the
+            // next. It is not gated by the docked panel — a hold can arrive whether or not the rules
+            // panel is open.
+            pausedFlows.firstOrNull()?.let { paused ->
+                BreakpointEditor(
+                    paused = paused,
+                    onResume = onResumeBreakpoint,
+                    onAbort = onAbortBreakpoint,
                 )
             }
         }
@@ -287,6 +327,8 @@ private fun ToolRail(
     onToggleMapLocal: () -> Unit,
     captureOpen: Boolean,
     onToggleCapture: () -> Unit,
+    breakpointsOpen: Boolean,
+    onToggleBreakpoints: () -> Unit,
 ) {
     Column(
         Modifier.fillMaxHeight()
@@ -317,6 +359,12 @@ private fun ToolRail(
             contentDescription = "Map Local",
             selected = mapLocalOpen,
             onClick = onToggleMapLocal,
+        )
+        ToolRailButton(
+            icon = Res.drawable.ic_breakpoint,
+            contentDescription = "Breakpoints",
+            selected = breakpointsOpen,
+            onClick = onToggleBreakpoints,
         )
     }
 }

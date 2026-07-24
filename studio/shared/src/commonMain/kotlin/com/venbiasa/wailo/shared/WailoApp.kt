@@ -5,6 +5,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Density
+import com.venbiasa.wailo.protocol.HttpRequest
+import com.venbiasa.wailo.protocol.HttpResponse
 import com.venbiasa.wailo.shared.theme.TextScale
 import com.venbiasa.wailo.shared.theme.WailoTheme
 import com.venbiasa.wailo.shared.ui.ToolPanelLayout
@@ -28,8 +30,12 @@ import com.venbiasa.wailo.shared.ui.WailoViewer
  * right-side tool panel renders (ADR-0021/0026); [onMapLocalLayoutChange] hands back a new layout for any
  * structural change, and [onLoadMapLocalBody]/[onSaveMapLocalBody] read/persist a rule's authored body as
  * bytes (the host owns all file IO). [onPickMapLocalFile] opens the host's file picker for a body file
- * (JSON/text or image). The panel's open state and any row-seeded draft are the viewer's own transient
- * state. [toolPanelWidthRatio] is the host-owned, persisted width of that docked panel expressed as a
+ * (JSON/text or image). [breakpointNodes] are the host-owned, persisted breakpoints layout (groups +
+ * rules, in priority order) the same tool panel renders (ADR-0026/0027); [onBreakpointLayoutChange] hands
+ * back a new layout for any structural change, [pausedFlows] are the requests/responses devices are
+ * currently holding at a breakpoint, and [onResumeBreakpoint]/[onAbortBreakpoint] resolve one by
+ * correlation id. The panel's open state and any row-seeded draft are the viewer's own transient state.
+ * [toolPanelWidthRatio] is the host-owned, persisted width of that docked panel expressed as a
  * fraction of the window (so it scales with the window rather than pinning to a fixed dp);
  * [onToolPanelWidthRatioChange] hands back a new fraction as the user drags the panel's resize handle.
  */
@@ -55,6 +61,11 @@ fun WailoApp(
     onLoadMapLocalBody: suspend (MapLocalRuleDef) -> ByteArray = { ByteArray(0) },
     onSaveMapLocalBody: suspend (MapLocalRuleDef, ByteArray) -> Unit = { _, _ -> },
     onPickMapLocalFile: suspend () -> PickedFile? = { null },
+    breakpointNodes: List<BreakpointNode> = emptyList(),
+    onBreakpointLayoutChange: (List<BreakpointNode>) -> Unit = {},
+    pausedFlows: List<PausedFlow> = emptyList(),
+    onResumeBreakpoint: (String, HttpRequest?, HttpResponse?) -> Unit = { _, _, _ -> },
+    onAbortBreakpoint: (String) -> Unit = {},
     toolPanelWidthRatio: Float = ToolPanelLayout.DefaultWidthRatio,
     onToolPanelWidthRatioChange: (Float) -> Unit = {},
 ) {
@@ -83,6 +94,11 @@ fun WailoApp(
                 onLoadMapLocalBody = onLoadMapLocalBody,
                 onSaveMapLocalBody = onSaveMapLocalBody,
                 onPickMapLocalFile = onPickMapLocalFile,
+                breakpointNodes = breakpointNodes,
+                onBreakpointLayoutChange = onBreakpointLayoutChange,
+                pausedFlows = pausedFlows,
+                onResumeBreakpoint = onResumeBreakpoint,
+                onAbortBreakpoint = onAbortBreakpoint,
                 toolPanelWidthRatio = toolPanelWidthRatio,
                 onToolPanelWidthRatioChange = onToolPanelWidthRatioChange,
             )

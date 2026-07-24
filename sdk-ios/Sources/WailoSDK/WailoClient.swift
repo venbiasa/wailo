@@ -21,7 +21,7 @@ import Wire
 /// ping/pong timeout -- funnels through `handleDisconnect`, which always schedules the next attempt.
 ///
 /// State is confined to a private serial queue, so the class is safe to call from any thread.
-final class WailoClient: NSObject, CaptureSink, WailoBodyFetcher, URLSessionWebSocketDelegate, @unchecked Sendable {
+final class WailoClient: NSObject, CaptureSink, WailoBodyFetcher, WailoBreakpointGate, URLSessionWebSocketDelegate, @unchecked Sendable {
 
     private let hello: Hello
     private let url: URL
@@ -40,6 +40,11 @@ final class WailoClient: NSObject, CaptureSink, WailoBodyFetcher, URLSessionWebS
     // In-flight Map Local body fetches, keyed by correlation id (queue-confined). Each completion is
     // called exactly once — by the matching BodyResponse, a timeout, or a disconnect drain (fail-open).
     private var pending: [String: (WailoMappedResponse?) -> Void] = [:]
+    // In-flight breakpoint holds, keyed by correlation id (queue-confined). Each resolver is called
+    // exactly once — by the matching BreakpointDecision or by a disconnect drain (fail-open). Unlike a
+    // body fetch there is NO timeout: a human is deciding, so the hold lasts until a decision arrives or
+    // the link drops.
+    private var pendingBreakpoints: [String: (BreakpointDecision?) -> Void] = [:]
     private var started = false
     private var connected = false
     private var sending = false
@@ -95,6 +100,7 @@ final class WailoClient: NSObject, CaptureSink, WailoBodyFetcher, URLSessionWebS
             self.connected = false
             self.dropCachedRules()
             self.drainPending()
+            self.drainBreakpoints()
             self.generation += 1
             self.task?.cancel(with: .goingAway, reason: nil)
             self.task = nil
@@ -177,6 +183,11 @@ final class WailoClient: NSObject, CaptureSink, WailoBodyFetcher, URLSessionWebS
             sendControl(Envelope { $0.message = .capture_allowlist_ack(CaptureAllowlistAck(epoch: list.epoch)) })
         case let .body_response(response)?:
             resolvePending(response)
+        case let .breakpoint_rules(rules)?:
+            WailoBreakpointStore.shared.replace(rules.rules)
+            sendControl(Envelope { $0.message = .breakpoint_rules_ack(BreakpointRulesAck(epoch: rules.epoch)) })
+        case let .breakpoint_decision(decision)?:
+            resolveBreakpoint(decision)
         default:
             break
         }
@@ -189,6 +200,7 @@ final class WailoClient: NSObject, CaptureSink, WailoBodyFetcher, URLSessionWebS
     private func dropCachedRules() {
         WailoRuleStore.shared.replace([])
         WailoCaptureConfigStore.shared.replace([])
+        WailoBreakpointStore.shared.replace([])
     }
 
     // MARK: - Map Local body fetch (WailoBodyFetcher)
@@ -231,6 +243,76 @@ final class WailoClient: NSObject, CaptureSink, WailoBodyFetcher, URLSessionWebS
         let waiting = pending.values
         pending.removeAll()
         for completion in waiting { completion(nil) }
+    }
+
+    // MARK: - Breakpoints (WailoBreakpointGate)
+
+    /// Pause a matched request and stream it to the desktop as a REQUEST-phase hit. Fails open
+    /// (`.proceed(nil)`) when the socket is down; otherwise holds — with NO timeout, since a human is
+    /// deciding — until the matching `BreakpointDecision` resolves it or a disconnect drains it.
+    func pauseRequest(ruleId: String, request: HttpRequest, completion: @escaping (WailoRequestDecision) -> Void) {
+        queue.async {
+            guard self.task != nil else { completion(.proceed(nil)); return }
+            let correlationId = UUID().uuidString
+            self.pendingBreakpoints[correlationId] = { decision in
+                guard let decision else { completion(.proceed(nil)); return }
+                switch decision.action {
+                case .BREAKPOINT_ACTION_ABORT: completion(.abort)
+                default: completion(.proceed(decision.edited_request))
+                }
+            }
+            self.sendControl(Envelope {
+                $0.message = .breakpoint_hit(BreakpointHit(
+                    correlation_id: correlationId,
+                    rule_id: ruleId,
+                    phase: .BREAKPOINT_PHASE_REQUEST
+                ) { $0.request = request })
+            })
+        }
+    }
+
+    /// Pause a matched response and stream it (with the originating request, for context) as a
+    /// RESPONSE-phase hit. Same hold/fail-open contract as `pauseRequest`.
+    func pauseResponse(
+        ruleId: String,
+        request: HttpRequest,
+        response: HttpResponse,
+        completion: @escaping (WailoResponseDecision) -> Void
+    ) {
+        queue.async {
+            guard self.task != nil else { completion(.proceed(nil)); return }
+            let correlationId = UUID().uuidString
+            self.pendingBreakpoints[correlationId] = { decision in
+                guard let decision else { completion(.proceed(nil)); return }
+                switch decision.action {
+                case .BREAKPOINT_ACTION_ABORT: completion(.abort)
+                default: completion(.proceed(decision.edited_response))
+                }
+            }
+            self.sendControl(Envelope {
+                $0.message = .breakpoint_hit(BreakpointHit(
+                    correlation_id: correlationId,
+                    rule_id: ruleId,
+                    phase: .BREAKPOINT_PHASE_RESPONSE
+                ) {
+                    $0.request = request
+                    $0.response = response
+                })
+            })
+        }
+    }
+
+    private func resolveBreakpoint(_ decision: BreakpointDecision) {
+        guard let resolver = pendingBreakpoints.removeValue(forKey: decision.correlation_id) else { return }
+        resolver(decision)
+    }
+
+    /// Fail open every held request/response: with the socket gone there is no authority to decide, so
+    /// each proceeds with its original message instead of hanging for a decision that can't arrive.
+    private func drainBreakpoints() {
+        let waiting = pendingBreakpoints.values
+        pendingBreakpoints.removeAll()
+        for resolver in waiting { resolver(nil) }
     }
 
     /// Send a control frame (ack / body request) without touching the exchange pump's send state. A
@@ -311,6 +393,7 @@ final class WailoClient: NSObject, CaptureSink, WailoBodyFetcher, URLSessionWebS
         buffer.removeAll()
         dropCachedRules()
         drainPending()
+        drainBreakpoints()
         task?.cancel(with: .abnormalClosure, reason: nil)
         task = nil
         guard started else { return }

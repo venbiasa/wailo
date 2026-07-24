@@ -2,11 +2,19 @@ package com.venbiasa.wailo.engine
 
 import com.venbiasa.wailo.protocol.BodyRequest
 import com.venbiasa.wailo.protocol.BodyResponse
+import com.venbiasa.wailo.protocol.BreakpointAction
+import com.venbiasa.wailo.protocol.BreakpointDecision
+import com.venbiasa.wailo.protocol.BreakpointHit
+import com.venbiasa.wailo.protocol.BreakpointPhase
+import com.venbiasa.wailo.protocol.BreakpointRule
+import com.venbiasa.wailo.protocol.BreakpointRules
 import com.venbiasa.wailo.protocol.CaptureAllowlist
 import com.venbiasa.wailo.protocol.Envelope
 import com.venbiasa.wailo.protocol.Header
 import com.venbiasa.wailo.protocol.Hello
 import com.venbiasa.wailo.protocol.HttpExchange
+import com.venbiasa.wailo.protocol.HttpRequest
+import com.venbiasa.wailo.protocol.HttpResponse
 import com.venbiasa.wailo.protocol.MapLocalRule
 import com.venbiasa.wailo.protocol.RuleSet
 import io.ktor.server.application.install
@@ -42,6 +50,23 @@ data class CapturedExchange(
     val exchange: HttpExchange,
 )
 
+/**
+ * A request/response a device has paused at a breakpoint and is holding open until the desktop decides
+ * (resume — optionally edited — or abort). [phase] says whether the device paused before sending the
+ * request or before delivering the response; [request] is always present (the request in flight, or the
+ * one that produced [response]) and [response] is set only for the RESPONSE phase. [correlationId] pairs
+ * this with the [BreakpointDecision] the engine sends back to the exact session that raised it.
+ */
+data class PausedExchange(
+    val correlationId: String,
+    val deviceName: String,
+    val appId: String,
+    val platform: String,
+    val phase: BreakpointPhase,
+    val request: HttpRequest?,
+    val response: HttpResponse?,
+)
+
 /** A synthesized Map Local response the desktop serves for a matched request (ADR-0019). */
 class ServedBody(
     val code: Int,
@@ -64,8 +89,10 @@ fun interface MapLocalBodyProvider {
  * publishes exchanges as a [StateFlow] for any frontend (desktop UI now; CLI/MCP later). It also owns
  * the reverse direction — Map Local (ADR-0019): it pushes the match-metadata [RuleSet] to every device
  * (versioned by [RuleSet.epoch], re-pushed until the device acks so a lost push self-repairs), and
- * answers a device's [BodyRequest] by reading the body through [bodyProvider]. UI-agnostic by design:
- * no Compose here, and no filesystem access beyond the provider seam.
+ * answers a device's [BodyRequest] by reading the body through [bodyProvider]. It likewise pushes
+ * [BreakpointRules] and, when a device pauses a matching request/response, surfaces it via
+ * [pausedExchanges] and releases it through [resumeBreakpoint]/[abortBreakpoint] (ADR-0027). UI-agnostic
+ * by design: no Compose here, and no filesystem access beyond the provider seam.
  */
 class WailoEngine(
     val port: Int = DEFAULT_PORT,
@@ -96,6 +123,24 @@ class WailoEngine(
      */
     val allowlist: StateFlow<CaptureAllowlist> = _allowlist.asStateFlow()
 
+    private val _breakpointRules = MutableStateFlow(BreakpointRules())
+
+    /**
+     * The active breakpoint rules (match-metadata + which phase to break on) pushed to devices, like
+     * [rules]. Frontends observe this. On a match a device holds the in-flight request/response and
+     * raises a [BreakpointHit]; unlike Map Local there is no body cache — the "authority" is a human.
+     */
+    val breakpointRules: StateFlow<BreakpointRules> = _breakpointRules.asStateFlow()
+
+    private val _pausedExchanges = MutableStateFlow<List<PausedExchange>>(emptyList())
+
+    /**
+     * Exchanges currently paused at a breakpoint, awaiting a desktop decision. A frontend observes this,
+     * shows an editor, and calls [resumeBreakpoint]/[abortBreakpoint] to release each one. Entries for a
+     * device are dropped when it disconnects (it fails open on its side), so this never wedges.
+     */
+    val pausedExchanges: StateFlow<List<PausedExchange>> = _pausedExchanges.asStateFlow()
+
     /** Set by the frontend (the desktop) to resolve a matched rule's body on demand. */
     @Volatile
     var bodyProvider: MapLocalBodyProvider? = null
@@ -107,9 +152,17 @@ class WailoEngine(
     // Separate monotonic version for the capture allowlist, acked independently of the rule epoch.
     private val allowlistEpochCounter = AtomicLong(0)
 
+    // Separate monotonic version for the breakpoint rules, acked independently of the others.
+    private val breakpointEpochCounter = AtomicLong(0)
+
     // Live device connections + how far each is acked, so a rule change reaches every attached SDK and a
     // silently lost push is re-sent. Concurrent because Ktor runs one handler coroutine per connection.
     private val sessions = ConcurrentHashMap<DefaultWebSocketServerSession, SessionState>()
+
+    // Which session raised each paused exchange, keyed by its correlation id, so a resume/abort routes
+    // the decision back to the exact device that is holding that request/response. Entries are removed
+    // when the decision is sent or when the owning session disconnects.
+    private val pausedSessions = ConcurrentHashMap<String, DefaultWebSocketServerSession>()
 
     // Rule pushes run off the caller's thread; serialized so frames to a session never interleave.
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -121,6 +174,7 @@ class WailoEngine(
     private class SessionState {
         val ackedEpoch = AtomicLong(-1)
         val ackedAllowlistEpoch = AtomicLong(-1)
+        val ackedBreakpointEpoch = AtomicLong(-1)
     }
 
     fun start() {
@@ -135,10 +189,11 @@ class WailoEngine(
                     // snapshot self-repairs without waiting for the next edit or reconnect (ADR-0019).
                     val reconciler = launch { reconcile(this@webSocket, state) }
                     try {
-                        // Sync the freshly connected (or reconnected) device with the current rules
-                        // and capture allowlist.
+                        // Sync the freshly connected (or reconnected) device with the current rules,
+                        // capture allowlist, and breakpoint rules.
                         pushRules(this)
                         pushAllowlist(this)
+                        pushBreakpointRules(this)
                         var hello: Hello? = null
                         for (frame in incoming) {
                             if (frame !is Frame.Binary) continue
@@ -151,13 +206,18 @@ class WailoEngine(
                             envelope.capture_allowlist_ack?.let { ack ->
                                 state.ackedAllowlistEpoch.updateAndGet { cur -> maxOf(cur, ack.epoch) }
                             }
+                            envelope.breakpoint_rules_ack?.let { ack ->
+                                state.ackedBreakpointEpoch.updateAndGet { cur -> maxOf(cur, ack.epoch) }
+                            }
                             // Serve bodies off the read loop so a slow file read can't stall this
                             // connection's incoming frames; the sendMutex still serializes the reply.
                             envelope.body_request?.let { req -> launch { serveBody(this@webSocket, req) } }
+                            envelope.breakpoint_hit?.let { hit -> recordBreakpointHit(hello, hit, this@webSocket) }
                         }
                     } finally {
                         reconciler.cancel()
                         sessions.remove(this)
+                        releasePausedFor(this)
                     }
                 }
             }
@@ -217,6 +277,25 @@ class WailoEngine(
         }
     }
 
+    /**
+     * Replace the active breakpoint rules and push the new snapshot to every device. Stamps a fresh
+     * [BreakpointRules.epoch] so devices can ack it and the reconciler can detect a lost push, mirroring
+     * [updateRules]. A device pauses only requests matching an enabled rule at the requested phase.
+     */
+    fun updateBreakpointRules(rules: List<BreakpointRule>) {
+        _breakpointRules.value = BreakpointRules(rules = rules, epoch = breakpointEpochCounter.incrementAndGet())
+        scope.launch { sessions.keys.forEach { pushBreakpointRules(it) } }
+    }
+
+    // Mirrors pushRules/pushAllowlist: reads _breakpointRules under the lock at send time so a
+    // connect-push racing a broadcast still converges on the newest snapshot.
+    private suspend fun pushBreakpointRules(session: DefaultWebSocketServerSession) {
+        sendMutex.withLock {
+            val bytes = Envelope(breakpoint_rules = _breakpointRules.value).encode()
+            runCatching { session.outgoing.send(Frame.Binary(true, bytes)) }
+        }
+    }
+
     // Re-push the current snapshot to a device that hasn't acked it yet. Cancelled when the connection
     // ends (the launching coroutine is a child of the session handler).
     private suspend fun reconcile(session: DefaultWebSocketServerSession, state: SessionState) {
@@ -224,6 +303,7 @@ class WailoEngine(
             delay(ackRetryMs)
             if (state.ackedEpoch.get() < _rules.value.epoch) pushRules(session)
             if (state.ackedAllowlistEpoch.get() < _allowlist.value.epoch) pushAllowlist(session)
+            if (state.ackedBreakpointEpoch.get() < _breakpointRules.value.epoch) pushBreakpointRules(session)
         }
     }
 
@@ -247,6 +327,76 @@ class WailoEngine(
         sendMutex.withLock {
             runCatching { session.outgoing.send(Frame.Binary(true, Envelope(body_response = response).encode())) }
         }
+    }
+
+    // Record a device's paused request/response and remember which session raised it, so a later
+    // resume/abort can route the decision straight back to that connection.
+    private fun recordBreakpointHit(hello: Hello?, hit: BreakpointHit, session: DefaultWebSocketServerSession) {
+        pausedSessions[hit.correlation_id] = session
+        val paused = PausedExchange(
+            correlationId = hit.correlation_id,
+            deviceName = hello?.device_name ?: "unknown",
+            appId = hello?.app_id ?: "unknown",
+            platform = hello?.platform ?: "unknown",
+            phase = hit.phase,
+            request = hit.request,
+            response = hit.response,
+        )
+        _pausedExchanges.update { it + paused }
+    }
+
+    /**
+     * Release a paused exchange, letting the device proceed — with [editedRequest] on a request-phase
+     * hit or [editedResponse] on a response-phase hit (null = proceed with the device's original). A
+     * no-op if the correlation id is unknown (already released by a disconnect).
+     */
+    fun resumeBreakpoint(
+        correlationId: String,
+        editedRequest: HttpRequest? = null,
+        editedResponse: HttpResponse? = null,
+    ) {
+        sendDecision(
+            BreakpointDecision(
+                correlation_id = correlationId,
+                action = BreakpointAction.BREAKPOINT_ACTION_PROCEED,
+                edited_request = editedRequest,
+                edited_response = editedResponse,
+            ),
+        )
+    }
+
+    /** Abort a paused exchange: the device fails the app's call. A no-op if the id is unknown. */
+    fun abortBreakpoint(correlationId: String) {
+        sendDecision(
+            BreakpointDecision(
+                correlation_id = correlationId,
+                action = BreakpointAction.BREAKPOINT_ACTION_ABORT,
+            ),
+        )
+    }
+
+    // Send a decision to the session holding this exchange and drop it from the paused set. Removing
+    // eagerly (before the send completes) is safe: if the socket is already gone the device has failed
+    // open on its side, so the decision is moot.
+    private fun sendDecision(decision: BreakpointDecision) {
+        val session = pausedSessions.remove(decision.correlation_id) ?: return
+        _pausedExchanges.update { list -> list.filterNot { it.correlationId == decision.correlation_id } }
+        scope.launch {
+            sendMutex.withLock {
+                runCatching {
+                    session.outgoing.send(Frame.Binary(true, Envelope(breakpoint_decision = decision).encode()))
+                }
+            }
+        }
+    }
+
+    // Drop every exchange a disconnecting session was holding. The device fails those calls open on its
+    // side when the link drops, so the desktop must not keep showing them as pausable.
+    private fun releasePausedFor(session: DefaultWebSocketServerSession) {
+        val orphaned = pausedSessions.entries.filter { it.value == session }.map { it.key }
+        if (orphaned.isEmpty()) return
+        orphaned.forEach { pausedSessions.remove(it) }
+        _pausedExchanges.update { list -> list.filterNot { it.correlationId in orphaned } }
     }
 
     private fun record(hello: Hello?, exchange: HttpExchange) {

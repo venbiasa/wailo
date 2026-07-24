@@ -53,18 +53,19 @@ class MapLocalLayoutTest {
         val nodes = sample()
         val edited = nodes.upsertRule(rule("r2", name = "renamed"))
         assertEquals("renamed", edited.findRule("r2")?.name)
-        assertEquals(group("g1"), (edited[1] as GroupNode).group) // still in its group, order intact
-        assertEquals(listOf("r2", "r3"), (edited[1] as GroupNode).rules.map { it.id })
+        assertEquals(group("g1"), edited.groupNode("g1")?.group) // still in its group, order intact
+        assertEquals(listOf("r2", "r3"), edited.groupNode("g1")!!.rules.map { it.id })
 
         val added = nodes.upsertRule(rule("new"))
-        assertEquals("new", (added.last() as RuleNode).rule.id) // appended at top level
+        assertEquals("new", added.last().id) // appended at top level
+        assertNull(added.groupOf("new")) // ...as a loose rule
         assertEquals(sample().allRules().size + 1, added.allRules().size)
     }
 
     @Test
     fun removeRuleLeavesAnEmptyGroupBehind() {
         val nodes = sample().removeRule("r2").removeRule("r3")
-        val g = nodes.filterIsInstance<GroupNode>().single()
+        val g = nodes.groupNode("g1")!!
         assertTrue(g.rules.isEmpty())
         assertNull(nodes.findRule("r2"))
     }
@@ -79,17 +80,17 @@ class MapLocalLayoutTest {
     @Test
     fun toggleAndRenameAreLocalized() {
         val nodes = sample().setGroupEnabled("g1", false).setRuleEnabled("r1", false).renameGroup("g1", "API")
-        assertFalse((nodes[1] as GroupNode).group.enabled)
-        assertEquals("API", (nodes[1] as GroupNode).group.name)
-        assertFalse((nodes[0] as RuleNode).rule.enabled)
-        assertTrue((nodes[1] as GroupNode).rules.all { it.enabled }) // children untouched (state retained)
+        assertFalse(nodes.groupNode("g1")!!.group.enabled)
+        assertEquals("API", nodes.groupNode("g1")!!.group.name)
+        assertFalse(nodes.findRule("r1")!!.enabled)
+        assertTrue(nodes.groupNode("g1")!!.rules.all { it.enabled }) // children untouched (state retained)
     }
 
     @Test
     fun moveRuleIntoGroupThenBackOut() {
         // r1 (loose) into g1 at child index 1 (between r2 and r3).
         val intoGroup = sample().moveRule("r1", InGroupAt("g1", 1))
-        val g = intoGroup.filterIsInstance<GroupNode>().single()
+        val g = intoGroup.groupNode("g1")!!
         assertEquals(listOf("r2", "r1", "r3"), g.rules.map { it.id })
         assertNull(intoGroup.groupOf("r4")) // r4 still loose
 
@@ -97,7 +98,7 @@ class MapLocalLayoutTest {
         val backOut = intoGroup.moveRule("r1", TopLevelAt(0))
         assertEquals("r1", backOut.first().id)
         assertNull(backOut.groupOf("r1"))
-        assertEquals(listOf("r2", "r3"), backOut.filterIsInstance<GroupNode>().single().rules.map { it.id })
+        assertEquals(listOf("r2", "r3"), backOut.groupNode("g1")!!.rules.map { it.id })
     }
 
     @Test
@@ -109,7 +110,7 @@ class MapLocalLayoutTest {
 
     @Test
     fun codecRoundTripsInterleavedGroupsAndEmptyGroup() {
-        val nodes = listOf(
+        val nodes: List<MapLocalNode> = listOf(
             RuleNode(rule("r1", name = "First", url = "https://a/*")),
             GroupNode(
                 group("g1", name = "Auth", enabled = false),
@@ -136,7 +137,7 @@ class MapLocalLayoutTest {
         val ruleLine = MapLocalLayoutCodec.encode(listOf(RuleNode(rule("rL", name = "Legacy")))).removePrefix("R|")
         val decoded = MapLocalLayoutCodec.decode(ruleLine)
         assertEquals(1, decoded.size)
-        assertEquals("rL", (decoded.single() as RuleNode).rule.id)
+        assertEquals("rL", decoded.single().id)
         assertEquals("Legacy", decoded.findRule("rL")?.name)
     }
 

@@ -23,9 +23,11 @@ import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
 import com.venbiasa.wailo.engine.MapLocalBodyProvider
 import com.venbiasa.wailo.engine.WailoEngine
+import com.venbiasa.wailo.shared.BreakpointNode
 import com.venbiasa.wailo.shared.FlowEntry
 import com.venbiasa.wailo.shared.MapLocalNode
 import com.venbiasa.wailo.shared.MapLocalRuleDef
+import com.venbiasa.wailo.shared.PausedFlow
 import com.venbiasa.wailo.shared.PickedFile
 import com.venbiasa.wailo.shared.WailoApp
 import com.venbiasa.wailo.shared.theme.TextScale
@@ -171,6 +173,36 @@ private fun runWailo() = application {
         engine.updateRules(compileRules(mapLocalNodes))
     }
 
+    // Breakpoint layout: host-owned and persisted like Map Local (groups + rules in priority order). `shared`
+    // renders it and hands back a whole new layout for any structural change; the host persists it and pushes
+    // the compiled active rules. On a match a device pauses and the engine surfaces it via [pausedExchanges]
+    // below (ADR-0026/0027).
+    var breakpointNodes by remember { mutableStateOf(BreakpointStore.load()) }
+    val onBreakpointLayoutChange = { next: List<BreakpointNode> ->
+        breakpointNodes = next
+        BreakpointStore.save(next)
+    }
+    LaunchedEffect(breakpointNodes) {
+        engine.updateBreakpointRules(compileBreakpointRules(breakpointNodes))
+    }
+
+    // Exchanges currently held at a breakpoint. Bridged from the engine row to the viewer's model at
+    // this boundary (like [entries] above), since `shared` must not depend on `engine`.
+    val paused by engine.pausedExchanges.collectAsState()
+    val pausedFlows = remember(paused) {
+        paused.map {
+            PausedFlow(
+                correlationId = it.correlationId,
+                deviceName = it.deviceName,
+                appId = it.appId,
+                platform = it.platform,
+                phase = it.phase,
+                request = it.request,
+                response = it.response,
+            )
+        }
+    }
+
     // Docked tool-panel width, host-owned and persisted like the theme/scale above, but stored as a
     // fraction of the window so it scales with the window rather than pinning to a fixed dp. `shared`
     // gets the fraction plus a callback the resize handle drives; the clamping lives in ToolPanelLayout.
@@ -274,6 +306,13 @@ private fun runWailo() = application {
             onSaveMapLocalBody = { rule, bytes -> withContext(Dispatchers.IO) { MapLocalStore.saveInlineBody(rule, bytes) } },
             // `window` (the ComposeWindow, an AWT Frame) parents the native dialog so it's modal to the app.
             onPickMapLocalFile = { chooseMapLocalFile(window) },
+            breakpointNodes = breakpointNodes,
+            onBreakpointLayoutChange = onBreakpointLayoutChange,
+            pausedFlows = pausedFlows,
+            onResumeBreakpoint = { correlationId, editedRequest, editedResponse ->
+                engine.resumeBreakpoint(correlationId, editedRequest, editedResponse)
+            },
+            onAbortBreakpoint = { correlationId -> engine.abortBreakpoint(correlationId) },
             toolPanelWidthRatio = toolPanelWidthRatio,
             onToolPanelWidthRatioChange = { toolPanelWidthRatio = it },
         )

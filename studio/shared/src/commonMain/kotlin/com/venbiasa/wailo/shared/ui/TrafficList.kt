@@ -59,6 +59,7 @@ import com.venbiasa.wailo.shared.FlowEntry
 import com.venbiasa.wailo.shared.format.codeText
 import com.venbiasa.wailo.shared.format.formatBytes
 import com.venbiasa.wailo.shared.format.formatClockTime
+import com.venbiasa.wailo.shared.format.isHostUnlocked
 import com.venbiasa.wailo.shared.format.requestHost
 import com.venbiasa.wailo.shared.format.statusKind
 import com.venbiasa.wailo.shared.format.statusText
@@ -292,12 +293,15 @@ private fun TrafficRow(
 
     // Right-click offers bookmarking this row's host (a tick once saved; the slot is reserved when not,
     // so the label never shifts as it toggles), unlocking/locking body capture for the host, and mapping
-    // its URL to a local file. A row with no parseable host skips the bookmark/unlock entries; one with
-    // no URL skips Map Local — an all-empty list is a plain passthrough (no menu).
+    // its URL to a local file. The Unlock tick tracks allowlist *coverage* (isHostUnlocked, wildcard-aware),
+    // so a subdomain reads as unlocked under a `*.example.com` entry — but locking removes only an exact
+    // entry, so a host covered solely by a wildcard stays unlocked (we never silently drop the wildcard).
+    // A row with no parseable host skips the bookmark/unlock entries; one with no URL skips Map Local — an
+    // all-empty list is a plain passthrough (no menu).
     val url = request?.url ?: ""
     val host = remember(url) { requestHost(url) }
     val bookmarked = host in bookmarks
-    val unlocked = host in unlockedHosts
+    val unlocked = remember(unlockedHosts, host) { isHostUnlocked(unlockedHosts, host) }
     val actions = buildList {
         if (host.isNotEmpty()) {
             add(
@@ -306,7 +310,7 @@ private fun TrafficRow(
                 },
             )
             add(
-                ContextMenuAction("Capture bodies for host", checked = unlocked) {
+                ContextMenuAction("Unlock", checked = unlocked) {
                     if (unlocked) onLockHost(host) else onUnlockHost(host)
                 },
             )

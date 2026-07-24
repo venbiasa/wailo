@@ -39,16 +39,18 @@ class PickedFile(val bytes: ByteArray, val contentType: String)
  * only tells the UI which surface to show and the host where the bytes live.
  */
 data class MapLocalRuleDef(
-    val id: String,
+    override val id: String,
     val name: String = "Untitled",
-    val enabled: Boolean = true,
+    override val enabled: Boolean = true,
     val urlPattern: String = "",
     val method: String = "",
     val filePath: String = "",
     val statusCode: Int = 200,
     val headers: List<MapLocalHeader> = emptyList(),
     val inline: Boolean = false,
-) {
+) : LayoutRule<MapLocalRuleDef> {
+    override fun withEnabled(enabled: Boolean): MapLocalRuleDef = copy(enabled = enabled)
+
     companion object {
         /** A stable, unique id for a freshly authored rule (no java.* so commonMain stays portable). */
         fun newId(): String = "rule-" + Random.nextLong().toULong().toString(16).padStart(16, '0')
