@@ -134,4 +134,25 @@ final class WailoSDKTests: XCTestCase {
         XCTAssertEqual(cappedBytes.count, 1024)
         XCTAssertTrue(cappedTruncated)
     }
+
+    /// Reading the request body: URLSession moves httpBody into httpBodyStream before the interceptor
+    /// runs, so readBody must drain the stream — otherwise request bodies are always captured empty.
+    func testReadBodyDrainsHttpBodyStream() {
+        let payload = Data(repeating: 0x42, count: 3 * 1024 * 1024 + 7) // spans multiple read chunks
+
+        // The httpBody case: returned as-is.
+        var withBody = URLRequest(url: URL(string: "https://api.test/upload")!)
+        withBody.httpBody = payload
+        XCTAssertEqual(WailoURLProtocol.readBody(from: withBody), payload)
+
+        // The URLSession case: body only reachable via httpBodyStream — must be fully drained.
+        var withStream = URLRequest(url: URL(string: "https://api.test/upload")!)
+        withStream.httpBodyStream = InputStream(data: payload)
+        XCTAssertNil(withStream.httpBody, "precondition: a streamed body leaves httpBody nil")
+        XCTAssertEqual(WailoURLProtocol.readBody(from: withStream), payload)
+
+        // No body: nil (so capture records an empty body, not zero bytes of a phantom one).
+        let noBody = URLRequest(url: URL(string: "https://api.test/get")!)
+        XCTAssertNil(WailoURLProtocol.readBody(from: noBody))
+    }
 }

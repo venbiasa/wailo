@@ -78,6 +78,13 @@ public final class WailoURLProtocol: URLProtocol {
     private var replayTask: URLSessionDataTask?
     private var startedAtEpochMs: Int64 = 0
     private var startNanos: UInt64 = 0
+    // The request body, buffered in startLoading only when it will be used (an unlocked host or a
+    // breakpoint). URLSession moves a request's httpBody into httpBodyStream before we're called, so
+    // httpBody is nil for essentially every request that has a body; we drain the stream once (it reads
+    // only once) and reuse this buffer for both capture and the replay. nil means no body — or a locked
+    // host whose bytes we deliberately don't buffer, letting the stream pass straight through to the
+    // replay so memory stays bounded to the few unlocked hosts.
+    private var requestBody: Data?
     // Set when Foundation cancels this load, so a body-fetch that resolves afterward doesn't deliver to
     // a torn-down protocol. Best-effort (read off the client queue), which is enough to avoid late work.
     private var stopped = false
@@ -105,6 +112,19 @@ public final class WailoURLProtocol: URLProtocol {
         let method = request.httpMethod ?? "GET"
         let urlString = request.url?.absoluteString
 
+        // Drain the request body up front, but only when we'll actually use the bytes: an unlocked host
+        // (whose bodies we capture) or any breakpoint match (which shows the body to the desktop
+        // regardless of the allowlist). URLSession moves httpBody into httpBodyStream before we run, and a
+        // stream can be read only once, so we buffer it here and reuse it for capture and the replay
+        // (proceedToNetwork restores it, since reading now consumes the stream the replay would send). For
+        // a locked host with no breakpoint we skip this, leaving the stream to pass through untouched so
+        // memory stays bounded to the few unlocked hosts.
+        let breakpointMatch = urlString.flatMap { WailoBreakpointStore.shared.match(url: $0, method: method) }
+        let bodiesAllowed = WailoCaptureConfigStore.shared.isBodyAllowed(host: request.url?.host)
+        if bodiesAllowed || breakpointMatch != nil {
+            requestBody = WailoURLProtocol.readBody(from: request)
+        }
+
         // Map Local: match locally (metadata only), then fetch the body from the desktop and serve it.
         // Any failure (no fetcher, not connected, timeout, rule gone) falls open to the real network. A
         // Map Local match takes precedence over breakpoints and is never broken (ADR-0027 precedence v1).
@@ -125,12 +145,10 @@ public final class WailoURLProtocol: URLProtocol {
         // Breakpoints apply only on the real-network path. Arm the response phase (checked in `finish`)
         // and, if the rule breaks on the request, pause before anything is sent: the desktop can edit the
         // request, abort the call, or resume it unchanged; a disconnect fails open to the real network.
-        if let urlString,
-           let gate = WailoURLProtocol.breakpointGate,
-           let match = WailoBreakpointStore.shared.match(url: urlString, method: method) {
-            if match.onResponse { responseBreakpointRuleId = match.ruleId }
-            if match.onRequest {
-                gate.pauseRequest(ruleId: match.ruleId, request: captureRequest(bodiesAllowed: true)) { [weak self] decision in
+        if let breakpointMatch, let gate = WailoURLProtocol.breakpointGate {
+            if breakpointMatch.onResponse { responseBreakpointRuleId = breakpointMatch.ruleId }
+            if breakpointMatch.onRequest {
+                gate.pauseRequest(ruleId: breakpointMatch.ruleId, request: captureRequest(bodiesAllowed: true)) { [weak self] decision in
                     guard let self, !self.stopped else { return }
                     switch decision {
                     case .abort:
@@ -169,6 +187,10 @@ public final class WailoURLProtocol: URLProtocol {
                 edited.headers.map { ($0.name, $0.value) },
                 uniquingKeysWith: { _, latest in latest }
             )
+        } else if let requestBody, !requestBody.isEmpty {
+            // We drained the original httpBodyStream to capture it, which consumes it; set the buffered
+            // bytes so the replay still sends the body instead of an empty (already-read) stream.
+            replay.httpBody = requestBody
         }
         // Remember what actually went out, to show as context if the response is also broken.
         if responseBreakpointRuleId != nil {
@@ -302,20 +324,33 @@ public final class WailoURLProtocol: URLProtocol {
     }
 
     private func captureRequest(bodiesAllowed: Bool) -> HttpRequest {
-        // Bodies sent via httpBodyStream are not readable here (documented blind spot).
-        let full = request.httpBody ?? Data()
+        // Read from the buffer drained in startLoading, not request.httpBody: URLSession moves the body
+        // into httpBodyStream before we run, leaving request.httpBody nil for most bodies.
+        let full = requestBody ?? Data()
         let (captured, truncated) = WailoURLProtocol.capturedBody(full, allowed: bodiesAllowed)
         let headers = (request.allHTTPHeaderFields ?? [:]).map { Header(name: $0.key, value: $0.value) }
         return HttpRequest(
             method: request.httpMethod ?? "GET",
             url: request.url?.absoluteString ?? "",
             body: captured,
-            // Keep the declared size even when bodies are omitted, so the size column stays meaningful.
-            body_size: Int64(full.count),
+            // Keep the declared size even when bodies are omitted (a locked host, whose bytes we don't
+            // buffer), so the size column stays meaningful — fall back to the header/httpBody length.
+            body_size: requestBody.map { Int64($0.count) } ?? declaredRequestBodySize(),
             body_truncated: truncated
         ) {
             $0.headers = headers
         }
+    }
+
+    /// The request body's declared size without draining the stream: the httpBody length when present,
+    /// else the Content-Length header. Used for the size column on a locked host, whose bytes we don't
+    /// buffer (so `requestBody` is nil) but whose size should still show.
+    private func declaredRequestBodySize() -> Int64 {
+        if let body = request.httpBody { return Int64(body.count) }
+        if let value = request.value(forHTTPHeaderField: "Content-Length"), let size = Int64(value) {
+            return size
+        }
+        return 0
     }
 
     private func captureResponse(_ response: HTTPURLResponse, body: Data?, bodiesAllowed: Bool) -> HttpResponse {
@@ -333,6 +368,28 @@ public final class WailoURLProtocol: URLProtocol {
         ) {
             $0.headers = headers
         }
+    }
+
+    /// The request's full body bytes, or nil when there is none. Prefers `httpBody`, but URLSession moves
+    /// a request's body into `httpBodyStream` before `startLoading` runs, so for most bodies we must drain
+    /// the stream instead (it can be read only once — the caller reuses the result for capture and replay).
+    /// Static + internal so it's unit testable without driving a full URLProtocol/network flow.
+    static func readBody(from request: URLRequest) -> Data? {
+        if let body = request.httpBody { return body }
+        guard let stream = request.httpBodyStream else { return nil }
+        stream.open()
+        defer { stream.close() }
+        var data = Data()
+        let bufferSize = 65_536
+        let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: bufferSize)
+        defer { buffer.deallocate() }
+        while stream.hasBytesAvailable {
+            let read = stream.read(buffer, maxLength: bufferSize)
+            // A negative count is a stream error; return what we have rather than looping forever.
+            if read <= 0 { break }
+            data.append(buffer, count: read)
+        }
+        return data
     }
 
     /// The body bytes to capture: nothing (metadata only) when the host isn't unlocked; otherwise the
