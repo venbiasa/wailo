@@ -262,7 +262,7 @@ class WailoEngine(
 
     companion object {
         const val DEFAULT_PORT: Int = 8899
-        private const val DEFAULT_MAX_RETAINED: Int = 1000
+        private const val DEFAULT_MAX_RETAINED: Int = 10000
         private const val STOP_GRACE_MS: Long = 500L
         private const val STOP_TIMEOUT_MS: Long = 1000L
         private const val DEFAULT_ACK_RETRY_MS: Long = 2000L
