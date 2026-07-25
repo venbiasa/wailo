@@ -13,8 +13,15 @@ package com.venbiasa.wailo.shared
  * the host pushes/persists this coerced form). Host-owned and persisted (like the Map Local layout);
  * `shared` renders it and hands back a new value for every change, staying stateless over its inputs
  * (ADR-0013).
+ *
+ * [masterEnabled] is the feature's single on/off switch, above both lists: when off, the whole filter is
+ * inert (the host pushes both lists disabled, so everything is captured) and both lists read disabled in
+ * the panel — each list's own armed state and hosts are kept untouched so flipping the master back on
+ * restores exactly what was armed. It gates only what the host *pushes*, never the persisted per-list
+ * state, mirroring how a group's switch gates its rules without erasing them.
  */
 data class CaptureFilterState(
+    val masterEnabled: Boolean = true,
     val allowEnabled: Boolean = false,
     val allowHosts: List<String> = emptyList(),
     val blockEnabled: Boolean = false,
@@ -43,6 +50,9 @@ data class CaptureFilterState(
     /** Turn the blocklist on/off. Ignored while it has no entries (an empty list can't be enabled). */
     fun setBlockEnabled(enabled: Boolean): CaptureFilterState =
         copy(blockEnabled = enabled && blockHosts.isNotEmpty())
+
+    /** Flip the feature's master switch. Leaves each list's armed state and hosts intact (see [masterEnabled]). */
+    fun setMasterEnabled(enabled: Boolean): CaptureFilterState = copy(masterEnabled = enabled)
 
     // Re-assert the "empty list ⇒ switch off" invariant after a removal.
     private fun coerced(): CaptureFilterState = copy(

@@ -133,11 +133,15 @@ private fun runWailo() = application {
     }
     // Push the filter on first composition and every change; the engine re-pushes to any device that
     // hasn't acked it (like the Map Local rules below). Devices apply the newest snapshot they receive.
+    // The feature master sits above both lists (ADR-0030): while it's off, neither list is armed — so
+    // devices capture everything — yet each list keeps its own hosts and armed state, ready for when the
+    // master flips back on. It gates only what's pushed, never the persisted filter.
     LaunchedEffect(captureFilter) {
+        val on = captureFilter.masterEnabled
         engine.updateCaptureFilter(
-            allowlistEnabled = captureFilter.allowEnabled,
+            allowlistEnabled = on && captureFilter.allowEnabled,
             allowPatterns = captureFilter.allowHosts,
-            blocklistEnabled = captureFilter.blockEnabled,
+            blocklistEnabled = on && captureFilter.blockEnabled,
             blockPatterns = captureFilter.blockHosts,
         )
     }
@@ -155,6 +159,13 @@ private fun runWailo() = application {
         MapLocalStore.reconcileRemovedBodies(prev, next)
         MapLocalStore.save(next)
     }
+    // Map Local's feature master (ADR-0030): host-owned and persisted like the layout. Off gates what's
+    // pushed (see below) — the saved layout is untouched, so flipping it back on restores every rule.
+    var mapLocalEnabled by remember { mutableStateOf(MapLocalStore.loadEnabled()) }
+    val onMapLocalEnabledChange = { next: Boolean ->
+        mapLocalEnabled = next
+        MapLocalStore.saveEnabled(next)
+    }
     // The engine (running on non-UI threads) resolves a matched rule's body through this seam; Compose
     // state can't be read off the composition, so bridge the current layout through an AtomicReference the
     // rule effect keeps fresh. Files are read on demand, on the IO dispatcher (ADR-0019).
@@ -166,10 +177,13 @@ private fun runWailo() = application {
     }
     // Push the match-metadata snapshot (no file reads here) on first composition and every edit; a save
     // re-pushes the active rules in priority order, and the engine re-pushes to any device that hasn't
-    // acked it. Group toggles/reorders change which rules are active and in what order (ADR-0026).
-    LaunchedEffect(mapLocalNodes) {
-        ruleDefsRef.set(mapLocalNodes)
-        engine.updateRules(compileRules(mapLocalNodes))
+    // acked it. Group toggles/reorders change which rules are active and in what order (ADR-0026). The
+    // feature master gates this without touching the saved layout (ADR-0030): off pushes no rules and
+    // empties the body-resolution snapshot too, so an in-flight match can't be served a local body.
+    LaunchedEffect(mapLocalNodes, mapLocalEnabled) {
+        val active = if (mapLocalEnabled) mapLocalNodes else emptyList()
+        ruleDefsRef.set(active)
+        engine.updateRules(compileRules(active))
     }
 
     // Breakpoint layout: host-owned and persisted like Map Local (groups + rules in priority order). `shared`
@@ -181,8 +195,17 @@ private fun runWailo() = application {
         breakpointNodes = next
         BreakpointStore.save(next)
     }
-    LaunchedEffect(breakpointNodes) {
-        engine.updateBreakpointRules(compileBreakpointRules(breakpointNodes))
+    // Breakpoints' feature master (ADR-0030), mirroring Map Local: off pushes no rules (so nothing pauses)
+    // while the saved layout stays intact for when it flips back on.
+    var breakpointsEnabled by remember { mutableStateOf(BreakpointStore.loadEnabled()) }
+    val onBreakpointsEnabledChange = { next: Boolean ->
+        breakpointsEnabled = next
+        BreakpointStore.saveEnabled(next)
+    }
+    LaunchedEffect(breakpointNodes, breakpointsEnabled) {
+        engine.updateBreakpointRules(
+            compileBreakpointRules(if (breakpointsEnabled) breakpointNodes else emptyList()),
+        )
     }
 
     // Exchanges currently held at a breakpoint. Bridged from the engine row to the viewer's model at
@@ -304,8 +327,12 @@ private fun runWailo() = application {
             onSaveMapLocalBody = { rule, bytes -> withContext(Dispatchers.IO) { MapLocalStore.saveInlineBody(rule, bytes) } },
             // `window` (the ComposeWindow, an AWT Frame) parents the native dialog so it's modal to the app.
             onPickMapLocalFile = { chooseMapLocalFile(window) },
+            mapLocalEnabled = mapLocalEnabled,
+            onMapLocalEnabledChange = onMapLocalEnabledChange,
             breakpointNodes = breakpointNodes,
             onBreakpointLayoutChange = onBreakpointLayoutChange,
+            breakpointsEnabled = breakpointsEnabled,
+            onBreakpointsEnabledChange = onBreakpointsEnabledChange,
             pausedFlows = pausedFlows,
             onResumeBreakpoint = { correlationId, editedRequest, editedResponse ->
                 engine.resumeBreakpoint(correlationId, editedRequest, editedResponse)

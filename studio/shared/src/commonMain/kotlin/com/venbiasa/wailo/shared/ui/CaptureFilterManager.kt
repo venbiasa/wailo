@@ -28,6 +28,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
@@ -62,9 +63,11 @@ private val SectionItemIndent = 16.dp
  *
  * Stateless over its inputs: the host owns [filter] and its persistence and pushes it to devices; this
  * renders it and hands back a new [CaptureFilterState] for every change via [onFilterChange] (add/remove a
- * host, flip a list). A list's switch is disabled while it has no entries, so an empty list can't be armed.
- * `*` matches any run of characters, so `*.example.com` covers a whole subdomain. It fills whatever surface
- * it's given (the studio's right tool panel).
+ * host, flip a list, or flip the whole feature). A list's switch is disabled while it has no entries, so an
+ * empty list can't be armed. `*` matches any run of characters, so `*.example.com` covers a whole subdomain.
+ * The header switch is the feature master (ADR-0030): off dims both lists and disables their switches while
+ * keeping their hosts and armed state, and the host then captures everything. It fills whatever surface it's
+ * given (the studio's right tool panel).
  */
 @Composable
 internal fun CaptureFilterManager(
@@ -94,11 +97,28 @@ internal fun CaptureFilterManager(
                     color = MaterialTheme.colorScheme.onSurface,
                 )
                 Spacer(Modifier.weight(1f))
+                // The feature master heads the right-side cluster, before Close: one switch arms/disarms the
+                // whole filter, above the two per-list switches below (ADR-0030). Off keeps every host and
+                // each list's armed state — it only pauses what the host pushes — so flipping it back on
+                // restores what was armed.
+                HoverTooltip(if (filter.masterEnabled) "On" else "Off") {
+                    CompactSwitch(
+                        checked = filter.masterEnabled,
+                        onCheckedChange = { onFilterChange(filter.setMasterEnabled(it)) },
+                    )
+                }
+                Spacer(Modifier.width(4.dp))
                 CloseButton(onClose, contentDescription = "Close capture filter")
             }
             RowDivider()
 
-            Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
+            // Dim + disarm the lists while the master is off: the sections stay readable but plainly inert,
+            // and their switches go non-interactive (each list keeps its own armed state underneath).
+            Column(
+                Modifier.fillMaxSize()
+                    .alpha(if (filter.masterEnabled) 1f else DisabledFeatureAlpha)
+                    .verticalScroll(rememberScrollState()),
+            ) {
                 MutedText(
                     "Choose which hosts devices capture: an allowlist captures only matches, a blocklist skips them.",
                     Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
@@ -107,6 +127,7 @@ internal fun CaptureFilterManager(
                 FilterSection(
                     title = "Allowlist",
                     enabled = filter.allowEnabled,
+                    armable = filter.masterEnabled,
                     hosts = filter.allowHosts,
                     emptyText = "No hosts — add one to capture only those hosts.",
                     addTooltip = "Add to allowlist",
@@ -117,6 +138,7 @@ internal fun CaptureFilterManager(
                 FilterSection(
                     title = "Blocklist",
                     enabled = filter.blockEnabled,
+                    armable = filter.masterEnabled,
                     hosts = filter.blockHosts,
                     emptyText = "No hosts — add one to skip capturing it.",
                     addTooltip = "Add to blocklist",
@@ -138,6 +160,7 @@ internal fun CaptureFilterManager(
 private fun FilterSection(
     title: String,
     enabled: Boolean,
+    armable: Boolean,
     hosts: List<String>,
     emptyText: String,
     addTooltip: String,
@@ -165,12 +188,13 @@ private fun FilterSection(
                 )
             }
             // An empty list forces its switch off and disabled (see CaptureFilterState); a filled list's
-            // switch reflects and toggles the list's armed state.
+            // switch reflects and toggles the list's armed state. [armable] is the feature master: while
+            // it's off every list switch is non-interactive too, so the master truly disables the lists.
             HoverTooltip(if (hosts.isEmpty()) "Add a host to enable" else if (enabled) "On" else "Off") {
                 CompactSwitch(
                     checked = enabled,
                     onCheckedChange = onToggleEnabled,
-                    enabled = hosts.isNotEmpty(),
+                    enabled = armable && hosts.isNotEmpty(),
                 )
             }
             Spacer(Modifier.width(12.dp))

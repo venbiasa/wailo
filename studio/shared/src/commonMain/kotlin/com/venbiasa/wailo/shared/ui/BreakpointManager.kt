@@ -59,11 +59,17 @@ import org.jetbrains.compose.resources.vectorResource
  * hands back a new layout via [onLayoutChange] for any structural change. A rule matches on a URL wildcard
  * (`*`) + optional method and can break on the request (before it's sent), the response (before the app
  * sees it), or both. It fills whatever surface it's given (the studio's right tool panel).
+ *
+ * [enabled] is the feature master (ADR-0030): off dims the list and disables every rule/group switch (and
+ * the editor's), their remembered state kept, while the host pushes no rules — so breakpoints go inert
+ * without erasing what's configured. [onEnabledChange] flips it.
  */
 @Composable
 internal fun BreakpointManager(
     nodes: List<BreakpointNode>,
     onLayoutChange: (List<BreakpointNode>) -> Unit,
+    enabled: Boolean = true,
+    onEnabledChange: (Boolean) -> Unit = {},
     onClose: () -> Unit = {},
 ) {
     // Which groups are collapsed — transient view state, hoisted so it survives entering the editor and
@@ -82,6 +88,8 @@ internal fun BreakpointManager(
             addRuleIcon = Res.drawable.ic_note_add,
             addRuleTooltip = "New breakpoint",
             nodes = nodes,
+            featureEnabled = enabled,
+            onFeatureEnabledChange = onEnabledChange,
             collapsedGroupIds = collapsedGroups,
             onAddRule = { editing = BreakpointRuleDef(id = BreakpointRuleDef.newId()) },
             onEditRule = { editing = it },
@@ -91,13 +99,14 @@ internal fun BreakpointManager(
     } else {
         // The enabled toggle is shared with the list row, so for a persisted rule it commits immediately
         // (like Map Local) rather than waiting for Save; a not-yet-saved draft toggles its own state. A
-        // rule inside an off group can't be enabled here (the group gates it, its own state preserved).
+        // rule inside an off group — or under an off feature master — can't be enabled here (they gate it,
+        // its own state preserved).
         val persisted = nodes.findRule(target.id)
         val groupEnabled = nodes.groupOf(target.id)?.enabled ?: true
         BreakpointRuleEditor(
             initial = target,
             enabled = (persisted ?: target).enabled,
-            enabledToggleable = groupEnabled,
+            enabledToggleable = enabled && groupEnabled,
             onToggleEnabled = { next ->
                 if (nodes.findRule(target.id) != null) onLayoutChange(nodes.setRuleEnabled(target.id, next))
                 else editing = target.copy(enabled = next)

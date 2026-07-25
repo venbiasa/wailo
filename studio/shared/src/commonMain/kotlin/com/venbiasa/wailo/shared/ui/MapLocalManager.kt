@@ -87,6 +87,10 @@ import org.jetbrains.compose.resources.vectorResource
  * change (reorder, group toggle/rename/delete, rule add/edit/delete/move). Top-to-bottom order is the
  * match priority. It fills whatever surface it's given (the studio's right tool panel, ADR-0021).
  *
+ * [enabled] is the feature master (ADR-0030): off dims the list and disables every rule/group switch (and
+ * the editor's), their remembered state kept, while the host pushes no rules — so Map Local goes inert
+ * without erasing what's configured. [onEnabledChange] flips it.
+ *
  * [initialDraft] seeds the editor: non-null opens straight into the form (used when launched from a
  * traffic row so the URL/method are pre-filled), null shows the list. [initialBodySeed] pre-fills the
  * body for that draft with the captured response's raw bytes (decoded as JSON text, or previewed as an
@@ -101,6 +105,8 @@ fun MapLocalManager(
     initialDraft: MapLocalRuleDef?,
     initialBodySeed: ByteArray? = null,
     onLayoutChange: (List<MapLocalNode>) -> Unit,
+    enabled: Boolean = true,
+    onEnabledChange: (Boolean) -> Unit = {},
     onClose: () -> Unit = {},
     onLoadBody: suspend (MapLocalRuleDef) -> ByteArray = { ByteArray(0) },
     onSaveBody: suspend (MapLocalRuleDef, ByteArray) -> Unit = { _, _ -> },
@@ -143,6 +149,10 @@ fun MapLocalManager(
     // itself a restart scope — recompose on every change, so the list and the editor's enabled switch
     // stay live and in sync instead of frozen until navigation.
     val liveNodes = rememberUpdatedState(nodes)
+    // The feature master has the same NavDisplay-caching hazard as [liveNodes]: passed as a plain value it
+    // would stay stuck in the cached entry until the next navigation. Read through a stable State inside
+    // the entries so toggling it recomposes the list (and the editor's toggle) at once (ADR-0030).
+    val liveEnabled = rememberUpdatedState(enabled)
     // Which groups are collapsed — transient view state hoisted above the NavDisplay entries so it
     // survives navigating into the editor and back; not persisted (relaunch shows every group expanded).
     val collapsedGroups = remember { mutableStateListOf<String>() }
@@ -158,6 +168,8 @@ fun MapLocalManager(
                     is RuleListDestination -> NavEntry(destination) {
                         RuleListPage(
                             nodes = liveNodes.value,
+                            featureEnabled = liveEnabled.value,
+                            onFeatureEnabledChange = onEnabledChange,
                             onAddRule = {
                                 // New rules default to the inline editor (the common "author a body"
                                 // path) and a JSON Content-Type header, changeable on the Headers tab.
@@ -189,14 +201,14 @@ fun MapLocalManager(
                         } else {
                             // The enabled toggle is shared with the list row, so it commits immediately
                             // rather than waiting for Save — otherwise the editor and list switches drift.
-                            // A rule inside an off group can't be toggled here either (the group gates it,
-                            // its own state preserved); a loose/undrafted rule is always toggleable.
+                            // A rule inside an off group — or under an off feature master — can't be toggled
+                            // here (they gate it, its own state preserved); an ungated rule is toggleable.
                             val persisted = currentNodes.findRule(destination.ruleId)
                             val groupEnabled = currentNodes.groupOf(destination.ruleId)?.enabled ?: true
                             RuleEditor(
                                 initial = initial,
                                 enabled = (persisted ?: initial).enabled,
-                                enabledToggleable = groupEnabled,
+                                enabledToggleable = liveEnabled.value && groupEnabled,
                                 onToggleEnabled = { next ->
                                     // Re-read the live layout at click time so committing the flag never
                                     // clobbers a concurrent edit with a stale snapshot.

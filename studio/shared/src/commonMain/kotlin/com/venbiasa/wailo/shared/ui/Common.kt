@@ -76,6 +76,11 @@ internal fun rememberColumnWidths(): SnapshotStateMap<TrafficColumn, Dp> = remem
 // (TextScale.Max), below where the buttons/titles would outgrow it.
 internal val TopBarHeight = 48.dp
 
+// Applied to a feature panel's body (the lists/rows) while its master switch is off: content stays
+// legible but reads plainly inert, the muting a disabled control carries — without hiding what's still
+// configured, since the per-item state is only paused, not erased.
+internal const val DisabledFeatureAlpha = 0.5f
+
 @Composable
 internal fun RowDivider(color: Color = MaterialTheme.colorScheme.outlineVariant) {
     Box(Modifier.fillMaxWidth().height(1.dp).background(color))

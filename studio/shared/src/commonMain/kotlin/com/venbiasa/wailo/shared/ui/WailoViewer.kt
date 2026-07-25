@@ -82,8 +82,12 @@ internal fun WailoViewer(
     onLoadMapLocalBody: suspend (MapLocalRuleDef) -> ByteArray,
     onSaveMapLocalBody: suspend (MapLocalRuleDef, ByteArray) -> Unit,
     onPickMapLocalFile: suspend () -> PickedFile?,
+    mapLocalEnabled: Boolean,
+    onMapLocalEnabledChange: (Boolean) -> Unit,
     breakpointNodes: List<BreakpointNode>,
     onBreakpointLayoutChange: (List<BreakpointNode>) -> Unit,
+    breakpointsEnabled: Boolean,
+    onBreakpointsEnabledChange: (Boolean) -> Unit,
     pausedFlows: List<PausedFlow>,
     onResumeBreakpoint: (String, HttpRequest?, HttpResponse?) -> Unit,
     onAbortBreakpoint: (String) -> Unit,
@@ -230,6 +234,8 @@ internal fun WailoViewer(
                                 initialDraft = mapLocalDraft,
                                 initialBodySeed = mapLocalBodySeed,
                                 onLayoutChange = onMapLocalLayoutChange,
+                                enabled = mapLocalEnabled,
+                                onEnabledChange = onMapLocalEnabledChange,
                                 onClose = { mapLocalOpen = false },
                                 onLoadBody = onLoadMapLocalBody,
                                 onSaveBody = onSaveMapLocalBody,
@@ -243,6 +249,8 @@ internal fun WailoViewer(
                             else -> BreakpointManager(
                                 nodes = breakpointNodes,
                                 onLayoutChange = onBreakpointLayoutChange,
+                                enabled = breakpointsEnabled,
+                                onEnabledChange = onBreakpointsEnabledChange,
                                 onClose = { breakpointsOpen = false },
                             )
                         }

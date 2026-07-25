@@ -15,6 +15,9 @@ import com.venbiasa.wailo.shared.settings.createKeyValueStore
  * a hand-edited or partially-written pref can never come back as an enabled-but-empty list.
  */
 object CaptureFilterStore {
+    // Defaults on (true) so an install with no saved value behaves exactly as before the master switch
+    // existed — the filter is live and governed solely by the two list switches.
+    private const val MASTER_ENABLED_KEY = "captureFilterEnabled"
     private const val ALLOW_ENABLED_KEY = "captureAllowEnabled"
     private const val ALLOW_HOSTS_KEY = "captureAllowHosts"
     private const val BLOCK_ENABLED_KEY = "captureBlockEnabled"
@@ -26,6 +29,7 @@ object CaptureFilterStore {
         val allowHosts = readHosts(ALLOW_HOSTS_KEY)
         val blockHosts = readHosts(BLOCK_HOSTS_KEY)
         return CaptureFilterState(
+            masterEnabled = store.getBoolean(MASTER_ENABLED_KEY, true),
             allowEnabled = store.getBoolean(ALLOW_ENABLED_KEY, false) && allowHosts.isNotEmpty(),
             allowHosts = allowHosts,
             blockEnabled = store.getBoolean(BLOCK_ENABLED_KEY, false) && blockHosts.isNotEmpty(),
@@ -34,6 +38,7 @@ object CaptureFilterStore {
     }
 
     fun save(filter: CaptureFilterState) {
+        store.putBoolean(MASTER_ENABLED_KEY, filter.masterEnabled)
         store.putBoolean(ALLOW_ENABLED_KEY, filter.allowEnabled)
         store.putString(ALLOW_HOSTS_KEY, filter.allowHosts.joinToString(SEPARATOR))
         store.putBoolean(BLOCK_ENABLED_KEY, filter.blockEnabled)

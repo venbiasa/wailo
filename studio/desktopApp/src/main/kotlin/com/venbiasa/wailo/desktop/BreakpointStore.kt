@@ -15,11 +15,18 @@ import com.venbiasa.wailo.shared.settings.createKeyValueStore
  */
 object BreakpointStore {
     private const val KEY = "breakpointRules"
+    // The feature master (ADR-0030); defaults on so an install with no saved value keeps arming rules
+    // exactly as before the switch existed. Gates only what the host pushes, never the saved layout.
+    private const val ENABLED_KEY = "breakpointsEnabled"
     private val store = createKeyValueStore("desktop")
 
     fun load(): List<BreakpointNode> = BreakpointLayoutCodec.decode(store.getString(KEY, ""))
 
     fun save(nodes: List<BreakpointNode>) = store.putString(KEY, BreakpointLayoutCodec.encode(nodes))
+
+    fun loadEnabled(): Boolean = store.getBoolean(ENABLED_KEY, true)
+
+    fun saveEnabled(enabled: Boolean) = store.putBoolean(ENABLED_KEY, enabled)
 }
 
 /**

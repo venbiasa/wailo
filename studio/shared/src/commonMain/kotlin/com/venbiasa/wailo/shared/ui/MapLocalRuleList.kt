@@ -20,6 +20,8 @@ import com.venbiasa.wailo.shared.resources.ic_note_add
 @Composable
 internal fun RuleListPage(
     nodes: List<MapLocalNode>,
+    featureEnabled: Boolean,
+    onFeatureEnabledChange: (Boolean) -> Unit,
     onAddRule: () -> Unit,
     onEditRule: (MapLocalRuleDef) -> Unit,
     onNodesChange: (List<MapLocalNode>) -> Unit,
@@ -33,6 +35,8 @@ internal fun RuleListPage(
         addRuleIcon = Res.drawable.ic_note_add,
         addRuleTooltip = "New mapping rule",
         nodes = nodes,
+        featureEnabled = featureEnabled,
+        onFeatureEnabledChange = onFeatureEnabledChange,
         collapsedGroupIds = collapsedGroupIds,
         onAddRule = onAddRule,
         onEditRule = onEditRule,

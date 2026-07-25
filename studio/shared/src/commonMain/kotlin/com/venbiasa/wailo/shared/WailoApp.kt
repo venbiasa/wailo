@@ -24,16 +24,20 @@ import com.venbiasa.wailo.shared.ui.WailoViewer
  * traffic is being recorded, and [onToggleCapture]/[onClear] drive the top bar (the engine lives in the
  * host, not here). [bookmarks] are the persisted, host-owned bookmarked hosts; [onAddBookmark]/
  * [onRemoveBookmark] let the viewer mutate that set (the host owns its persistence, ADR-0013).
- * [captureFilter] is the host-owned, persisted capture filter (the allow/block host lists + each list's
- * on/off switch) the host pushes to devices, which gate whole exchanges at the source (ADR-0029);
- * [onCaptureFilterChange] hands back a new filter for any change (add/remove a host, flip a list).
+ * [captureFilter] is the host-owned, persisted capture filter (the feature master + the allow/block host
+ * lists + each list's on/off switch) the host pushes to devices, which gate whole exchanges at the source
+ * (ADR-0029/0030); [onCaptureFilterChange] hands back a new filter for any change (add/remove a host, flip
+ * a list, or flip the feature master — off captures everything and disables the lists, state kept).
  * [mapLocalNodes] are the host-owned, persisted Map Local layout (groups + rules, in priority order) the
  * right-side tool panel renders (ADR-0021/0026); [onMapLocalLayoutChange] hands back a new layout for any
  * structural change, and [onLoadMapLocalBody]/[onSaveMapLocalBody] read/persist a rule's authored body as
  * bytes (the host owns all file IO). [onPickMapLocalFile] opens the host's file picker for a body file
- * (JSON/text or image). [breakpointNodes] are the host-owned, persisted breakpoints layout (groups +
+ * (JSON/text or image). [mapLocalEnabled]/[onMapLocalEnabledChange] are the Map Local feature master
+ * (ADR-0030): off, the host pushes no rules and the panel disables its switches, state kept.
+ * [breakpointNodes] are the host-owned, persisted breakpoints layout (groups +
  * rules, in priority order) the same tool panel renders (ADR-0026/0027); [onBreakpointLayoutChange] hands
- * back a new layout for any structural change, [pausedFlows] are the requests/responses devices are
+ * back a new layout for any structural change, [breakpointsEnabled]/[onBreakpointsEnabledChange] are that
+ * feature's master (ADR-0030, same semantics), [pausedFlows] are the requests/responses devices are
  * currently holding at a breakpoint, and [onResumeBreakpoint]/[onAbortBreakpoint] resolve one by
  * correlation id. The panel's open state and any row-seeded draft are the viewer's own transient state.
  * [toolPanelWidthRatio] is the host-owned, persisted width of that docked panel expressed as a
@@ -61,8 +65,12 @@ fun WailoApp(
     onLoadMapLocalBody: suspend (MapLocalRuleDef) -> ByteArray = { ByteArray(0) },
     onSaveMapLocalBody: suspend (MapLocalRuleDef, ByteArray) -> Unit = { _, _ -> },
     onPickMapLocalFile: suspend () -> PickedFile? = { null },
+    mapLocalEnabled: Boolean = true,
+    onMapLocalEnabledChange: (Boolean) -> Unit = {},
     breakpointNodes: List<BreakpointNode> = emptyList(),
     onBreakpointLayoutChange: (List<BreakpointNode>) -> Unit = {},
+    breakpointsEnabled: Boolean = true,
+    onBreakpointsEnabledChange: (Boolean) -> Unit = {},
     pausedFlows: List<PausedFlow> = emptyList(),
     onResumeBreakpoint: (String, HttpRequest?, HttpResponse?) -> Unit = { _, _, _ -> },
     onAbortBreakpoint: (String) -> Unit = {},
@@ -93,8 +101,12 @@ fun WailoApp(
                 onLoadMapLocalBody = onLoadMapLocalBody,
                 onSaveMapLocalBody = onSaveMapLocalBody,
                 onPickMapLocalFile = onPickMapLocalFile,
+                mapLocalEnabled = mapLocalEnabled,
+                onMapLocalEnabledChange = onMapLocalEnabledChange,
                 breakpointNodes = breakpointNodes,
                 onBreakpointLayoutChange = onBreakpointLayoutChange,
+                breakpointsEnabled = breakpointsEnabled,
+                onBreakpointsEnabledChange = onBreakpointsEnabledChange,
                 pausedFlows = pausedFlows,
                 onResumeBreakpoint = onResumeBreakpoint,
                 onAbortBreakpoint = onAbortBreakpoint,

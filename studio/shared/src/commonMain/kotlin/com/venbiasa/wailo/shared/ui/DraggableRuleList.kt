@@ -40,6 +40,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshots.SnapshotStateList
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.focus.FocusRequester
@@ -81,7 +82,6 @@ import com.venbiasa.wailo.shared.resources.ic_create_new_folder
 import com.venbiasa.wailo.shared.resources.ic_delete
 import com.venbiasa.wailo.shared.setGroupEnabled
 import com.venbiasa.wailo.shared.setRuleEnabled
-import com.venbiasa.wailo.shared.theme.LocalWailoColors
 import org.jetbrains.compose.resources.DrawableResource
 import org.jetbrains.compose.resources.vectorResource
 
@@ -98,11 +98,15 @@ private val GroupChildIndent = 28.dp
  * (ADR-0027). `shared` stays stateless — every structural change is computed with the pure layout ops
  * and handed to [onNodesChange]; the host persists it. Top-to-bottom order is the match priority.
  *
- * The header carries a title, an add-rule button ([addRuleIcon]/[addRuleTooltip] → [onAddRule]), a
- * new-group button, and Close; [description] is a one-line caption under it. [onEditRule] opens a rule
- * (the caller navigates to its editor); a rule isn't committed until that editor saves. [ruleContent]
- * renders the middle of a rule row (the clickable label area) — the only per-feature difference; the
- * drag handle, enabled switch, and delete affordance are shared.
+ * The header carries a title, then — heading the right-side actions — the feature master switch
+ * ([featureEnabled]/[onFeatureEnabledChange]), an add-rule button ([addRuleIcon]/[addRuleTooltip] →
+ * [onAddRule]), a new-group button, and Close; [description] is a one-line caption under it. The master
+ * is the single feature on/off (ADR-0030):
+ * off dims the list and disables every rule/group switch (their remembered state kept), and the host
+ * pushes no rules — so the whole feature goes inert without erasing what's configured, one level above
+ * group-gating. [onEditRule] opens a rule (the caller navigates to its editor); a rule isn't committed
+ * until that editor saves. [ruleContent] renders the middle of a rule row (the clickable label area) —
+ * the only per-feature difference; the drag handle, enabled switch, and delete affordance are shared.
  */
 @Composable
 internal fun <T : LayoutRule<T>> GroupedRuleListPage(
@@ -112,6 +116,8 @@ internal fun <T : LayoutRule<T>> GroupedRuleListPage(
     addRuleIcon: DrawableResource,
     addRuleTooltip: String,
     nodes: List<LayoutNode<T>>,
+    featureEnabled: Boolean,
+    onFeatureEnabledChange: (Boolean) -> Unit,
     collapsedGroupIds: SnapshotStateList<String>,
     onAddRule: () -> Unit,
     onEditRule: (T) -> Unit,
@@ -136,6 +142,14 @@ internal fun <T : LayoutRule<T>> GroupedRuleListPage(
             ) {
                 Text(title, style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurface)
                 Spacer(Modifier.weight(1f))
+                // The feature master heads the right-side cluster, before the add/group/close actions: one
+                // switch turns the whole feature on/off, above the per-group and per-rule switches. Off
+                // pushes no rules and disables the switches below, their remembered state kept, so it never
+                // erases what's configured (ADR-0030).
+                HoverTooltip(if (featureEnabled) "On" else "Off") {
+                    CompactSwitch(checked = featureEnabled, onCheckedChange = onFeatureEnabledChange)
+                }
+                Spacer(Modifier.width(4.dp))
                 // Add actions are icon-only header buttons whose tooltips name them: an add-rule icon and
                 // a "folder" (new group). Creating a group opens it straight into inline rename.
                 HoverTooltip(addRuleTooltip) {
@@ -174,19 +188,20 @@ internal fun <T : LayoutRule<T>> GroupedRuleListPage(
             }
             if (nodes.isEmpty()) {
                 // Empty hint sits at the top (left-aligned under the description caption), not floating in
-                // the vertical center of the panel. Kept a notch quieter than the description above it
-                // (its size, but the disabled-emphasis color) so it reads as secondary, not the loudest
-                // thing in an otherwise-empty panel.
+                // the vertical center of the panel. Uses the same muted caption style as the description
+                // above it (bodySmall + onSurfaceVariant) so it no longer out-weighs it — onSurfaceDisabled
+                // was tried but is too low-contrast to read against the near-black dark-mode panel.
                 Box(Modifier.fillMaxSize().padding(16.dp), contentAlignment = Alignment.TopStart) {
                     Text(
                         emptyText,
                         style = MaterialTheme.typography.bodySmall,
-                        color = LocalWailoColors.current.onSurfaceDisabled,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
             } else {
                 DraggableNodeList(
                     nodes = nodes,
+                    featureEnabled = featureEnabled,
                     collapsedGroupIds = collapsedGroupIds,
                     autoEditGroupId = autoEditGroupId,
                     onAutoEditConsumed = { autoEditGroupId = null },
@@ -251,6 +266,7 @@ private class ReorderState {
 @Composable
 private fun <T : LayoutRule<T>> DraggableNodeList(
     nodes: List<LayoutNode<T>>,
+    featureEnabled: Boolean,
     collapsedGroupIds: SnapshotStateList<String>,
     autoEditGroupId: String?,
     onAutoEditConsumed: () -> Unit,
@@ -289,7 +305,10 @@ private fun <T : LayoutRule<T>> DraggableNodeList(
         if (next != currentNodes) currentOnChange(next)
     }
 
-    Box(Modifier.fillMaxSize()) {
+    // While the feature master is off the list stays visible but reads plainly inert: dim the whole
+    // list and hand each row a disabled switch (see [RuleRow]/[GroupHeaderRow]), keeping the remembered
+    // per-rule/group state so flipping the master back on restores it.
+    Box(Modifier.fillMaxSize().alpha(if (featureEnabled) 1f else DisabledFeatureAlpha)) {
         LazyColumn(
             state = listState,
             modifier = Modifier.fillMaxSize(),
@@ -301,6 +320,7 @@ private fun <T : LayoutRule<T>> DraggableNodeList(
                     is HeaderDisp -> GroupHeaderRow(
                         group = row.group,
                         ruleCount = row.ruleCount,
+                        featureEnabled = featureEnabled,
                         collapsed = row.group.id in collapsedGroupIds,
                         dragging = reorder.draggingId == row.group.id,
                         autoEdit = row.group.id == autoEditGroupId,
@@ -318,6 +338,7 @@ private fun <T : LayoutRule<T>> DraggableNodeList(
                         rule = row.rule,
                         grouped = row.groupId != null,
                         groupEnabled = row.groupEnabled,
+                        featureEnabled = featureEnabled,
                         dragging = reorder.draggingId == row.rule.id,
                         onEdit = { onEditRule(row.rule) },
                         onToggle = { onToggleRule(row.rule.id) },
@@ -405,6 +426,7 @@ private fun <T : LayoutRule<T>> DropIndicator(
 private fun GroupHeaderRow(
     group: RuleGroup,
     ruleCount: Int,
+    featureEnabled: Boolean,
     collapsed: Boolean,
     dragging: Boolean,
     autoEdit: Boolean,
@@ -437,7 +459,8 @@ private fun GroupHeaderRow(
                 modifier = Modifier.size(20.dp).rotate(chevron),
             )
         }
-        CompactSwitch(checked = group.enabled, onCheckedChange = { onToggle() })
+        // Non-interactive while the feature master is off (the group keeps its remembered state).
+        CompactSwitch(checked = group.enabled, onCheckedChange = { onToggle() }, enabled = featureEnabled)
         Spacer(Modifier.width(8.dp))
         Box(Modifier.weight(1f)) {
             if (editing) {
@@ -565,6 +588,7 @@ private fun <T : LayoutRule<T>> RuleRow(
     rule: T,
     grouped: Boolean,
     groupEnabled: Boolean,
+    featureEnabled: Boolean,
     dragging: Boolean,
     onEdit: () -> Unit,
     onToggle: () -> Unit,
@@ -582,8 +606,13 @@ private fun <T : LayoutRule<T>> RuleRow(
     ) {
         DragHandleDots(handleModifier)
         Spacer(Modifier.width(4.dp))
-        // A rule in an off group reads disabled but keeps its own remembered state (ADR-0026).
-        CompactSwitch(checked = rule.enabled, onCheckedChange = { onToggle() }, enabled = !grouped || groupEnabled)
+        // A rule in an off group — or under an off feature master — reads disabled but keeps its own
+        // remembered state (ADR-0026/0030).
+        CompactSwitch(
+            checked = rule.enabled,
+            onCheckedChange = { onToggle() },
+            enabled = featureEnabled && (!grouped || groupEnabled),
+        )
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f).clickable { onEdit() }) { content(rule) }
         IconButton(onClick = onDelete, modifier = Modifier.size(36.dp)) {

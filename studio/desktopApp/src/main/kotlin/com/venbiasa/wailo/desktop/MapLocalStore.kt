@@ -23,11 +23,18 @@ import java.io.File
  */
 object MapLocalStore {
     private const val KEY = "mapLocalRules"
+    // The feature master (ADR-0030); defaults on so an install with no saved value keeps serving rules
+    // exactly as before the switch existed. Gates only what the host pushes, never the saved layout.
+    private const val ENABLED_KEY = "mapLocalEnabled"
     private val store = createKeyValueStore("desktop")
 
     fun load(): List<MapLocalNode> = MapLocalLayoutCodec.decode(store.getString(KEY, ""))
 
     fun save(nodes: List<MapLocalNode>) = store.putString(KEY, MapLocalLayoutCodec.encode(nodes))
+
+    fun loadEnabled(): Boolean = store.getBoolean(ENABLED_KEY, true)
+
+    fun saveEnabled(enabled: Boolean) = store.putBoolean(ENABLED_KEY, enabled)
 
     /**
      * Deletes the app-managed body of every rule present in [old] but gone from [new]. A whole-layout
