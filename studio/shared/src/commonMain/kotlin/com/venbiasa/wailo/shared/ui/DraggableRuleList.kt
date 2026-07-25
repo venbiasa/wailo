@@ -81,6 +81,7 @@ import com.venbiasa.wailo.shared.resources.ic_create_new_folder
 import com.venbiasa.wailo.shared.resources.ic_delete
 import com.venbiasa.wailo.shared.setGroupEnabled
 import com.venbiasa.wailo.shared.setRuleEnabled
+import com.venbiasa.wailo.shared.theme.LocalWailoColors
 import org.jetbrains.compose.resources.DrawableResource
 import org.jetbrains.compose.resources.vectorResource
 
@@ -172,11 +173,15 @@ internal fun <T : LayoutRule<T>> GroupedRuleListPage(
                 RowDivider()
             }
             if (nodes.isEmpty()) {
-                Box(Modifier.fillMaxSize().padding(16.dp), contentAlignment = Alignment.Center) {
+                // Empty hint sits at the top (left-aligned under the description caption), not floating in
+                // the vertical center of the panel. Kept a notch quieter than the description above it
+                // (its size, but the disabled-emphasis color) so it reads as secondary, not the loudest
+                // thing in an otherwise-empty panel.
+                Box(Modifier.fillMaxSize().padding(16.dp), contentAlignment = Alignment.TopStart) {
                     Text(
                         emptyText,
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = LocalWailoColors.current.onSurfaceDisabled,
                     )
                 }
             } else {
