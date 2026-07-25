@@ -26,9 +26,11 @@ import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.snapshots.SnapshotStateMap
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.VisualTransformation
@@ -36,6 +38,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.venbiasa.wailo.shared.resources.Res
 import com.venbiasa.wailo.shared.resources.ic_close
+import kotlin.math.roundToInt
 import org.jetbrains.compose.resources.vectorResource
 
 /**
@@ -218,6 +221,8 @@ internal fun CompactFieldDecoration(
 // Material reserves a 48.dp interactive target around a 52×32.dp switch track — bulky in a dense,
 // pointer-driven desktop panel. This drops that reservation (desktop doesn't need the touch slop) and
 // scales the track down, keeping the stock ripple, hover, and thumb animation.
+private const val CompactSwitchScale = 0.65f
+
 @Composable
 internal fun CompactSwitch(
     checked: Boolean,
@@ -229,7 +234,9 @@ internal fun CompactSwitch(
         Switch(
             checked = checked,
             onCheckedChange = onCheckedChange,
-            modifier = modifier.scale(0.8f),
+            // scale() is draw-only, so pair it with a layout that reports the scaled size — otherwise the
+            // full 52×32.dp box lingers and leaves dead space around the shrunken thumb in these tight rows.
+            modifier = modifier.compactSwitchScale(CompactSwitchScale),
             enabled = enabled,
             // The stock unchecked switch paints its thumb in `outline` — a near-disabled gray in this
             // monochrome theme, so "off" was indistinguishable from "disabled". Drive the off-state from
@@ -243,3 +250,20 @@ internal fun CompactSwitch(
         )
     }
 }
+
+// Shrink a fixed-size control by [scale] in both draw and layout: graphicsLayer scales the pixels while
+// the layout wrapper reports the scaled size and re-centers the full-size child, so it truly occupies
+// less room (and hit-tests to that smaller area) instead of floating inside its original box.
+private fun Modifier.compactSwitchScale(scale: Float): Modifier =
+    graphicsLayer {
+        scaleX = scale
+        scaleY = scale
+        transformOrigin = TransformOrigin(0.5f, 0.5f)
+    }.layout { measurable, constraints ->
+        val placeable = measurable.measure(constraints)
+        val width = (placeable.width * scale).roundToInt()
+        val height = (placeable.height * scale).roundToInt()
+        layout(width, height) {
+            placeable.place((width - placeable.width) / 2, (height - placeable.height) / 2)
+        }
+    }
