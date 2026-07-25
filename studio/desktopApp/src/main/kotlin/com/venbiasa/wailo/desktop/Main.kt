@@ -24,6 +24,7 @@ import androidx.compose.ui.window.rememberWindowState
 import com.venbiasa.wailo.engine.MapLocalBodyProvider
 import com.venbiasa.wailo.engine.WailoEngine
 import com.venbiasa.wailo.shared.BreakpointNode
+import com.venbiasa.wailo.shared.CaptureFilterState
 import com.venbiasa.wailo.shared.FlowEntry
 import com.venbiasa.wailo.shared.MapLocalNode
 import com.venbiasa.wailo.shared.MapLocalRuleDef
@@ -80,7 +81,6 @@ private fun runWailo() = application {
                 it.platform,
                 it.exchange,
                 edited = it.exchange.edited,
-                bodiesOmitted = it.exchange.bodies_omitted,
             )
         }
     }
@@ -121,26 +121,25 @@ private fun runWailo() = application {
         }
     }
 
-    // Unlocked hosts whose request/response bodies are captured (metadata is always captured). Host-owned
-    // and persisted like bookmarks; `shared` gets the list plus unlock/lock callbacks and stays stateless.
-    // The engine pushes this to devices, so only these hosts stream bodies (Proxyman-style "unlock").
-    var unlockedHosts by remember { mutableStateOf(CaptureAllowlistStore.load()) }
-    val unlockHost = { host: String ->
-        if (host.isNotBlank() && host !in unlockedHosts) {
-            unlockedHosts = unlockedHosts + host
-            CaptureAllowlistStore.save(unlockedHosts)
-        }
+    // Capture filter: the allow/block host lists + each list's on/off switch that decide which traffic
+    // devices capture and stream (ADR-0029). Host-owned and persisted like bookmarks; `shared` renders it
+    // and hands back a whole new [CaptureFilterState] for any change and stays stateless. The engine pushes
+    // it to devices, which gate whole exchanges at the source — with both lists off (the default) every
+    // exchange is captured.
+    var captureFilter by remember { mutableStateOf(CaptureFilterStore.load()) }
+    val onCaptureFilterChange = { next: CaptureFilterState ->
+        captureFilter = next
+        CaptureFilterStore.save(next)
     }
-    val lockHost = { host: String ->
-        if (host in unlockedHosts) {
-            unlockedHosts = unlockedHosts - host
-            CaptureAllowlistStore.save(unlockedHosts)
-        }
-    }
-    // Push the allowlist on first composition and every change; the engine re-pushes to any device that
+    // Push the filter on first composition and every change; the engine re-pushes to any device that
     // hasn't acked it (like the Map Local rules below). Devices apply the newest snapshot they receive.
-    LaunchedEffect(unlockedHosts) {
-        engine.updateAllowlist(unlockedHosts)
+    LaunchedEffect(captureFilter) {
+        engine.updateCaptureFilter(
+            allowlistEnabled = captureFilter.allowEnabled,
+            allowPatterns = captureFilter.allowHosts,
+            blocklistEnabled = captureFilter.blockEnabled,
+            blockPatterns = captureFilter.blockHosts,
+        )
     }
 
     // Map Local layout (groups + rules, in priority order): host-owned and persisted (like bookmarks).
@@ -297,9 +296,8 @@ private fun runWailo() = application {
             bookmarks = bookmarks,
             onAddBookmark = addBookmark,
             onRemoveBookmark = removeBookmark,
-            unlockedHosts = unlockedHosts,
-            onUnlockHost = unlockHost,
-            onLockHost = lockHost,
+            captureFilter = captureFilter,
+            onCaptureFilterChange = onCaptureFilterChange,
             mapLocalNodes = mapLocalNodes,
             onMapLocalLayoutChange = onLayoutChange,
             onLoadMapLocalBody = { rule -> withContext(Dispatchers.IO) { MapLocalStore.loadInlineBody(rule) } },

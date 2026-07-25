@@ -122,8 +122,8 @@ private fun MenuItem(action: ContextMenuAction, onClick: () -> Unit) {
     ) {
         Text(action.label, style = MaterialTheme.typography.bodyMedium, maxLines = 1)
         // A *weighted* spacer pins the tick to the row's trailing edge, so every checkable item's tick
-        // lines up in one column no matter how wide its label is (e.g. "Bookmark" vs the shorter
-        // "Unlock") — a fixed spacer would offset each tick by its own label width. The min keeps a gap
+        // lines up in one column no matter how wide its label is (e.g. "Allowlist" vs the shorter
+        // "Bookmark") — a fixed spacer would offset each tick by its own label width. The min keeps a gap
         // behind even the widest label, and the slot's Box is always present (tick or not) so toggling
         // the tick never shifts anything.
         if (action.checked != null) {

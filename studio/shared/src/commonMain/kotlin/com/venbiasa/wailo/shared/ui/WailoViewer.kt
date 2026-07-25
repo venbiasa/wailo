@@ -41,6 +41,7 @@ import com.venbiasa.wailo.protocol.Header
 import com.venbiasa.wailo.protocol.HttpRequest
 import com.venbiasa.wailo.protocol.HttpResponse
 import com.venbiasa.wailo.shared.BreakpointNode
+import com.venbiasa.wailo.shared.CaptureFilterState
 import com.venbiasa.wailo.shared.FlowEntry
 import com.venbiasa.wailo.shared.MapLocalHeader
 import com.venbiasa.wailo.shared.MapLocalNode
@@ -74,9 +75,8 @@ internal fun WailoViewer(
     bookmarks: List<String>,
     onAddBookmark: (String) -> Unit,
     onRemoveBookmark: (String) -> Unit,
-    unlockedHosts: List<String>,
-    onUnlockHost: (String) -> Unit,
-    onLockHost: (String) -> Unit,
+    captureFilter: CaptureFilterState,
+    onCaptureFilterChange: (CaptureFilterState) -> Unit,
     mapLocalNodes: List<MapLocalNode>,
     onMapLocalLayoutChange: (List<MapLocalNode>) -> Unit,
     onLoadMapLocalBody: suspend (MapLocalRuleDef) -> ByteArray,
@@ -114,14 +114,14 @@ internal fun WailoViewer(
     var mapLocalOpen by remember { mutableStateOf(false) }
     var mapLocalDraft by remember { mutableStateOf<MapLocalRuleDef?>(null) }
     var mapLocalBodySeed by remember { mutableStateOf<ByteArray?>(null) }
-    // The capture-allowlist panel shares the single docked tool slot with Map Local — opening one closes
+    // The capture-filter panel shares the single docked tool slot with Map Local — opening one closes
     // the other — so the layout never reasons about two side panels at once, and both size themselves from
     // the one host-owned [toolPanelWidthRatio]: a width dragged for either panel persists across restarts
     // and carries over to the other. It's a fraction of the window, not a fixed dp, so the panel scales
     // with the window (clamped to keep both panel and content usable, see ToolPanelLayout).
     var captureOpen by remember { mutableStateOf(false) }
     // The breakpoints panel shares the same single docked tool slot as Map Local and the capture
-    // allowlist — opening any one closes the others.
+    // filter — opening any one closes the others.
     var breakpointsOpen by remember { mutableStateOf(false) }
     val density = LocalDensity.current
 
@@ -162,9 +162,23 @@ internal fun WailoViewer(
                                 bookmarks = bookmarks,
                                 onAddBookmark = onAddBookmark,
                                 onRemoveBookmark = onRemoveBookmark,
-                                unlockedHosts = unlockedHosts,
-                                onUnlockHost = onUnlockHost,
-                                onLockHost = onLockHost,
+                                allowHosts = captureFilter.allowHosts,
+                                blockHosts = captureFilter.blockHosts,
+                                // Row toggles add/remove the exact host in a list. They don't flip the
+                                // list's switch — arming stays a deliberate act in the capture-filter
+                                // panel (a stray click can't silently filter all traffic).
+                                onToggleAllowHost = { host ->
+                                    onCaptureFilterChange(
+                                        if (host in captureFilter.allowHosts) captureFilter.removeAllow(host)
+                                        else captureFilter.addAllow(host),
+                                    )
+                                },
+                                onToggleBlockHost = { host ->
+                                    onCaptureFilterChange(
+                                        if (host in captureFilter.blockHosts) captureFilter.removeBlock(host)
+                                        else captureFilter.addBlock(host),
+                                    )
+                                },
                                 // A row's "Map Local…" seeds a fresh draft (exact URL + method + the
                                 // captured body's bytes — JSON or image) and opens the tool panel — no
                                 // separate window (ADR-0021).
@@ -191,15 +205,13 @@ internal fun WailoViewer(
                             }
                             DetailPanel(
                                 entry = selected,
-                                unlockedHosts = unlockedHosts,
-                                onUnlockHost = onUnlockHost,
                                 modifier = Modifier.fillMaxWidth().height(detailHeight.coerceIn(minDetail, maxDetail)),
                                 onClose = { selectedId = null },
                             )
                         }
                     }
                 }
-                // The docked tool panel — Map Local or the capture allowlist, never both — sits to the
+                // The docked tool panel — Map Local or the capture filter, never both — sits to the
                 // right, resizable, between the content and the tool rail (the Android Studio tool-window
                 // model). One [toolPanelWidthRatio] backs the single slot, so a width dragged for one panel
                 // is exactly the width the other opens at, and it persists across restarts.
@@ -223,10 +235,9 @@ internal fun WailoViewer(
                                 onSaveBody = onSaveMapLocalBody,
                                 onPickFile = onPickMapLocalFile,
                             )
-                            captureOpen -> CaptureAllowlistManager(
-                                unlockedHosts = unlockedHosts,
-                                onUnlockHost = onUnlockHost,
-                                onLockHost = onLockHost,
+                            captureOpen -> CaptureFilterManager(
+                                filter = captureFilter,
+                                onFilterChange = onCaptureFilterChange,
                                 onClose = { captureOpen = false },
                             )
                             else -> BreakpointManager(
@@ -350,7 +361,7 @@ private fun ToolRail(
         RailDivider()
         ToolRailButton(
             icon = Res.drawable.ic_lock,
-            contentDescription = "Capture Allowlist",
+            contentDescription = "Capture Filter",
             selected = captureOpen,
             onClick = onToggleCapture,
         )

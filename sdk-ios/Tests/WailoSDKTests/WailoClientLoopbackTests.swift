@@ -36,7 +36,7 @@ final class WailoClientLoopbackTests: XCTestCase {
         )
         client.start()
         // Captured during the (healthy) connection's handshake; delivered live after the Hello.
-        client.onExchange(HttpExchange(id: "e1", started_at_epoch_ms: 1, duration_ms: 2, error: "", edited: false, bodies_omitted: false))
+        client.onExchange(HttpExchange(id: "e1", started_at_epoch_ms: 1, duration_ms: 2, error: "", edited: false))
 
         wait(for: [helloReceived, exchangeReceived], timeout: 10)
         client.stopAndWaitForTeardown()
@@ -391,7 +391,7 @@ final class WailoClientLoopbackTests: XCTestCase {
         )
         client.start()
         // Captured while nothing is listening → dropped, not buffered.
-        client.onExchange(HttpExchange(id: "early", started_at_epoch_ms: 1, duration_ms: 2, error: "", edited: false, bodies_omitted: false))
+        client.onExchange(HttpExchange(id: "early", started_at_epoch_ms: 1, duration_ms: 2, error: "", edited: false))
 
         // Let a few connect attempts fail before the desktop shows up.
         Thread.sleep(forTimeInterval: 0.6)
@@ -418,7 +418,7 @@ final class WailoClientLoopbackTests: XCTestCase {
 
         // Reconnect first (Hello proves the tap is live again), then capture a fresh exchange.
         wait(for: [helloReceived], timeout: 10)
-        client.onExchange(HttpExchange(id: "live", started_at_epoch_ms: 3, duration_ms: 4, error: "", edited: false, bodies_omitted: false))
+        client.onExchange(HttpExchange(id: "live", started_at_epoch_ms: 3, duration_ms: 4, error: "", edited: false))
         wait(for: [liveReceived], timeout: 10)
         XCTAssertEqual(firstExchangeId, "live", "an exchange captured while disconnected must be dropped, not replayed")
 
@@ -472,7 +472,7 @@ final class WailoClientLoopbackTests: XCTestCase {
         // Capture only after the reconnect Hello proves the tap is live again — a live tap drops
         // anything captured during the gap between attempts.
         wait(for: [reconnectHello], timeout: 10)
-        client.onExchange(HttpExchange(id: "after", started_at_epoch_ms: 3, duration_ms: 4, error: "", edited: false, bodies_omitted: false))
+        client.onExchange(HttpExchange(id: "after", started_at_epoch_ms: 3, duration_ms: 4, error: "", edited: false))
         wait(for: [postDropExchange], timeout: 10)
         client.stopAndWaitForTeardown()
         server2.stop()

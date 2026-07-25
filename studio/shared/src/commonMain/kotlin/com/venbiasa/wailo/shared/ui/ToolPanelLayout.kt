@@ -4,7 +4,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 
 /**
- * Sizing for the docked tool panel (Map Local / capture allowlist), shared by the viewer that renders it
+ * Sizing for the docked tool panel (Map Local / capture filter), shared by the viewer that renders it
  * and the host that persists it. The width is stored as a fraction of the window width — so the panel
  * scales with the window instead of pinning to a fixed dp — but is always clamped when applied so the
  * panel keeps at least [MinWidth] and still leaves [MinContentWidth] for the traffic list. Mirrors

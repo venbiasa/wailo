@@ -15,9 +15,9 @@ import com.venbiasa.wailo.protocol.HttpExchange
  * altered this exchange. Editing isn't implemented yet, so it defaults false everywhere today; the
  * host will set it once request/response rewriting lands, without further UI changes.
  *
- * [bodiesOmitted] is true when the device captured metadata only and skipped the bodies because the
- * host isn't unlocked for body capture. It lets the detail panel offer an "unlock to capture" prompt
- * instead of showing an empty body.
+ * Every captured exchange carries its full request/response bodies: the device gates whether the whole
+ * exchange is captured at all (the CaptureFilter, ADR-0029), never whether its body is included, so there
+ * is no metadata-only flag here.
  */
 data class FlowEntry(
     val deviceName: String,
@@ -25,7 +25,6 @@ data class FlowEntry(
     val platform: String,
     val exchange: HttpExchange,
     val edited: Boolean = false,
-    val bodiesOmitted: Boolean = false,
 ) {
     val id: String get() = exchange.id
 }

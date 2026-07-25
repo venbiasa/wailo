@@ -59,7 +59,6 @@ import com.venbiasa.wailo.shared.FlowEntry
 import com.venbiasa.wailo.shared.format.codeText
 import com.venbiasa.wailo.shared.format.formatBytes
 import com.venbiasa.wailo.shared.format.formatClockTime
-import com.venbiasa.wailo.shared.format.isHostUnlocked
 import com.venbiasa.wailo.shared.format.requestHost
 import com.venbiasa.wailo.shared.format.statusKind
 import com.venbiasa.wailo.shared.format.statusText
@@ -83,9 +82,10 @@ internal fun TrafficList(
     bookmarks: List<String>,
     onAddBookmark: (String) -> Unit,
     onRemoveBookmark: (String) -> Unit,
-    unlockedHosts: List<String>,
-    onUnlockHost: (String) -> Unit,
-    onLockHost: (String) -> Unit,
+    allowHosts: List<String>,
+    blockHosts: List<String>,
+    onToggleAllowHost: (String) -> Unit,
+    onToggleBlockHost: (String) -> Unit,
     onMapLocalFromUrl: (String, String, List<Header>, ByteArray?) -> Unit,
 ) {
     val listState = rememberLazyListState()
@@ -176,9 +176,10 @@ internal fun TrafficList(
                             bookmarks = bookmarks,
                             onAddBookmark = onAddBookmark,
                             onRemoveBookmark = onRemoveBookmark,
-                            unlockedHosts = unlockedHosts,
-                            onUnlockHost = onUnlockHost,
-                            onLockHost = onLockHost,
+                            allowHosts = allowHosts,
+                            blockHosts = blockHosts,
+                            onToggleAllowHost = onToggleAllowHost,
+                            onToggleBlockHost = onToggleBlockHost,
                             onMapLocalFromUrl = onMapLocalFromUrl,
                         )
                         RowDivider()
@@ -278,9 +279,10 @@ private fun TrafficRow(
     bookmarks: List<String>,
     onAddBookmark: (String) -> Unit,
     onRemoveBookmark: (String) -> Unit,
-    unlockedHosts: List<String>,
-    onUnlockHost: (String) -> Unit,
-    onLockHost: (String) -> Unit,
+    allowHosts: List<String>,
+    blockHosts: List<String>,
+    onToggleAllowHost: (String) -> Unit,
+    onToggleBlockHost: (String) -> Unit,
     onMapLocalFromUrl: (String, String, List<Header>, ByteArray?) -> Unit,
 ) {
     val exchange = entry.exchange
@@ -292,16 +294,17 @@ private fun TrafficRow(
     val kind = statusKind(code, hasError)
 
     // Right-click offers bookmarking this row's host (a tick once saved; the slot is reserved when not,
-    // so the label never shifts as it toggles), unlocking/locking body capture for the host, and mapping
-    // its URL to a local file. The Unlock tick tracks allowlist *coverage* (isHostUnlocked, wildcard-aware),
-    // so a subdomain reads as unlocked under a `*.example.com` entry — but locking removes only an exact
-    // entry, so a host covered solely by a wildcard stays unlocked (we never silently drop the wildcard).
-    // A row with no parseable host skips the bookmark/unlock entries; one with no URL skips Map Local — an
-    // all-empty list is a plain passthrough (no menu).
+    // so the label never shifts as it toggles), adding/removing the host in the capture filter's allow or
+    // block list, and mapping its URL to a local file. The Allowlist/Blocklist ticks track *exact*
+    // membership (so a subdomain isn't shown as listed under a `*.example.com` entry, and toggling removes
+    // only the exact host it added — a wildcard entry is never silently dropped); arming each list stays a
+    // deliberate switch in the capture-filter panel. A row with no parseable host skips the bookmark/filter
+    // entries; one with no URL skips Map Local — an all-empty list is a plain passthrough (no menu).
     val url = request?.url ?: ""
     val host = remember(url) { requestHost(url) }
     val bookmarked = host in bookmarks
-    val unlocked = remember(unlockedHosts, host) { isHostUnlocked(unlockedHosts, host) }
+    val allowed = host in allowHosts
+    val blocked = host in blockHosts
     val actions = buildList {
         if (host.isNotEmpty()) {
             add(
@@ -309,11 +312,8 @@ private fun TrafficRow(
                     if (bookmarked) onRemoveBookmark(host) else onAddBookmark(host)
                 },
             )
-            add(
-                ContextMenuAction("Unlock", checked = unlocked) {
-                    if (unlocked) onLockHost(host) else onUnlockHost(host)
-                },
-            )
+            add(ContextMenuAction("Allowlist", checked = allowed) { onToggleAllowHost(host) })
+            add(ContextMenuAction("Blocklist", checked = blocked) { onToggleBlockHost(host) })
         }
         if (url.isNotEmpty()) {
             // Seed a new rule from this row: the exact URL and method, this response's captured headers,

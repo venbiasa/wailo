@@ -178,9 +178,9 @@ final class WailoClient: NSObject, CaptureSink, WailoBodyFetcher, WailoBreakpoin
         case let .rule_set(ruleSet)?:
             WailoRuleStore.shared.replace(ruleSet.rules)
             sendControl(Envelope { $0.message = .rule_ack(RuleAck(epoch: ruleSet.epoch)) })
-        case let .capture_allowlist(list)?:
-            WailoCaptureConfigStore.shared.replace(list.host_patterns)
-            sendControl(Envelope { $0.message = .capture_allowlist_ack(CaptureAllowlistAck(epoch: list.epoch)) })
+        case let .capture_filter(filter)?:
+            WailoCaptureFilterStore.shared.replace(filter)
+            sendControl(Envelope { $0.message = .capture_filter_ack(CaptureFilterAck(epoch: filter.epoch)) })
         case let .body_response(response)?:
             resolvePending(response)
         case let .breakpoint_rules(rules)?:
@@ -193,13 +193,14 @@ final class WailoClient: NSObject, CaptureSink, WailoBodyFetcher, WailoBreakpoin
         }
     }
 
-    /// Drop the cached desktop snapshots (Map Local rules + capture allowlist). The desktop is the
-    /// source of truth for both, so once the connection is gone there is no authority for them: matching
-    /// falls back to pass-through and body capture falls back to metadata-only until a reconnect
-    /// re-pushes the current set. Idempotent — every failed reconnect lands here.
+    /// Drop the cached desktop snapshots (Map Local rules + capture filter + breakpoint rules). The
+    /// desktop is the source of truth for all of them, so once the connection is gone there is no
+    /// authority: Map Local matching falls back to pass-through and the capture filter falls back to
+    /// capture-everything until a reconnect re-pushes the current set. Idempotent — every failed
+    /// reconnect lands here.
     private func dropCachedRules() {
         WailoRuleStore.shared.replace([])
-        WailoCaptureConfigStore.shared.replace([])
+        WailoCaptureFilterStore.shared.reset()
         WailoBreakpointStore.shared.replace([])
     }
 

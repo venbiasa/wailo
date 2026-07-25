@@ -14,10 +14,10 @@ message HttpExchange {
   string error = 6;
   // True when a Map Local (or future rewrite) rule produced this response instead of the network.
   bool edited = 7;
-  // True when the device captured metadata only and omitted the request/response bodies because the
-  // host is not on the CaptureAllowlist. Lets the desktop show "unlock to capture" rather than "no
-  // body". The bodies are gated together (per host), so one flag covers the whole exchange.
-  bool bodies_omitted = 8;
+  // 8 was bodies_omitted, from the per-host body-gating model. The CaptureFilter now decides whether the
+  // whole exchange is captured at all (ADR-0029), so an exchange is always captured in full — there is no
+  // partial/metadata-only capture and thus no per-exchange flag. Reserved so the tag is never reused.
+  reserved 8;
 }
 
 message HttpRequest {
@@ -75,19 +75,26 @@ message RuleAck {
   uint64 epoch = 1;
 }
 
-// Which hosts have their request/response BODIES captured. Metadata (method, url, status, headers,
-// sizes) is always captured; only body bytes are gated by this list, so memory is bounded to the few
-// hosts the user has "unlocked". Pushed desktop -> device like RuleSet: a full snapshot each time,
-// versioned by [epoch] with a CaptureAllowlistAck so a lost push self-repairs (anti-entropy). An
-// empty list means capture no bodies (the default until a host is unlocked).
-message CaptureAllowlist {
-  // Wildcard match against the request host (not the full URL); `*` matches any run of characters.
-  repeated string host_patterns = 1;
-  uint64 epoch = 2;
+// Which hosts a device captures and streams to the desktop (ADR-0029). Two independent lists the desktop
+// pushes as one snapshot: with [allowlist_enabled] a host is captured only if it matches one of
+// [allow_patterns]; with [blocklist_enabled] a host that matches one of [block_patterns] is never
+// captured; with both on a host must match the allowlist AND not the blocklist. With both off (the
+// default) every host is captured. The gate is whole-exchange: a matching exchange is captured in full
+// and a filtered one is dropped at the source — bodies are never partially omitted. Pushed desktop ->
+// device like RuleSet: a full snapshot each time, versioned by [epoch] with a CaptureFilterAck so a lost
+// push self-repairs (anti-entropy). Patterns match the request host (not the full URL); `*` matches any
+// run of characters. An enabled list with no patterns is inert (matches nothing), so it can't silently
+// drop or admit everything.
+message CaptureFilter {
+  bool allowlist_enabled = 1;
+  repeated string allow_patterns = 2;
+  bool blocklist_enabled = 3;
+  repeated string block_patterns = 4;
+  uint64 epoch = 5;
 }
 
-// device -> desktop: confirms the device applied the allowlist at [epoch], mirroring RuleAck.
-message CaptureAllowlistAck {
+// device -> desktop: confirms the device applied the capture filter at [epoch], mirroring RuleAck.
+message CaptureFilterAck {
   uint64 epoch = 1;
 }
 

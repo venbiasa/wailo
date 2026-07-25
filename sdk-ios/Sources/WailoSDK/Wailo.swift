@@ -26,8 +26,8 @@ public enum Wailo {
     ///   are captured too. When false, only `URLSession.shared` and sessions passed to
     ///   `Wailo.instrument(_:)` are captured.
     /// - Parameter maxBodyBytes: optional cap on captured body bytes. nil (the default) captures the
-    ///   full body for unlocked hosts. Body capture is gated per host by the desktop's CaptureAllowlist,
-    ///   so memory is bounded by which hosts are unlocked rather than by a per-body ceiling.
+    ///   full body. Whether a host is captured at all is decided by the desktop's CaptureFilter
+    ///   (ADR-0029), so memory is bounded by which hosts pass the filter rather than by a per-body ceiling.
     public static func start(
         appId: String = Bundle.main.bundleIdentifier ?? "unknown",
         deviceName: String = defaultDeviceName(),

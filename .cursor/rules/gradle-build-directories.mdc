@@ -80,5 +80,4 @@ ruling these out — two distinct failure modes, both observed:
    or run with `required_permissions: ["all"]` and expect a slow cold compile — don't keep retrying the
    default sandboxed path, it will just keep hitting the `xargs`/download failure above.
 
-Prefer the `rgradlew` skill's remote path only for the SDK/Android build; the studio
-build needs `wailo-protocol` in local Maven, so build it locally from `studio/`.
+The studio build needs `wailo-protocol` in local Maven, so build it locally from `studio/`.

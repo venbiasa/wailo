@@ -8,7 +8,7 @@ import com.venbiasa.wailo.protocol.BreakpointHit
 import com.venbiasa.wailo.protocol.BreakpointPhase
 import com.venbiasa.wailo.protocol.BreakpointRule
 import com.venbiasa.wailo.protocol.BreakpointRules
-import com.venbiasa.wailo.protocol.CaptureAllowlist
+import com.venbiasa.wailo.protocol.CaptureFilter
 import com.venbiasa.wailo.protocol.Envelope
 import com.venbiasa.wailo.protocol.Header
 import com.venbiasa.wailo.protocol.Hello
@@ -114,14 +114,15 @@ class WailoEngine(
     /** The active Map Local rules (match-metadata only) currently pushed to devices. Frontends observe this. */
     val rules: StateFlow<RuleSet> = _rules.asStateFlow()
 
-    private val _allowlist = MutableStateFlow(CaptureAllowlist())
+    private val _captureFilter = MutableStateFlow(CaptureFilter())
 
     /**
-     * Hosts whose request/response bodies devices capture. Metadata is always captured; this gates only
-     * body bytes (Proxyman-style "unlock"), so memory stays bounded to the unlocked hosts. Pushed to
-     * devices like [rules]; frontends observe this. Empty means capture no bodies (the default).
+     * The capture filter (allow/block host lists) currently pushed to devices. Devices decide per request
+     * whether to capture and stream the whole exchange (ADR-0029); the engine only relays the config and
+     * records whatever it receives, so it never re-filters here. Frontends observe this. Both lists off
+     * (the default) means capture everything.
      */
-    val allowlist: StateFlow<CaptureAllowlist> = _allowlist.asStateFlow()
+    val captureFilter: StateFlow<CaptureFilter> = _captureFilter.asStateFlow()
 
     private val _breakpointRules = MutableStateFlow(BreakpointRules())
 
@@ -149,8 +150,8 @@ class WailoEngine(
     // ack-matching/retry, never to gate the device's apply, so a restart resetting it is harmless.
     private val epochCounter = AtomicLong(0)
 
-    // Separate monotonic version for the capture allowlist, acked independently of the rule epoch.
-    private val allowlistEpochCounter = AtomicLong(0)
+    // Separate monotonic version for the capture filter, acked independently of the rule epoch.
+    private val captureFilterEpochCounter = AtomicLong(0)
 
     // Separate monotonic version for the breakpoint rules, acked independently of the others.
     private val breakpointEpochCounter = AtomicLong(0)
@@ -173,7 +174,7 @@ class WailoEngine(
     /** Per-connection sync state: the highest snapshot epoch this device has acknowledged applying. */
     private class SessionState {
         val ackedEpoch = AtomicLong(-1)
-        val ackedAllowlistEpoch = AtomicLong(-1)
+        val ackedFilterEpoch = AtomicLong(-1)
         val ackedBreakpointEpoch = AtomicLong(-1)
     }
 
@@ -190,9 +191,9 @@ class WailoEngine(
                     val reconciler = launch { reconcile(this@webSocket, state) }
                     try {
                         // Sync the freshly connected (or reconnected) device with the current rules,
-                        // capture allowlist, and breakpoint rules.
+                        // capture filter, and breakpoint rules.
                         pushRules(this)
-                        pushAllowlist(this)
+                        pushCaptureFilter(this)
                         pushBreakpointRules(this)
                         var hello: Hello? = null
                         for (frame in incoming) {
@@ -203,8 +204,8 @@ class WailoEngine(
                             envelope.rule_ack?.let { ack ->
                                 state.ackedEpoch.updateAndGet { cur -> maxOf(cur, ack.epoch) }
                             }
-                            envelope.capture_allowlist_ack?.let { ack ->
-                                state.ackedAllowlistEpoch.updateAndGet { cur -> maxOf(cur, ack.epoch) }
+                            envelope.capture_filter_ack?.let { ack ->
+                                state.ackedFilterEpoch.updateAndGet { cur -> maxOf(cur, ack.epoch) }
                             }
                             envelope.breakpoint_rules_ack?.let { ack ->
                                 state.ackedBreakpointEpoch.updateAndGet { cur -> maxOf(cur, ack.epoch) }
@@ -259,20 +260,32 @@ class WailoEngine(
     }
 
     /**
-     * Replace the set of hosts whose bodies devices capture and push the new snapshot to every device.
-     * Stamps a fresh [CaptureAllowlist.epoch] so devices can ack it and the reconciler can detect a lost
-     * push. Metadata is always captured regardless; this gates only body bytes (Proxyman-style "unlock").
+     * Replace the capture filter (allow/block host lists + their enabled flags) and push the new snapshot
+     * to every device. Stamps a fresh [CaptureFilter.epoch] so devices can ack it and the reconciler can
+     * detect a lost push. Devices apply the gate per request and drop whole exchanges that don't pass
+     * (ADR-0029); the engine keeps recording whatever it still receives.
      */
-    fun updateAllowlist(hostPatterns: List<String>) {
-        _allowlist.value = CaptureAllowlist(host_patterns = hostPatterns, epoch = allowlistEpochCounter.incrementAndGet())
-        scope.launch { sessions.keys.forEach { pushAllowlist(it) } }
+    fun updateCaptureFilter(
+        allowlistEnabled: Boolean,
+        allowPatterns: List<String>,
+        blocklistEnabled: Boolean,
+        blockPatterns: List<String>,
+    ) {
+        _captureFilter.value = CaptureFilter(
+            allowlist_enabled = allowlistEnabled,
+            allow_patterns = allowPatterns,
+            blocklist_enabled = blocklistEnabled,
+            block_patterns = blockPatterns,
+            epoch = captureFilterEpochCounter.incrementAndGet(),
+        )
+        scope.launch { sessions.keys.forEach { pushCaptureFilter(it) } }
     }
 
-    // Mirrors pushRules: reads _allowlist under the lock at send time so a connect-push racing a
+    // Mirrors pushRules: reads _captureFilter under the lock at send time so a connect-push racing a
     // broadcast still converges on the newest snapshot.
-    private suspend fun pushAllowlist(session: DefaultWebSocketServerSession) {
+    private suspend fun pushCaptureFilter(session: DefaultWebSocketServerSession) {
         sendMutex.withLock {
-            val bytes = Envelope(capture_allowlist = _allowlist.value).encode()
+            val bytes = Envelope(capture_filter = _captureFilter.value).encode()
             runCatching { session.outgoing.send(Frame.Binary(true, bytes)) }
         }
     }
@@ -287,7 +300,7 @@ class WailoEngine(
         scope.launch { sessions.keys.forEach { pushBreakpointRules(it) } }
     }
 
-    // Mirrors pushRules/pushAllowlist: reads _breakpointRules under the lock at send time so a
+    // Mirrors pushRules/pushCaptureFilter: reads _breakpointRules under the lock at send time so a
     // connect-push racing a broadcast still converges on the newest snapshot.
     private suspend fun pushBreakpointRules(session: DefaultWebSocketServerSession) {
         sendMutex.withLock {
@@ -302,7 +315,7 @@ class WailoEngine(
         while (true) {
             delay(ackRetryMs)
             if (state.ackedEpoch.get() < _rules.value.epoch) pushRules(session)
-            if (state.ackedAllowlistEpoch.get() < _allowlist.value.epoch) pushAllowlist(session)
+            if (state.ackedFilterEpoch.get() < _captureFilter.value.epoch) pushCaptureFilter(session)
             if (state.ackedBreakpointEpoch.get() < _breakpointRules.value.epoch) pushBreakpointRules(session)
         }
     }

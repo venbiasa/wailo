@@ -16,14 +16,11 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.Button
-import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -54,37 +51,24 @@ import com.venbiasa.wailo.shared.format.basicAuthDecoded
 import com.venbiasa.wailo.shared.format.bodyContent
 import com.venbiasa.wailo.shared.format.contentType
 import com.venbiasa.wailo.shared.format.formatBytes
-import com.venbiasa.wailo.shared.format.isHostUnlocked
-import com.venbiasa.wailo.shared.format.requestHost
 import com.venbiasa.wailo.shared.format.statusChipText
 import com.venbiasa.wailo.shared.format.statusKind
 import com.venbiasa.wailo.shared.format.urlSegments
-import com.venbiasa.wailo.shared.resources.Res
-import com.venbiasa.wailo.shared.resources.ic_lock
 import com.venbiasa.wailo.shared.theme.LocalWailoColors
 import okio.ByteString
-import org.jetbrains.compose.resources.vectorResource
 
 @Composable
 internal fun DetailPanel(
     entry: FlowEntry,
-    unlockedHosts: List<String>,
-    onUnlockHost: (String) -> Unit,
     modifier: Modifier,
     onClose: () -> Unit,
 ) {
     val exchange = entry.exchange
-    val host = remember(exchange.request?.url) { requestHost(exchange.request?.url ?: "") }
-    val hostUnlocked = remember(unlockedHosts, host) { isHostUnlocked(unlockedHosts, host) }
     Column(modifier.background(MaterialTheme.colorScheme.surfaceContainer)) {
         DetailHeader(exchange, onClose)
         RowDivider()
         RequestResponseSplit(
             exchange = exchange,
-            bodiesOmitted = entry.bodiesOmitted,
-            host = host,
-            hostUnlocked = hostUnlocked,
-            onUnlock = { if (host.isNotEmpty()) onUnlockHost(host) },
             modifier = Modifier.weight(1f).fillMaxWidth(),
         )
     }
@@ -180,10 +164,6 @@ private fun urlAnnotated(url: String): AnnotatedString {
 @Composable
 private fun RequestResponseSplit(
     exchange: HttpExchange,
-    bodiesOmitted: Boolean,
-    host: String,
-    hostUnlocked: Boolean,
-    onUnlock: () -> Unit,
     modifier: Modifier,
 ) {
     val request = exchange.request
@@ -203,10 +183,6 @@ private fun RequestResponseSplit(
                 truncated = request?.body_truncated == true,
                 notice = "No request captured.",
                 showAuth = true,
-                bodiesOmitted = bodiesOmitted,
-                host = host,
-                hostUnlocked = hostUnlocked,
-                onUnlock = onUnlock,
                 modifier = Modifier.weight(leftFraction).fillMaxHeight(),
             )
             PaneResizeHandle { deltaPx ->
@@ -228,10 +204,6 @@ private fun RequestResponseSplit(
                 // Auth is a request-side concern (credentials the client sends); the response only
                 // echoes Set-Cookie/challenge headers, which read fine under Headers.
                 showAuth = false,
-                bodiesOmitted = bodiesOmitted,
-                host = host,
-                hostUnlocked = hostUnlocked,
-                onUnlock = onUnlock,
                 modifier = Modifier.weight(1f - leftFraction).fillMaxHeight(),
             )
         }
@@ -281,10 +253,6 @@ private fun MessagePane(
     truncated: Boolean,
     notice: String,
     showAuth: Boolean,
-    bodiesOmitted: Boolean,
-    host: String,
-    hostUnlocked: Boolean,
-    onUnlock: () -> Unit,
     modifier: Modifier,
 ) {
     Column(modifier) {
@@ -316,11 +284,6 @@ private fun MessagePane(
             // centered image, neither of which can live inside the shared vertical scroll the
             // text-based tabs use.
             when {
-                // Bodies were skipped at the source because the host isn't unlocked, so the Body/Raw
-                // tabs offer to unlock (capture future requests) rather than showing an empty body.
-                bodiesOmitted && (tab == MessageTab.Body || tab == MessageTab.Raw) -> {
-                    BodyOmittedNotice(host, hostUnlocked, onUnlock, Modifier.fillMaxSize())
-                }
                 tab == MessageTab.Body -> {
                     BodyPreview(body, headers.contentType(), declaredSize, truncated, Modifier.fillMaxSize())
                 }
@@ -336,41 +299,6 @@ private fun MessagePane(
                         }
                     }
                 }
-            }
-        }
-    }
-}
-
-// Shown on the Body/Raw tabs when the device captured metadata only (the host wasn't unlocked for body
-// capture). Offers to unlock the host — prospective, so it captures the host's *future* requests, not
-// this one. When the host is already unlocked (unlocked after this request was seen), it just explains
-// that future requests will carry bodies, so the button doesn't dangle with nothing to do.
-@Composable
-private fun BodyOmittedNotice(host: String, hostUnlocked: Boolean, onUnlock: () -> Unit, modifier: Modifier) {
-    Box(modifier.padding(24.dp), contentAlignment = Alignment.Center) {
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            Icon(
-                imageVector = vectorResource(Res.drawable.ic_lock),
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.size(28.dp),
-            )
-            val hostLabel = host.ifEmpty { "this host" }
-            Text(
-                if (hostUnlocked) {
-                    "Body not captured. This request predates unlocking $hostLabel — future requests to it will capture bodies."
-                } else {
-                    "Body not captured — $hostLabel is locked. Unlock it to capture bodies on future requests."
-                },
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                textAlign = TextAlign.Center,
-            )
-            if (!hostUnlocked && host.isNotEmpty()) {
-                Button(onClick = onUnlock) { Text("Unlock $host") }
             }
         }
     }

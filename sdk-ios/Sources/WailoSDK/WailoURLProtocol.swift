@@ -46,7 +46,9 @@ protocol WailoBreakpointGate: AnyObject {
     )
 }
 
-/// A `URLProtocol` that copies every URLSession HTTP(S) exchange into a `CaptureSink`. It normally
+/// A `URLProtocol` that copies each URLSession HTTP(S) exchange into a `CaptureSink` — subject to the
+/// desktop's CaptureFilter, which decides per host whether the whole exchange is captured at all
+/// (ADR-0029); a filtered host is dropped at the source. It normally
 /// leaves the real request/response untouched, but first checks the Map Local match-metadata the
 /// desktop has pushed: on a match it fetches the response from the desktop (never a cached body —
 /// ADR-0019) and answers with it, flagging the exchange `edited`. If that fetch fails for any reason it
@@ -68,9 +70,10 @@ public final class WailoURLProtocol: URLProtocol {
     nonisolated(unsafe) static var sink: CaptureSink?
     nonisolated(unsafe) static var bodyFetcher: WailoBodyFetcher?
     nonisolated(unsafe) static var breakpointGate: WailoBreakpointGate?
-    // Optional cap on captured body bytes; nil (the default) captures the full body. Body capture is
-    // gated per host by the CaptureAllowlist, so memory is bounded by *which* hosts are unlocked rather
-    // than by a per-body ceiling. Larger-than-cap bodies (when a cap is set) are truncated, not dropped.
+    // Optional cap on captured body bytes; nil (the default) captures the full body. The CaptureFilter
+    // decides whole-exchange whether a host is captured at all (ADR-0029), so memory is bounded by
+    // *which* hosts pass the filter rather than by a per-body ceiling. Larger-than-cap bodies (when a cap
+    // is set) are truncated, not dropped.
     nonisolated(unsafe) static var maxBodyBytes: Int? = nil
 
     private lazy var session = URLSession(configuration: .ephemeral)
@@ -112,16 +115,16 @@ public final class WailoURLProtocol: URLProtocol {
         let method = request.httpMethod ?? "GET"
         let urlString = request.url?.absoluteString
 
-        // Drain the request body up front, but only when we'll actually use the bytes: an unlocked host
-        // (whose bodies we capture) or any breakpoint match (which shows the body to the desktop
-        // regardless of the allowlist). URLSession moves httpBody into httpBodyStream before we run, and a
-        // stream can be read only once, so we buffer it here and reuse it for capture and the replay
-        // (proceedToNetwork restores it, since reading now consumes the stream the replay would send). For
-        // a locked host with no breakpoint we skip this, leaving the stream to pass through untouched so
-        // memory stays bounded to the few unlocked hosts.
+        // Drain the request body up front, but only when we'll actually use the bytes: a host the
+        // CaptureFilter admits (whose whole exchange we capture) or any breakpoint match (which shows the
+        // body to the desktop regardless of the filter). URLSession moves httpBody into httpBodyStream
+        // before we run, and a stream can be read only once, so we buffer it here and reuse it for capture
+        // and the replay (proceedToNetwork restores it, since reading now consumes the stream the replay
+        // would send). For a filtered host with no breakpoint we skip this, leaving the stream to pass
+        // through untouched so memory stays bounded to the hosts that pass the filter.
         let breakpointMatch = urlString.flatMap { WailoBreakpointStore.shared.match(url: $0, method: method) }
-        let bodiesAllowed = WailoCaptureConfigStore.shared.isBodyAllowed(host: request.url?.host)
-        if bodiesAllowed || breakpointMatch != nil {
+        let shouldCapture = WailoCaptureFilterStore.shared.shouldCapture(host: request.url?.host)
+        if shouldCapture || breakpointMatch != nil {
             requestBody = WailoURLProtocol.readBody(from: request)
         }
 
@@ -148,7 +151,7 @@ public final class WailoURLProtocol: URLProtocol {
         if let breakpointMatch, let gate = WailoURLProtocol.breakpointGate {
             if breakpointMatch.onResponse { responseBreakpointRuleId = breakpointMatch.ruleId }
             if breakpointMatch.onRequest {
-                gate.pauseRequest(ruleId: breakpointMatch.ruleId, request: captureRequest(bodiesAllowed: true)) { [weak self] decision in
+                gate.pauseRequest(ruleId: breakpointMatch.ruleId, request: captureRequest()) { [weak self] decision in
                     guard let self, !self.stopped else { return }
                     switch decision {
                     case .abort:
@@ -194,7 +197,7 @@ public final class WailoURLProtocol: URLProtocol {
         }
         // Remember what actually went out, to show as context if the response is also broken.
         if responseBreakpointRuleId != nil {
-            breakpointRequestContext = edited ?? captureRequest(bodiesAllowed: true)
+            breakpointRequestContext = edited ?? captureRequest()
         }
         WailoURLProtocol.setProperty(true, forKey: WailoURLProtocol.handledKey, in: replay)
 
@@ -247,8 +250,8 @@ public final class WailoURLProtocol: URLProtocol {
            let gate = WailoURLProtocol.breakpointGate,
            let http = response as? HTTPURLResponse {
             responseBreakpointRuleId = nil
-            let current = captureResponse(http, body: data, bodiesAllowed: true)
-            let context = breakpointRequestContext ?? captureRequest(bodiesAllowed: true)
+            let current = captureResponse(http, body: data)
+            let context = breakpointRequestContext ?? captureRequest()
             gate.pauseResponse(ruleId: ruleId, request: context, response: current) { [weak self] decision in
                 guard let self, !self.stopped else { return }
                 switch decision {
@@ -301,21 +304,21 @@ public final class WailoURLProtocol: URLProtocol {
 
     private func emit(response: URLResponse?, body: Data?, error: Error?, edited: Bool = false) {
         guard let sink = WailoURLProtocol.sink else { return }
+        // Whole-exchange gate (ADR-0029): the CaptureFilter decides per host whether this exchange is
+        // captured at all. A filtered host is dropped here, at the source — never streamed and never
+        // logged — so there is no partial/metadata-only capture.
+        guard WailoCaptureFilterStore.shared.shouldCapture(host: request.url?.host) else { return }
         let durationMs = Int64((DispatchTime.now().uptimeNanoseconds &- startNanos) / 1_000_000)
-        // Bodies are captured only for hosts the desktop has unlocked (CaptureAllowlist); everything
-        // else records metadata only, flagged bodies_omitted so the desktop can offer to unlock.
-        let bodiesAllowed = WailoCaptureConfigStore.shared.isBodyAllowed(host: request.url?.host)
-        let capturedRequest = captureRequest(bodiesAllowed: bodiesAllowed)
+        let capturedRequest = captureRequest()
         let httpResponse = response as? HTTPURLResponse
-        let capturedResponse = httpResponse.map { captureResponse($0, body: body, bodiesAllowed: bodiesAllowed) }
+        let capturedResponse = httpResponse.map { captureResponse($0, body: body) }
 
         let exchange = HttpExchange(
             id: UUID().uuidString,
             started_at_epoch_ms: startedAtEpochMs,
             duration_ms: durationMs,
             error: error.map { ($0 as NSError).localizedDescription } ?? "",
-            edited: edited,
-            bodies_omitted: !bodiesAllowed
+            edited: edited
         ) {
             $0.request = capturedRequest
             $0.response = capturedResponse
@@ -323,18 +326,18 @@ public final class WailoURLProtocol: URLProtocol {
         sink.onExchange(exchange)
     }
 
-    private func captureRequest(bodiesAllowed: Bool) -> HttpRequest {
+    private func captureRequest() -> HttpRequest {
         // Read from the buffer drained in startLoading, not request.httpBody: URLSession moves the body
         // into httpBodyStream before we run, leaving request.httpBody nil for most bodies.
         let full = requestBody ?? Data()
-        let (captured, truncated) = WailoURLProtocol.capturedBody(full, allowed: bodiesAllowed)
+        let (captured, truncated) = WailoURLProtocol.capturedBody(full)
         let headers = (request.allHTTPHeaderFields ?? [:]).map { Header(name: $0.key, value: $0.value) }
         return HttpRequest(
             method: request.httpMethod ?? "GET",
             url: request.url?.absoluteString ?? "",
             body: captured,
-            // Keep the declared size even when bodies are omitted (a locked host, whose bytes we don't
-            // buffer), so the size column stays meaningful — fall back to the header/httpBody length.
+            // Fall back to the declared size when we didn't buffer the body (e.g. a breakpoint context
+            // built before the body was drained), so the size column stays meaningful.
             body_size: requestBody.map { Int64($0.count) } ?? declaredRequestBodySize(),
             body_truncated: truncated
         ) {
@@ -343,8 +346,7 @@ public final class WailoURLProtocol: URLProtocol {
     }
 
     /// The request body's declared size without draining the stream: the httpBody length when present,
-    /// else the Content-Length header. Used for the size column on a locked host, whose bytes we don't
-    /// buffer (so `requestBody` is nil) but whose size should still show.
+    /// else the Content-Length header. Used for the size column when `requestBody` wasn't buffered.
     private func declaredRequestBodySize() -> Int64 {
         if let body = request.httpBody { return Int64(body.count) }
         if let value = request.value(forHTTPHeaderField: "Content-Length"), let size = Int64(value) {
@@ -353,10 +355,10 @@ public final class WailoURLProtocol: URLProtocol {
         return 0
     }
 
-    private func captureResponse(_ response: HTTPURLResponse, body: Data?, bodiesAllowed: Bool) -> HttpResponse {
+    private func captureResponse(_ response: HTTPURLResponse, body: Data?) -> HttpResponse {
         let declaredSize = response.expectedContentLength // -1 when unknown
         let full = body ?? Data()
-        let (captured, truncated) = WailoURLProtocol.capturedBody(full, allowed: bodiesAllowed)
+        let (captured, truncated) = WailoURLProtocol.capturedBody(full)
         let headers = response.allHeaderFields.map { Header(name: "\($0.key)", value: "\($0.value)") }
         return HttpResponse(
             code: Int32(response.statusCode),
@@ -392,12 +394,12 @@ public final class WailoURLProtocol: URLProtocol {
         return data
     }
 
-    /// The body bytes to capture: nothing (metadata only) when the host isn't unlocked; otherwise the
-    /// full body, truncated only if a `maxBodyBytes` cap is set (nil = unlimited, the default). Returns
-    /// the captured bytes and whether they were truncated. Static + internal so the gating is unit
-    /// testable without driving a full URLProtocol/network flow; [cap] defaults to the current cap.
-    static func capturedBody(_ full: Data, allowed: Bool, cap: Int? = maxBodyBytes) -> (Data, Bool) {
-        guard allowed else { return (Data(), false) }
+    /// The body bytes to capture: the full body, truncated only if a `maxBodyBytes` cap is set (nil =
+    /// unlimited, the default). Returns the captured bytes and whether they were truncated. Whether the
+    /// exchange is captured at all is decided per host by the CaptureFilter in `emit` (ADR-0029); by the
+    /// time we get here the host has passed, so the only question left is the size cap. Static + internal
+    /// so it's unit testable without driving a full URLProtocol/network flow; [cap] defaults to the cap.
+    static func capturedBody(_ full: Data, cap: Int? = maxBodyBytes) -> (Data, Bool) {
         guard let cap, full.count > cap else { return (full, false) }
         return (Data(full.prefix(cap)), true)
     }
