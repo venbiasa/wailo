@@ -4,6 +4,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -103,13 +105,33 @@ internal fun monoSmall(): TextStyle =
 internal fun monoLabel(): TextStyle =
     MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace)
 
-// A monospaced key/value line: fixed-width key gutter, value takes the rest. Shared by the detail
-// panel's header/auth views and the form-body previewer.
+// A monospaced key/value line, sized to the row it's given. Shared by the detail panel's header/auth
+// views and the form-body previewer — all of which sit in a pane the user can drag narrow, so the key
+// gutter can't be fixed: a squeezed pane would leave the value no room. Above a floor the key keeps a
+// tabular gutter (capped so keys align across rows) that shrinks with the row; below it the pair stacks
+// so both stay readable rather than each wrapping in a sliver.
 @Composable
 internal fun KeyValueRow(key: String, value: String) {
-    Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-        Text(key, Modifier.width(200.dp), style = monoLabel(), color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Text(value, Modifier.weight(1f), style = monoSmall(), color = MaterialTheme.colorScheme.onSurface)
+    BoxWithConstraints(Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
+        // Read the width here: inside the Row/Column below, their layout scope shadows
+        // BoxWithConstraintsScope (same DSL marker), so maxWidth isn't an implicit receiver there.
+        val rowWidth = maxWidth
+        if (rowWidth < 200.dp) {
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(key, style = monoLabel(), color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(value, style = monoSmall(), color = MaterialTheme.colorScheme.onSurface)
+            }
+        } else {
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text(
+                    key,
+                    Modifier.width(minOf(200.dp, rowWidth * 0.4f)),
+                    style = monoLabel(),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(value, Modifier.weight(1f), style = monoSmall(), color = MaterialTheme.colorScheme.onSurface)
+            }
+        }
     }
 }
 

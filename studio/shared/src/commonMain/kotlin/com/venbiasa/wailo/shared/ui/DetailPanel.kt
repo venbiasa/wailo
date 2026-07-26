@@ -1,6 +1,7 @@
 package com.venbiasa.wailo.shared.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.draggable
 import androidx.compose.foundation.gestures.rememberDraggableState
@@ -19,6 +20,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
@@ -74,6 +76,10 @@ internal fun DetailPanel(
     }
 }
 
+// Below this the header can't keep a readable URL beside the status/method chips, so the URL drops to
+// its own full-width line under a compact chip+close row instead of being squeezed into a thin ribbon.
+private val HeaderStackWidth = 440.dp
+
 @Composable
 private fun DetailHeader(exchange: HttpExchange, onClose: () -> Unit) {
     val request = exchange.request
@@ -86,37 +92,66 @@ private fun DetailHeader(exchange: HttpExchange, onClose: () -> Unit) {
     // hue is lighter and low alpha would wash out. onSurface luminance stands in for "is dark theme".
     val dark = MaterialTheme.colorScheme.surface.luminance() < 0.5f
 
-    // Top-aligned so the status/method chips stay beside the URL's first line when a long URL wraps,
-    // rather than floating in the vertical center of a tall multi-line block.
-    Row(
-        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-        verticalAlignment = Alignment.Top,
-    ) {
+    // The three pieces, defined once so the wide (inline) and narrow (stacked) headers place identical
+    // chips and URL.
+    val statusPill: @Composable () -> Unit = {
         Pill(
             text = statusChipText(response?.code, response?.message ?: "", hasError),
             container = status.copy(alpha = if (dark) 0.22f else 0.14f),
             content = status,
             textStyle = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
         )
-        // Same pill, neutral: a faint ink tint so it reads as a chip on the panel without a hue.
+    }
+    // Same pill, neutral: a faint ink tint so it reads as a chip on the panel without a hue.
+    val methodPill: @Composable () -> Unit = {
         Pill(
             text = method.uppercase(),
             container = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f),
             content = MaterialTheme.colorScheme.onSurfaceVariant,
             textStyle = MaterialTheme.typography.labelMedium.copy(fontFamily = FontFamily.Monospace),
         )
-        val url = request?.url
-        // The chips carry 4.dp of vertical padding, so the same top inset drops the URL's first line
-        // onto the chips' text; the full address then wraps across as many lines as it needs.
-        SelectionContainer(Modifier.weight(1f).padding(top = 4.dp)) {
+    }
+    val url = request?.url
+    val urlText: @Composable (Modifier) -> Unit = { urlModifier ->
+        SelectionContainer(urlModifier) {
             Text(
                 if (url.isNullOrBlank()) AnnotatedString("(no URL)") else urlAnnotated(url),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
-        CloseButton(onClose, contentDescription = "Close detail")
+    }
+
+    BoxWithConstraints(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp)) {
+        if (maxWidth < HeaderStackWidth) {
+            Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    statusPill()
+                    methodPill()
+                    Spacer(Modifier.weight(1f))
+                    CloseButton(onClose, contentDescription = "Close detail")
+                }
+                urlText(Modifier.fillMaxWidth())
+            }
+        } else {
+            // Top-aligned so the chips stay beside the URL's first line when a long URL wraps, rather
+            // than floating in the vertical center of a tall multi-line block. The chips carry 4.dp of
+            // vertical padding, so the same top inset drops the URL's first line onto the chips' text.
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.Top,
+            ) {
+                statusPill()
+                methodPill()
+                urlText(Modifier.weight(1f).padding(top = 4.dp))
+                CloseButton(onClose, contentDescription = "Close detail")
+            }
+        }
     }
 }
 
@@ -157,9 +192,11 @@ private fun urlAnnotated(url: String): AnnotatedString {
 }
 
 /**
- * Request on the left, response on the right, divided by a draggable handle. The split is stored as a
- * fraction so it survives window resizes and stays put while stepping through rows; each side keeps
- * its own tab selection.
+ * The request and response, laid out to fit the width. Wide enough, they sit side by side divided by a
+ * draggable handle (the split is stored as a fraction so it survives window resizes and stays put while
+ * stepping through rows); once the panel is dragged too narrow for two readable columns, they collapse
+ * to a single pane at a time behind a Request/Response toggle so each keeps the full width. Both the
+ * split fraction and the toggle choice live across that switch, so widening back restores the drag.
  */
 @Composable
 private fun RequestResponseSplit(
@@ -169,43 +206,125 @@ private fun RequestResponseSplit(
     val request = exchange.request
     val response = exchange.response
     val method = request?.method?.ifEmpty { "?" } ?: "?"
+
+    // Defined once and placed by whichever layout fits, so the side-by-side and the narrow single-pane
+    // views can never drift apart in what they show.
+    val requestPane: @Composable (Modifier) -> Unit = { paneModifier ->
+        MessagePane(
+            caption = "Request",
+            present = request != null,
+            startLine = "$method ${request?.url ?: ""}".trim(),
+            headers = request?.headers ?: emptyList(),
+            body = request?.body ?: ByteString.EMPTY,
+            declaredSize = request?.body_size ?: 0L,
+            truncated = request?.body_truncated == true,
+            notice = "No request captured.",
+            showAuth = true,
+            modifier = paneModifier,
+        )
+    }
+    val responsePane: @Composable (Modifier) -> Unit = { paneModifier ->
+        MessagePane(
+            caption = "Response",
+            present = response != null,
+            startLine = responseStartLine(response?.code, response?.message ?: ""),
+            headers = response?.headers ?: emptyList(),
+            body = response?.body ?: ByteString.EMPTY,
+            declaredSize = response?.body_size ?: 0L,
+            truncated = response?.body_truncated == true,
+            notice = if (exchange.error.isNotEmpty()) {
+                "Request failed before a response: ${exchange.error}"
+            } else {
+                "No response captured yet."
+            },
+            // Auth is a request-side concern (credentials the client sends); the response only
+            // echoes Set-Cookie/challenge headers, which read fine under Headers.
+            showAuth = false,
+            modifier = paneModifier,
+        )
+    }
+
+    // Held above the width switch so a dragged split and the Request/Response choice both survive
+    // crossing the breakpoint (and stepping through rows).
+    var leftFraction by remember { mutableStateOf(0.5f) }
+    var side by remember { mutableStateOf(DetailSide.Response) }
     BoxWithConstraints(modifier) {
-        val totalPx = constraints.maxWidth.toFloat()
-        var leftFraction by remember { mutableStateOf(0.5f) }
-        Row(Modifier.fillMaxSize()) {
-            MessagePane(
-                caption = "Request",
-                present = request != null,
-                startLine = "$method ${request?.url ?: ""}".trim(),
-                headers = request?.headers ?: emptyList(),
-                body = request?.body ?: ByteString.EMPTY,
-                declaredSize = request?.body_size ?: 0L,
-                truncated = request?.body_truncated == true,
-                notice = "No request captured.",
-                showAuth = true,
-                modifier = Modifier.weight(leftFraction).fillMaxHeight(),
-            )
-            PaneResizeHandle { deltaPx ->
-                if (totalPx > 0f) leftFraction = (leftFraction + deltaPx / totalPx).coerceIn(0.2f, 0.8f)
+        if (maxWidth < SideBySideMinWidth) {
+            Column(Modifier.fillMaxSize()) {
+                RequestResponseToggle(
+                    selected = side,
+                    onSelect = { side = it },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Box(Modifier.weight(1f).fillMaxWidth()) {
+                    when (side) {
+                        DetailSide.Request -> requestPane(Modifier.fillMaxSize())
+                        DetailSide.Response -> responsePane(Modifier.fillMaxSize())
+                    }
+                }
             }
-            MessagePane(
-                caption = "Response",
-                present = response != null,
-                startLine = responseStartLine(response?.code, response?.message ?: ""),
-                headers = response?.headers ?: emptyList(),
-                body = response?.body ?: ByteString.EMPTY,
-                declaredSize = response?.body_size ?: 0L,
-                truncated = response?.body_truncated == true,
-                notice = if (exchange.error.isNotEmpty()) {
-                    "Request failed before a response: ${exchange.error}"
-                } else {
-                    "No response captured yet."
-                },
-                // Auth is a request-side concern (credentials the client sends); the response only
-                // echoes Set-Cookie/challenge headers, which read fine under Headers.
-                showAuth = false,
-                modifier = Modifier.weight(1f - leftFraction).fillMaxHeight(),
-            )
+        } else {
+            val totalPx = constraints.maxWidth.toFloat()
+            Row(Modifier.fillMaxSize()) {
+                requestPane(Modifier.weight(leftFraction).fillMaxHeight())
+                PaneResizeHandle { deltaPx ->
+                    if (totalPx > 0f) leftFraction = (leftFraction + deltaPx / totalPx).coerceIn(0.2f, 0.8f)
+                }
+                responsePane(Modifier.weight(1f - leftFraction).fillMaxHeight())
+            }
+        }
+    }
+}
+
+// Below this the two panes would each be a squeezed sliver, so the split collapses to one toggled pane.
+// Sized so each side-by-side pane stays wide enough for its tabs and a readable key/value column.
+private val SideBySideMinWidth = 520.dp
+
+private enum class DetailSide(val label: String) {
+    Request("Request"),
+    Response("Response"),
+}
+
+// The narrow-layout switch between the request and response panes: a full-width segmented control
+// styled like the body previewer's switch (BodyPreview), so the app's toggles read consistently — and
+// deliberately distinct from the UnderlineTabs below it, which pick the view *within* a pane.
+@Composable
+private fun RequestResponseToggle(
+    selected: DetailSide,
+    onSelect: (DetailSide) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier
+            .padding(horizontal = 16.dp, vertical = 8.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .background(MaterialTheme.colorScheme.surfaceVariant)
+            .padding(2.dp),
+        horizontalArrangement = Arrangement.spacedBy(2.dp),
+    ) {
+        DetailSide.entries.forEach { detailSide ->
+            val isSelected = detailSide == selected
+            Box(
+                Modifier
+                    .weight(1f)
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(if (isSelected) MaterialTheme.colorScheme.surface else Color.Transparent)
+                    .clickable { onSelect(detailSide) }
+                    .padding(vertical = 6.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    detailSide.label,
+                    style = MaterialTheme.typography.labelMedium.copy(
+                        fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Medium,
+                    ),
+                    color = if (isSelected) {
+                        MaterialTheme.colorScheme.onSurface
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                )
+            }
         }
     }
 }
