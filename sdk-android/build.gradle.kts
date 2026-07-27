@@ -68,4 +68,7 @@ dependencies {
     testImplementation(libs.ktor.server.core)
     testImplementation(libs.ktor.server.cio)
     testImplementation(libs.ktor.server.websockets)
+    // OkHttp is compileOnly for the SDK (the host provides it); the interceptor tests need it on the
+    // test classpath to build Request/Response and a fake Chain.
+    testImplementation(libs.okhttp)
 }
