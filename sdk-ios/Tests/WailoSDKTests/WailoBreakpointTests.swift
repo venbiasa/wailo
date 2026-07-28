@@ -4,9 +4,10 @@ import WailoProtocol
 @testable import WailoSDK
 
 /// Device-side breakpoints (ADR-0027): the `WailoBreakpointStore` match rules, and the interceptor's
-/// request-phase behavior driven by a stubbed gate — abort fails the call, a proceed(nil) fails open to
-/// the real network, and a Map Local match takes precedence so a breakpoint never fires on it. The
-/// connected round-trip (hit -> decision) and disconnect fail-open live in the loopback test.
+/// request/response-phase behavior driven by a stubbed gate — abort fails the call, a proceed(nil) fails
+/// open to the real network, and a breakpoint *owns* an exchange that also matches Map Local, with the Map
+/// Local value becoming the response it shows (precedence v3, ADR-0033). The connected round-trip
+/// (hit -> decision) and disconnect fail-open live in the loopback test.
 final class WailoBreakpointTests: XCTestCase {
 
     override func tearDown() {
@@ -95,9 +96,10 @@ final class WailoBreakpointTests: XCTestCase {
         XCTAssertNotNil(error, "an unresolvable host must surface a network error, proving fail-open")
     }
 
-    func testMapLocalTakesPrecedenceOverBreakpoint() {
-        // A URL that matches both a Map Local rule and a breakpoint rule must be served by Map Local
-        // and never handed to the gate (ADR-0027 precedence v1).
+    func testBreakpointOwnsExchangeAndMapLocalSuppliesResponse() {
+        // Precedence v3 (ADR-0033): a URL matching both a Map Local rule and a breakpoint is *owned* by the
+        // breakpoint — both phases fire — and the Map Local value becomes the response the response phase
+        // pauses on (no network call). Resuming unchanged delivers that mock.
         WailoRuleStore.shared.replace([
             MapLocalRule(id: "ml", enabled: true, url_pattern: "https://both.test/*") { $0.methods = [] },
         ])
@@ -109,7 +111,7 @@ final class WailoBreakpointTests: XCTestCase {
             headers: [Header(name: "Content-Type", value: "text/plain")],
             body: Data("mapped".utf8)
         ))
-        let gate = StubBreakpointGate(requestDecision: .abort)
+        let gate = StubBreakpointGate(requestDecision: .proceed(nil), responseDecision: .proceed(nil))
         WailoURLProtocol.breakpointGate = gate
         WailoURLProtocol.sink = CapturingSink()
 
@@ -118,8 +120,69 @@ final class WailoBreakpointTests: XCTestCase {
         XCTAssertNil(error)
         XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
         XCTAssertEqual(data.map { String(decoding: $0, as: UTF8.self) }, "mapped")
-        XCTAssertTrue(gate.requestPauses.isEmpty, "a Map Local match must not be broken")
-        XCTAssertTrue(gate.responsePauses.isEmpty, "a Map Local match must not be broken")
+        XCTAssertEqual(gate.requestPauses.count, 1, "the breakpoint owns the exchange: the request phase fires")
+        XCTAssertEqual(gate.responsePauses.count, 1, "the response phase fires on the Map Local value")
+        XCTAssertEqual(
+            gate.responsePauses.first?.response.body,
+            Data("mapped".utf8),
+            "the Map Local value must be the response the breakpoint shows"
+        )
+    }
+
+    func testBreakpointResponsePhaseShowsMapLocalValue() {
+        // Precedence v3 (ADR-0033), the user's case: a response-phase breakpoint on a URL that also matches a
+        // Map Local rule pauses on the Map Local value (no network), and resuming unchanged delivers it.
+        WailoRuleStore.shared.replace([
+            MapLocalRule(id: "ml", enabled: true, url_pattern: "https://both.test/*") { $0.methods = [] },
+        ])
+        WailoBreakpointStore.shared.replace([
+            BreakpointRule(id: "bp", enabled: true, url_pattern: "https://both.test/*", on_request: false, on_response: true),
+        ])
+        WailoURLProtocol.bodyFetcher = StubFetcher(response: WailoMappedResponse(
+            code: 200,
+            headers: [Header(name: "Content-Type", value: "text/plain")],
+            body: Data("mapped".utf8)
+        ))
+        let gate = StubBreakpointGate(responseDecision: .proceed(nil))
+        WailoURLProtocol.breakpointGate = gate
+        WailoURLProtocol.sink = CapturingSink()
+
+        let (data, _, error) = runIntercepted(url: "https://both.test/go")
+
+        XCTAssertNil(error)
+        XCTAssertTrue(gate.requestPauses.isEmpty, "this rule has no request phase")
+        XCTAssertEqual(gate.responsePauses.count, 1)
+        XCTAssertEqual(gate.responsePauses.first?.response.body, Data("mapped".utf8))
+        XCTAssertEqual(data.map { String(decoding: $0, as: UTF8.self) }, "mapped")
+    }
+
+    func testRequestEditThatMatchesMapLocalIsSourcedFromMapLocal() {
+        // Precedence v3 (ADR-0033, subsuming ADR-0032): the original URL matches no Map Local rule, so it
+        // reaches the request breakpoint, which rewrites the URL to one a Map Local rule *does* match. The
+        // response is then sourced from Map Local for the edited request instead of hitting the network.
+        WailoRuleStore.shared.replace([
+            MapLocalRule(id: "ml", enabled: true, url_pattern: "https://mapped.test/*") { $0.methods = [] },
+        ])
+        WailoBreakpointStore.shared.replace([
+            BreakpointRule(id: "bp", enabled: true, url_pattern: "https://origin.test/*", on_request: true, on_response: false),
+        ])
+        WailoURLProtocol.bodyFetcher = StubFetcher(response: WailoMappedResponse(
+            code: 200,
+            headers: [Header(name: "Content-Type", value: "text/plain")],
+            body: Data("mapped".utf8)
+        ))
+        let gate = StubBreakpointGate(requestDecision: .proceed(
+            HttpRequest(method: "GET", url: "https://mapped.test/x", body: Data(), body_size: 0, body_truncated: false)
+        ))
+        WailoURLProtocol.breakpointGate = gate
+        WailoURLProtocol.sink = CapturingSink()
+
+        let (data, response, error) = runIntercepted(url: "https://origin.test/go")
+
+        XCTAssertNil(error, "an edited request sourced from Map Local must not surface a network error")
+        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
+        XCTAssertEqual(data.map { String(decoding: $0, as: UTF8.self) }, "mapped")
+        XCTAssertEqual(gate.requestPauses.count, 1, "the request must have paused and been edited before the re-match")
     }
 
     // Runs one request through a session that forces `WailoURLProtocol`, returning its result.

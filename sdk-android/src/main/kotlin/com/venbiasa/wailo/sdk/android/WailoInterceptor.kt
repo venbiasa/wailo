@@ -4,6 +4,7 @@ import com.venbiasa.wailo.protocol.Header
 import com.venbiasa.wailo.protocol.HttpExchange
 import com.venbiasa.wailo.protocol.HttpRequest
 import com.venbiasa.wailo.protocol.HttpResponse
+import com.venbiasa.wailo.protocol.MapLocalRule
 import okhttp3.Headers
 import okhttp3.Interceptor
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
@@ -29,11 +30,15 @@ import java.util.UUID
  * — a Map Local body fetch with a timeout, a breakpoint hold indefinitely (a human decides) — and both
  * fail open if the desktop is (or goes) away, so a held call never wedges.
  *
- * Order per request: the capture filter (ADR-0029) decides whether the whole exchange is captured at
- * all; Map Local (ADR-0019) matches locally, fetches the body from the desktop and serves it, taking
- * precedence over breakpoints and never broken (ADR-0027 precedence v1); otherwise, on the real-network
- * path, a breakpoint (ADR-0027) can pause the request before it is sent and/or the response before the
- * app sees it, to edit, abort, or resume it.
+ * Order per request: the capture filter (ADR-0029) decides whether the whole exchange is captured at all.
+ * If no breakpoint matches, Map Local (ADR-0019) serves a matching request locally and short-circuits. If
+ * a breakpoint (ADR-0027) matches, it *owns* the exchange (ADR-0033, superseding ADR-0027/0032): the
+ * request phase can pause before the request is sent (edit/abort/resume); the response is then sourced from
+ * Map Local when a rule matches the outgoing request — that mocked value *becomes* the breakpoint's
+ * response — otherwise from the real network; and the response phase can pause on it before the app sees
+ * it. So Map Local supplies the breakpoint's response rather than bypassing it; only with no breakpoint
+ * does it short-circuit. Any Map Local fetch failure (no authority, timeout, rule gone) falls open to the
+ * network.
  */
 class WailoInterceptor internal constructor(
     private val sink: CaptureSink,
@@ -57,28 +62,26 @@ class WailoInterceptor internal constructor(
             return chain.proceed(request)
         }
 
-        // Map Local takes precedence and is never broken: match locally, fetch the body from the desktop,
-        // and serve it. Any failure (no authority, timeout, rule gone) falls open to the real network.
-        if (mapRule != null) {
-            val mapped = WailoControlChannel.bodyFetcher?.fetchBody(mapRule.id, url, method)
-            if (mapped != null) {
-                if (shouldCapture) {
-                    emit(
-                        startedAtEpochMs, elapsedMs(startNs),
-                        captureRequest(request),
-                        responseModel(mapped.code, "", mapped.headers, mapped.body),
-                        edited = true,
-                    )
-                }
-                return buildResponse(request, mapped.code, "", mapped.headers, mapped.body)
+        // No breakpoint: Map Local (if it matches) serves and short-circuits; otherwise the real network.
+        // When a breakpoint matches it instead *owns* the exchange (below) and Map Local sources the response
+        // it shows rather than short-circuiting (ADR-0033).
+        if (breakpoint == null) {
+            if (mapRule != null) {
+                serveMapLocal(mapRule, request, shouldCapture, startedAtEpochMs, startNs)?.let { return it }
             }
+            val response = proceedToNetwork(chain, request, requestEdited = false, shouldCapture, startedAtEpochMs, startNs)
+            if (shouldCapture) {
+                emit(startedAtEpochMs, elapsedMs(startNs), captureRequest(request), captureResponse(response))
+            }
+            return response
         }
 
-        // Breakpoint request phase: pause before sending. Abort fails the call; an edited request is sent
-        // instead of the original; a disconnect falls open (proceed with the original).
+        // Breakpoint owns the exchange (ADR-0033). Request phase: pause before the response is sourced.
+        // Abort fails the call; an edited request replaces the original; a disconnect falls open (proceed
+        // with the original).
         var outgoing = request
         var requestEdited = false
-        if (breakpoint != null && breakpoint.onRequest) {
+        if (breakpoint.onRequest) {
             val gate = WailoControlChannel.breakpointGate
             if (gate != null) {
                 when (val decision = gate.pauseRequest(breakpoint.ruleId, captureRequest(request))) {
@@ -91,43 +94,69 @@ class WailoInterceptor internal constructor(
             }
         }
 
-        val response = try {
-            chain.proceed(outgoing)
-        } catch (e: IOException) {
-            if (shouldCapture) {
-                emit(startedAtEpochMs, elapsedMs(startNs), captureRequest(outgoing), null, error = e.toString(), edited = requestEdited)
-            }
-            throw e
+        // Source the response. Map Local — matched against the (possibly edited) outgoing request — supplies
+        // it when a rule matches, so the mocked value *becomes* the breakpoint's response (ADR-0033);
+        // otherwise the real network does, and a Map Local fetch miss falls open to it. Matching the outgoing
+        // request also subsumes the old edited-request re-check (ADR-0032).
+        val mapped = WailoRuleStore.match(outgoing.url.toString(), outgoing.method)
+            ?.let { mapLocalResponse(it, outgoing) }
+        val servedFromMapLocal = mapped != null
+        val response = mapped
+            ?: proceedToNetwork(chain, outgoing, requestEdited, shouldCapture, startedAtEpochMs, startNs)
+        // The exchange is a modification of the real one when the request was edited or the response came
+        // from Map Local; a response-phase edit flags it too, inside the handler.
+        val baseEdited = requestEdited || servedFromMapLocal
+
+        // Response phase: pause before the app sees it, on the sourced response (Map Local- or network-based).
+        // Needs the full body to show and maybe replace, so it consumes the response and rebuilds one.
+        if (breakpoint.onResponse && WailoControlChannel.breakpointGate != null) {
+            return handleResponseBreakpoint(outgoing, response, breakpoint.ruleId, baseEdited, startedAtEpochMs, startNs, shouldCapture)
         }
 
-        // Breakpoint response phase: pause before the app sees it. Needs the full body to show and maybe
-        // replace, so it consumes the response and rebuilds one for the caller.
-        if (breakpoint != null && breakpoint.onResponse && WailoControlChannel.breakpointGate != null) {
-            return handleResponseBreakpoint(outgoing, response, breakpoint.ruleId, requestEdited, startedAtEpochMs, startNs, shouldCapture)
-        }
-
-        // Normal path: capture without consuming (peekBody) and hand the real response back untouched.
+        // No response phase: capture without consuming (peekBody) and hand the sourced response back.
         if (shouldCapture) {
-            emit(startedAtEpochMs, elapsedMs(startNs), captureRequest(outgoing), captureResponse(response), edited = requestEdited)
+            emit(startedAtEpochMs, elapsedMs(startNs), captureRequest(outgoing), captureResponse(response), edited = baseEdited)
         }
         return response
     }
 
+    // Proceed on the real-network path, mirroring an IOException as a captured (error) exchange before
+    // rethrowing so a network failure still shows up. [requestEdited] flags the row when a request-phase
+    // breakpoint had already rewritten the request.
+    private fun proceedToNetwork(
+        chain: Interceptor.Chain,
+        request: Request,
+        requestEdited: Boolean,
+        shouldCapture: Boolean,
+        startedAtEpochMs: Long,
+        startNs: Long,
+    ): Response =
+        try {
+            chain.proceed(request)
+        } catch (e: IOException) {
+            if (shouldCapture) {
+                emit(startedAtEpochMs, elapsedMs(startNs), captureRequest(request), null, error = e.toString(), edited = requestEdited)
+            }
+            throw e
+        }
+
     // Pause the response phase: the desktop can edit it, abort the call, or resume it unchanged. The body
     // is read in full (consuming the stream) so it can be shown and swapped; the returned response is
     // rebuilt from those bytes (original or edited). A null gate (disconnected) already short-circuited.
+    // [baseEdited] is the exchange's edited state before this phase (request edited and/or Map Local-sourced,
+    // ADR-0033), used when the response is resumed unchanged; an edit or abort flags it edited regardless.
     private fun handleResponseBreakpoint(
         request: Request,
         response: Response,
         ruleId: String,
-        requestEdited: Boolean,
+        baseEdited: Boolean,
         startedAtEpochMs: Long,
         startNs: Long,
         shouldCapture: Boolean,
     ): Response {
         val gate = WailoControlChannel.breakpointGate ?: run {
             if (shouldCapture) {
-                emit(startedAtEpochMs, elapsedMs(startNs), captureRequest(request), captureResponse(response), edited = requestEdited)
+                emit(startedAtEpochMs, elapsedMs(startNs), captureRequest(request), captureResponse(response), edited = baseEdited)
             }
             return response
         }
@@ -153,7 +182,7 @@ class WailoInterceptor internal constructor(
                     buildResponse(request, edited.code, edited.message, edited.headers, edited.body)
                 } else {
                     if (shouldCapture) {
-                        emit(startedAtEpochMs, elapsedMs(startNs), requestContext, currentResponse, edited = requestEdited)
+                        emit(startedAtEpochMs, elapsedMs(startNs), requestContext, currentResponse, edited = baseEdited)
                     }
                     response.newBuilder().body(fullBody.toResponseBody(contentType)).build()
                 }
@@ -168,6 +197,34 @@ class WailoInterceptor internal constructor(
             emit(startedAtEpochMs, elapsedMs(startNs), request, null, error = "aborted by breakpoint", edited = true)
         }
         throw IOException("Wailo breakpoint aborted the request")
+    }
+
+    // Fetch a Map Local body from the desktop and build a synthetic response — WITHOUT mirroring it. The
+    // caller decides how it's captured, since a response-phase breakpoint may still pause/edit it before the
+    // app sees it (ADR-0033). Returns null when the fetch can't complete (no authority, timeout, rule gone)
+    // so the caller falls open to the real network.
+    private fun mapLocalResponse(rule: MapLocalRule, request: Request): Response? {
+        val mapped = WailoControlChannel.bodyFetcher
+            ?.fetchBody(rule.id, request.url.toString(), request.method) ?: return null
+        return buildResponse(request, mapped.code, "", mapped.headers, mapped.body)
+    }
+
+    // Serve [request] from Map Local [rule] on the no-breakpoint path: build the response and mirror the
+    // served exchange (flagged edited) when capturing. Returns null when the fetch can't complete so the
+    // caller falls open to the real network. When a breakpoint owns the exchange the response is instead
+    // sourced via [mapLocalResponse], so it can flow through the response phase (ADR-0033).
+    private fun serveMapLocal(
+        rule: MapLocalRule,
+        request: Request,
+        shouldCapture: Boolean,
+        startedAtEpochMs: Long,
+        startNs: Long,
+    ): Response? {
+        val response = mapLocalResponse(rule, request) ?: return null
+        if (shouldCapture) {
+            emit(startedAtEpochMs, elapsedMs(startNs), captureRequest(request), captureResponse(response), edited = true)
+        }
+        return response
     }
 
     // Build a synthetic OkHttp response from desktop-supplied parts (a Map Local body or an edited

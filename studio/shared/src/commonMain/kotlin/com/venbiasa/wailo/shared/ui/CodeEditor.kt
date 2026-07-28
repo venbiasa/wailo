@@ -98,6 +98,14 @@ private val FOLD_COL_WIDTH = 16.dp
 // centered inside it, so it doubles as the "between the parentheses" spacing.
 private const val DOTS_CELLS = 3
 
+// Compose packs a layout node's width and height into a single Long, so neither can exceed ~2^18 px. A single
+// very long line — a minified body seeded raw into the breakpoint editor, or a huge JSON string value — made
+// the content wider than that and crashed the whole layout pass ("Can't represent a width of N and height of
+// 0"). Widths derived from line length are capped here. Soft wrap (the default) reflows long lines so the cap
+// is never reached; with wrap off it only ever bounds the pathological case (the far tail of such a line just
+// isn't horizontally reachable) and stays far past any real viewport, so normal scrolling is untouched.
+private const val MAX_CONTENT_WIDTH_PX = 200_000f
+
 /**
  * The code editor (ADR-0023): a [LazyColumn] of highlighted lines over the state's [EditorBuffer], so only
  * the visible lines are laid out and a keystroke costs one line + the viewport, not the whole document.
@@ -169,7 +177,8 @@ internal fun CodeEditor(
     val caret = state.caret
     val gutterDigits = maxOf(2, lineCount.toString().length)
     val gutterWidthDp = charWidthDp * gutterDigits + 20.dp
-    val contentWidthDp = charWidthDp * (state.maxLineLength + 1) + 8.dp
+    val contentWidthDp = (charWidthDp * (state.maxLineLength + 1) + 8.dp)
+        .coerceAtMost(with(density) { MAX_CONTENT_WIDTH_PX.toDp() })
 
     // The cell count that fits after the gutter + fold column (leaving room for the overlay scrollbar) is
     // where a wrapped line breaks. Null means "don't wrap" — wrap off, or the viewport not measured yet —
@@ -773,7 +782,9 @@ private fun EditorLineRow(
                         if (segEnd > segStart || slack > 0.dp) {
                             Box(
                                 Modifier.offset(x = charWidthDp * (segStart - rowStart), y = lineHeightDp * r)
-                                    .width(charWidthDp * (segEnd - segStart).coerceAtLeast(0) + slack)
+                                    // Same layout-constraint cap as the content box: a full-line selection on a
+                                    // huge single line (wrap off) would otherwise blow past what Compose can pack.
+                                    .width((charWidthDp * (segEnd - segStart).coerceAtLeast(0) + slack).coerceAtMost(contentWidthDp))
                                     .height(lineHeightDp)
                                     .background(scheme.primary.copy(alpha = 0.28f)),
                             )

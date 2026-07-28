@@ -142,6 +142,76 @@ class WailoInterceptorTest {
     }
 
     @Test
+    fun breakpointRequestEditThatMatchesMapLocalIsSourcedFromMapLocal() {
+        // Precedence v3 (ADR-0033, subsuming ADR-0032): the original URL matches no Map Local rule, so it
+        // reaches the request breakpoint, which rewrites the URL to one a Map Local rule *does* match. The
+        // response is then sourced from Map Local for the edited request instead of hitting the network.
+        WailoRuleStore.replace(listOf(MapLocalRule(id = "r1", enabled = true, url_pattern = "https://api.example.com/mapped*")))
+        WailoBreakpointStore.replace(listOf(bpRule("b1", "https://api.example.com/original*", onRequest = true)))
+        WailoControlChannel.bodyFetcher = FakeFetcher(
+            WailoMappedResponse(code = 200, headers = listOf(Header("Content-Type", "application/json")), body = "{\"mapped\":true}".encodeUtf8()),
+        )
+        WailoControlChannel.breakpointGate = FakeGate(
+            requestDecision = WailoRequestDecision.Proceed(
+                HttpRequest(method = "GET", url = "https://api.example.com/mapped/x"),
+            ),
+        )
+        val chain = FakeChain(request("https://api.example.com/original")) { networkResponse(it) }
+
+        val response = interceptor.intercept(chain)
+
+        assertEquals(200, response.code)
+        assertEquals("{\"mapped\":true}", response.body!!.string())
+        assertNull("an edited request that matches Map Local must not hit the network", chain.proceededWith)
+        assertTrue(sink.exchanges.single().edited)
+    }
+
+    @Test
+    fun breakpointRequestPhaseTakesPrecedenceAndMapLocalSourcesResponse() {
+        // Precedence v3 (ADR-0033): a URL matches both a Map Local rule and a request-phase breakpoint. The
+        // breakpoint takes precedence (the request pauses), then Map Local sources the response instead of
+        // the network. With no response phase, the mocked value is delivered directly, flagged edited.
+        WailoRuleStore.replace(listOf(MapLocalRule(id = "r1", enabled = true, url_pattern = "https://both.example.com/*")))
+        WailoBreakpointStore.replace(listOf(bpRule("b1", "https://both.example.com/*", onRequest = true)))
+        WailoControlChannel.bodyFetcher = FakeFetcher(
+            WailoMappedResponse(code = 200, headers = listOf(Header("Content-Type", "application/json")), body = "{\"mapped\":true}".encodeUtf8()),
+        )
+        val gate = FakeGate(requestDecision = WailoRequestDecision.Proceed(null))
+        WailoControlChannel.breakpointGate = gate
+        val chain = FakeChain(request("https://both.example.com/users")) { networkResponse(it, body = "real") }
+
+        val response = interceptor.intercept(chain)
+
+        assertTrue("the request phase must pause (breakpoint precedence)", gate.requestPaused)
+        assertEquals("{\"mapped\":true}", response.body!!.string())
+        assertNull("Map Local must source the response, not the network", chain.proceededWith)
+        assertTrue(sink.exchanges.single().edited)
+    }
+
+    @Test
+    fun breakpointResponsePhaseShowsMapLocalValueAsTheResponse() {
+        // Precedence v3 (ADR-0033), the crux: a URL matches both a Map Local rule and a response-phase
+        // breakpoint. The breakpoint owns the exchange and the Map Local value *becomes* the response it
+        // pauses on — no network call. Resuming unchanged delivers that mocked response, flagged edited.
+        WailoRuleStore.replace(listOf(MapLocalRule(id = "r1", enabled = true, url_pattern = "https://both.example.com/*")))
+        WailoBreakpointStore.replace(listOf(bpRule("b1", "https://both.example.com/*", onResponse = true)))
+        WailoControlChannel.bodyFetcher = FakeFetcher(
+            WailoMappedResponse(code = 200, headers = listOf(Header("Content-Type", "application/json")), body = "{\"mapped\":true}".encodeUtf8()),
+        )
+        val gate = FakeGate(responseDecision = WailoResponseDecision.Proceed(null))
+        WailoControlChannel.breakpointGate = gate
+        val chain = FakeChain(request("https://both.example.com/users")) { networkResponse(it, body = "real") }
+
+        val response = interceptor.intercept(chain)
+
+        assertTrue("the response phase must pause on the Map Local value", gate.responsePaused)
+        assertEquals("{\"mapped\":true}", gate.pausedResponse?.body?.utf8())
+        assertEquals("{\"mapped\":true}", response.body!!.string())
+        assertNull("Map Local must source the response, not the network", chain.proceededWith)
+        assertTrue(sink.exchanges.single().edited)
+    }
+
+    @Test
     fun breakpointResponseEditIsDelivered() {
         WailoBreakpointStore.replace(listOf(bpRule("b1", "*", onResponse = true)))
         WailoControlChannel.breakpointGate = FakeGate(
@@ -208,9 +278,23 @@ class WailoInterceptorTest {
         private val requestDecision: WailoRequestDecision = WailoRequestDecision.Proceed(null),
         private val responseDecision: WailoResponseDecision = WailoResponseDecision.Proceed(null),
     ) : WailoBreakpointGate {
-        override fun pauseRequest(ruleId: String, request: HttpRequest): WailoRequestDecision = requestDecision
-        override fun pauseResponse(ruleId: String, request: HttpRequest, response: HttpResponse): WailoResponseDecision =
-            responseDecision
+        var requestPaused = false
+            private set
+        var responsePaused = false
+            private set
+        var pausedResponse: HttpResponse? = null
+            private set
+
+        override fun pauseRequest(ruleId: String, request: HttpRequest): WailoRequestDecision {
+            requestPaused = true
+            return requestDecision
+        }
+
+        override fun pauseResponse(ruleId: String, request: HttpRequest, response: HttpResponse): WailoResponseDecision {
+            responsePaused = true
+            pausedResponse = response
+            return responseDecision
+        }
     }
 
     private class FakeChain(

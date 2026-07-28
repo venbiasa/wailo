@@ -35,6 +35,7 @@ import com.venbiasa.wailo.protocol.Header
 import com.venbiasa.wailo.protocol.HttpRequest
 import com.venbiasa.wailo.protocol.HttpResponse
 import com.venbiasa.wailo.shared.PausedFlow
+import com.venbiasa.wailo.shared.format.prettyPrintJson
 import okio.ByteString.Companion.toByteString
 
 /**
@@ -70,7 +71,12 @@ internal fun BreakpointEditor(
         CodeEditorState(headersToText(if (isRequest) request?.headers else response?.headers))
     }
     val bodyEditor = remember(paused.correlationId) {
-        CodeEditorState((if (isRequest) request?.body else response?.body)?.utf8() ?: "")
+        // Seed with the beautified body (pretty-printed JSON) when our beautifier can, else the raw text —
+        // the same treatment the read-only BodyPreview gives captured bodies. prettyPrintJson only reflows
+        // whitespace outside string literals, so editing and resuming a formatted body changes its layout,
+        // never its content.
+        val raw = (if (isRequest) request?.body else response?.body)?.utf8() ?: ""
+        CodeEditorState(prettyPrintJson(raw) ?: raw)
     }
     var tab by remember(paused.correlationId) { mutableStateOf(PausedTab.Body) }
 

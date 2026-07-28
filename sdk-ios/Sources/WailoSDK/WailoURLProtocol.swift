@@ -48,15 +48,17 @@ protocol WailoBreakpointGate: AnyObject {
 
 /// A `URLProtocol` that copies each URLSession HTTP(S) exchange into a `CaptureSink` — subject to the
 /// desktop's CaptureFilter, which decides per host whether the whole exchange is captured at all
-/// (ADR-0029); a filtered host is dropped at the source. It normally
-/// leaves the real request/response untouched, but first checks the Map Local match-metadata the
-/// desktop has pushed: on a match it fetches the response from the desktop (never a cached body —
-/// ADR-0019) and answers with it, flagging the exchange `edited`. If that fetch fails for any reason it
-/// falls open to the real network, so a desktop hiccup never hangs or fails the request. On the
-/// real-network path it also honors breakpoint rules (ADR-0027): a matching request can be paused before
-/// it's sent and/or its response before the app sees it, so the desktop can edit, abort, or resume it;
-/// a disconnect fails open. Map Local takes precedence and is never broken. The iOS analog of the OkHttp
-/// `WailoInterceptor`.
+/// (ADR-0029); a filtered host is dropped at the source. It normally leaves the real request/response
+/// untouched. If no breakpoint matches, it checks the Map Local match-metadata the desktop has pushed
+/// (ADR-0019): on a match it fetches the response from the desktop (never a cached body) and serves it,
+/// flagging the exchange `edited`, and falls open to the real network if that fetch fails for any reason,
+/// so a desktop hiccup never hangs or fails the request. If a breakpoint (ADR-0027) matches, the breakpoint
+/// *owns* the exchange (ADR-0033, superseding ADR-0027/0032): the request phase can pause before the request
+/// is sent (edit/abort/resume); the response is then sourced from Map Local when a rule matches the outgoing
+/// request — the mocked value *becomes* the response — otherwise from the network; and the response phase
+/// can pause on it before the app sees it. So Map Local supplies the breakpoint's response rather than
+/// bypassing it; only with no breakpoint does it short-circuit. A disconnect fails open. The iOS analog of
+/// the OkHttp `WailoInterceptor`.
 ///
 /// URLProtocol instances are created by Foundation, so there is no constructor to hand a sink to —
 /// the sink is process-global (`Wailo.start` sets it), mirroring `WailoRuntime` on Android.
@@ -96,6 +98,10 @@ public final class WailoURLProtocol: URLProtocol {
     // (the request actually sent, edited if the request phase changed it).
     private var responseBreakpointRuleId: String?
     private var breakpointRequestContext: HttpRequest?
+    // True once the exchange diverges from the real network one — a request-phase edit or a Map Local-sourced
+    // response (ADR-0033) — so a response resumed unchanged is still mirrored as `edited`. A response-phase
+    // edit or an abort flags the row on its own path.
+    private var baseEdited = false
 
     override public class func canInit(with request: URLRequest) -> Bool {
         guard sink != nil else { return false }
@@ -119,7 +125,7 @@ public final class WailoURLProtocol: URLProtocol {
         // CaptureFilter admits (whose whole exchange we capture) or any breakpoint match (which shows the
         // body to the desktop regardless of the filter). URLSession moves httpBody into httpBodyStream
         // before we run, and a stream can be read only once, so we buffer it here and reuse it for capture
-        // and the replay (proceedToNetwork restores it, since reading now consumes the stream the replay
+        // and the replay (sendToNetwork restores it, since reading now consumes the stream the replay
         // would send). For a filtered host with no breakpoint we skip this, leaving the stream to pass
         // through untouched so memory stays bounded to the hosts that pass the filter.
         let breakpointMatch = urlString.flatMap { WailoBreakpointStore.shared.match(url: $0, method: method) }
@@ -128,43 +134,46 @@ public final class WailoURLProtocol: URLProtocol {
             requestBody = WailoURLProtocol.readBody(from: request)
         }
 
-        // Map Local: match locally (metadata only), then fetch the body from the desktop and serve it.
-        // Any failure (no fetcher, not connected, timeout, rule gone) falls open to the real network. A
-        // Map Local match takes precedence over breakpoints and is never broken (ADR-0027 precedence v1).
-        if let urlString,
-           let rule = WailoRuleStore.shared.match(url: urlString, method: method),
-           let fetcher = WailoURLProtocol.bodyFetcher {
-            fetcher.fetchBody(ruleId: rule.id, url: urlString, method: method) { [weak self] mapped in
-                guard let self, !self.stopped else { return }
-                if let mapped {
-                    self.serveMapped(mapped)
-                } else {
-                    self.proceedToNetwork()
-                }
-            }
-            return
-        }
-
-        // Breakpoints apply only on the real-network path. Arm the response phase (checked in `finish`)
-        // and, if the rule breaks on the request, pause before anything is sent: the desktop can edit the
-        // request, abort the call, or resume it unchanged; a disconnect fails open to the real network.
-        if let breakpointMatch, let gate = WailoURLProtocol.breakpointGate {
-            if breakpointMatch.onResponse { responseBreakpointRuleId = breakpointMatch.ruleId }
-            if breakpointMatch.onRequest {
-                gate.pauseRequest(ruleId: breakpointMatch.ruleId, request: captureRequest()) { [weak self] decision in
+        // No breakpoint: Map Local (metadata match), then fetch the body from the desktop and serve it,
+        // short-circuiting the network. Any failure (no fetcher, not connected, timeout, rule gone) falls
+        // open to the network. When a breakpoint matches it instead owns the exchange and Map Local sources
+        // the response it shows (ADR-0033) — handled below via `sourceResponse`.
+        if breakpointMatch == nil {
+            if let urlString,
+               let rule = WailoRuleStore.shared.match(url: urlString, method: method),
+               let fetcher = WailoURLProtocol.bodyFetcher {
+                fetcher.fetchBody(ruleId: rule.id, url: urlString, method: method) { [weak self] mapped in
                     guard let self, !self.stopped else { return }
-                    switch decision {
-                    case .abort:
-                        self.abort()
-                    case let .proceed(edited):
-                        self.proceedToNetwork(edited: edited)
+                    if let mapped {
+                        self.serveMapped(mapped)
+                    } else {
+                        self.sendToNetwork()
                     }
                 }
                 return
             }
+            sendToNetwork()
+            return
         }
 
-        proceedToNetwork()
+        // Breakpoint owns the exchange (ADR-0033). Arm the response phase (checked in `finish`); if the rule
+        // breaks on the request, pause before anything is sent — the desktop can edit the request, abort the
+        // call, or resume it unchanged (a disconnect fails open) — then source the response.
+        let match = breakpointMatch!
+        if match.onResponse { responseBreakpointRuleId = match.ruleId }
+        if match.onRequest, let gate = WailoURLProtocol.breakpointGate {
+            gate.pauseRequest(ruleId: match.ruleId, request: captureRequest()) { [weak self] decision in
+                guard let self, !self.stopped else { return }
+                switch decision {
+                case .abort:
+                    self.abort()
+                case let .proceed(edited):
+                    self.sourceResponse(edited: edited)
+                }
+            }
+            return
+        }
+        sourceResponse(edited: nil)
     }
 
     override public func stopLoading() {
@@ -173,11 +182,47 @@ public final class WailoURLProtocol: URLProtocol {
         replayTask = nil
     }
 
+    /// Sources the breakpoint's response (ADR-0033): from Map Local when a rule matches the (possibly edited)
+    /// request — its value *becomes* the response the breakpoint shows — otherwise from the real network. A
+    /// Map Local fetch miss falls open to the network. Either way the bytes flow through `finish`, so an armed
+    /// response-phase breakpoint pauses on them uniformly. Matching the (possibly edited) request also subsumes
+    /// the old edited-request re-check (ADR-0032).
+    private func sourceResponse(edited: HttpRequest?) {
+        if edited != nil { baseEdited = true }
+        let url = edited?.url ?? request.url?.absoluteString
+        let method = edited?.method ?? request.httpMethod ?? "GET"
+        if let url,
+           let rule = WailoRuleStore.shared.match(url: url, method: method),
+           let fetcher = WailoURLProtocol.bodyFetcher {
+            fetcher.fetchBody(ruleId: rule.id, url: url, method: method) { [weak self] mapped in
+                guard let self, !self.stopped else { return }
+                if let mapped {
+                    self.finishMapped(mapped, edited: edited)
+                } else {
+                    self.sendToNetwork(edited: edited)
+                }
+            }
+            return
+        }
+        sendToNetwork(edited: edited)
+    }
+
+    /// Sources the breakpoint's response from a Map Local rule: builds a synthetic HTTP response from the
+    /// desktop's bytes and routes it through `finish`, so an armed response-phase breakpoint pauses on the
+    /// mapped value exactly as it would on a network response (ADR-0033). No request ever leaves the device.
+    private func finishMapped(_ mapped: WailoMappedResponse, edited: HttpRequest?) {
+        baseEdited = true
+        if responseBreakpointRuleId != nil {
+            breakpointRequestContext = edited ?? captureRequest()
+        }
+        finish(data: mapped.body, response: makeResponse(code: mapped.code, headers: mapped.headers), error: nil)
+    }
+
     /// Runs the real request (the normal, unmapped path). Marks the replay so `canInit` skips it,
     /// avoiding an infinite intercept loop, and forwards the result back to the caller via `finish`. When
     /// a request-phase breakpoint edited the request, [edited] carries the new method/URL/headers/body to
     /// send instead of the original.
-    private func proceedToNetwork(edited: HttpRequest? = nil) {
+    private func sendToNetwork(edited: HttpRequest? = nil) {
         guard let replay = (request as NSURLRequest).mutableCopy() as? NSMutableURLRequest else {
             client?.urlProtocol(self, didFailWithError: URLError(.unknown))
             return
@@ -215,26 +260,32 @@ public final class WailoURLProtocol: URLProtocol {
         emit(response: nil, body: nil, error: error, edited: true)
     }
 
-    /// Answers the request from a Map Local rule instead of the network: hands the desktop-supplied
-    /// status, headers, and body back to the caller, then mirrors the exchange into the sink flagged
-    /// `edited`. No replay task is created, so no request ever leaves the device.
+    /// Answers the request from a Map Local rule instead of the network (the no-breakpoint path): hands the
+    /// desktop-supplied status, headers, and body back to the caller, then mirrors the exchange into the sink
+    /// flagged `edited`. No replay task is created, so no request ever leaves the device. When a breakpoint
+    /// owns the exchange the mapped response instead flows through `finishMapped`/`finish` (ADR-0033).
     private func serveMapped(_ mapped: WailoMappedResponse) {
-        let body = mapped.body
-        let status = mapped.code == 0 ? 200 : mapped.code
+        let response = makeResponse(code: mapped.code, headers: mapped.headers)
+        if let response {
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        }
+        client?.urlProtocol(self, didLoad: mapped.body)
+        client?.urlProtocolDidFinishLoading(self)
+        emit(response: response, body: mapped.body, error: nil, edited: true)
+    }
+
+    /// Builds an `HTTPURLResponse` from desktop-supplied status + headers (a Map Local body or an edited
+    /// response). Code 0 -> 200 so a value that omits the status still yields a valid response.
+    private func makeResponse(code: Int, headers: [Header]) -> HTTPURLResponse? {
+        let status = code == 0 ? 200 : code
         var headerFields: [String: String] = [:]
-        for header in mapped.headers { headerFields[header.name] = header.value }
-        let response = HTTPURLResponse(
+        for header in headers { headerFields[header.name] = header.value }
+        return HTTPURLResponse(
             url: request.url ?? URL(string: "about:blank")!,
             statusCode: status,
             httpVersion: "HTTP/1.1",
             headerFields: headerFields
         )
-        if let response {
-            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-        }
-        client?.urlProtocol(self, didLoad: body)
-        client?.urlProtocolDidFinishLoading(self)
-        emit(response: response, body: body, error: nil, edited: true)
     }
 
     /// Forwards the real result back to the caller, then mirrors a copy into the sink. If a response-phase
@@ -243,7 +294,7 @@ public final class WailoURLProtocol: URLProtocol {
     private func finish(data: Data?, response: URLResponse?, error: Error?) {
         if let error {
             client?.urlProtocol(self, didFailWithError: error)
-            emit(response: nil, body: nil, error: error)
+            emit(response: nil, body: nil, error: error, edited: baseEdited)
             return
         }
         if let ruleId = responseBreakpointRuleId,
@@ -270,7 +321,9 @@ public final class WailoURLProtocol: URLProtocol {
         forwardOriginal(data: data, response: response)
     }
 
-    /// Delivers the real (unedited) result to the caller and mirrors it into the sink.
+    /// Delivers the result to the caller and mirrors it into the sink. Unedited on the network path, but the
+    /// exchange is still flagged `edited` when it diverged upstream — a request-phase edit or a Map Local-
+    /// sourced response resumed unchanged (ADR-0033) — via `baseEdited`.
     private func forwardOriginal(data: Data?, response: URLResponse?) {
         if let response {
             client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
@@ -279,21 +332,13 @@ public final class WailoURLProtocol: URLProtocol {
             client?.urlProtocol(self, didLoad: data)
         }
         client?.urlProtocolDidFinishLoading(self)
-        emit(response: response, body: data, error: nil)
+        emit(response: response, body: data, error: nil, edited: baseEdited)
     }
 
     /// Delivers a response-phase breakpoint's edited response: rebuilds an `HTTPURLResponse` from the
     /// desktop's status/headers and hands its body to the caller, flagging the exchange `edited`.
     private func forwardEdited(_ edited: HttpResponse) {
-        let status = Int(edited.code) == 0 ? 200 : Int(edited.code)
-        var headerFields: [String: String] = [:]
-        for header in edited.headers { headerFields[header.name] = header.value }
-        let response = HTTPURLResponse(
-            url: request.url ?? URL(string: "about:blank")!,
-            statusCode: status,
-            httpVersion: "HTTP/1.1",
-            headerFields: headerFields
-        )
+        let response = makeResponse(code: Int(edited.code), headers: edited.headers)
         if let response {
             client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
         }
