@@ -55,7 +55,7 @@ internal enum class TrafficColumn(
     val minWidth: Dp,
 ) {
     Method("Method", 84.dp, 56.dp),
-    Url("URL", 340.dp, 120.dp),
+    Url("URL", 425.dp, 120.dp),
     Status("Status", 128.dp, 84.dp),
     Code("Code", 64.dp, 56.dp),
     Client("Client", 190.dp, 96.dp),
