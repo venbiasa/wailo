@@ -1,6 +1,7 @@
 package com.venbiasa.wailo.desktop
 
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -11,6 +12,7 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.graphics.painter.BitmapPainter
 import androidx.compose.ui.graphics.toComposeImageBitmap
 import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEvent
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.isMetaPressed
 import androidx.compose.ui.input.key.key
@@ -31,6 +33,7 @@ import com.venbiasa.wailo.shared.MapLocalRuleDef
 import com.venbiasa.wailo.shared.PausedFlow
 import com.venbiasa.wailo.shared.PickedFile
 import com.venbiasa.wailo.shared.WailoApp
+import com.venbiasa.wailo.shared.WailoBreakpointWindowContent
 import com.venbiasa.wailo.shared.theme.TextScale
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
@@ -59,6 +62,12 @@ fun main() = runWailo()
 // geometry it was designed against. On desktop Compose sizes windows from Dp values 1:1 with AWT's
 // (density-independent) window units, so the same numbers drive both the initial size and the minimum.
 private val DefaultWindowSize = DpSize(800.dp, 600.dp)
+
+// The breakpoint window (ADR-0034) opens larger than the main window's floor: it hosts the queue + the
+// editor side by side, and the editor's headers/body panes need room. A modest minimum keeps both panes
+// usable when the user shrinks it.
+private val DefaultBreakpointWindowSize = DpSize(920.dp, 680.dp)
+private val MinBreakpointWindowSize = DpSize(560.dp, 420.dp)
 
 // debounce (used below to coalesce window resize/move writes) is still a coroutines preview API.
 @OptIn(FlowPreview::class)
@@ -250,8 +259,8 @@ private fun runWailo() = application {
     // from the last floating size/position; first run falls back to Compose's default size and lets
     // the OS place the window.
     val windowState = rememberWindowState(
-        size = WindowStateStore.loadSize(DefaultWindowSize),
-        position = WindowStateStore.loadPosition(),
+        size = WindowStateStore.Main.loadSize(DefaultWindowSize),
+        position = WindowStateStore.Main.loadPosition(),
     )
     // Persist continuously (so a crash/force-quit still remembers), but only while Floating so a
     // maximized/fullscreen window never overwrites the saved floating geometry. Debounced so a
@@ -260,7 +269,30 @@ private fun runWailo() = application {
         snapshotFlow { Triple(windowState.size, windowState.position, windowState.placement) }
             .filter { (_, _, placement) -> placement == WindowPlacement.Floating }
             .debounce(300.milliseconds)
-            .collect { (size, position, _) -> WindowStateStore.save(size, position) }
+            .collect { (size, position, _) -> WindowStateStore.Main.save(size, position) }
+    }
+
+    // Cmd +/- (Cmd 0 resets) text zoom, shared by every window so the shortcut behaves the same whichever
+    // one holds focus (the breakpoint window's body editor benefits from it as much as the main list).
+    // Preview so it wins even when a child (e.g. a text field) holds focus. Cmd+= and Cmd++ share the
+    // Equals key on most layouts; NumPad variants are handled for full keyboards.
+    val onScaleKeyEvent: (KeyEvent) -> Boolean = onScaleKeyEvent@{ event ->
+        if (event.type != KeyEventType.KeyDown || !event.isMetaPressed) return@onScaleKeyEvent false
+        when (event.key) {
+            Key.Equals, Key.Plus, Key.NumPadAdd -> {
+                setScale(TextScale.increased(textScale))
+                true
+            }
+            Key.Minus, Key.NumPadSubtract -> {
+                setScale(TextScale.decreased(textScale))
+                true
+            }
+            Key.Zero, Key.NumPad0 -> {
+                setScale(TextScale.Default)
+                true
+            }
+            else -> false
+        }
     }
 
     Window(
@@ -268,34 +300,14 @@ private fun runWailo() = application {
         // debounce window and never flushed.
         onCloseRequest = {
             if (windowState.placement == WindowPlacement.Floating) {
-                WindowStateStore.save(windowState.size, windowState.position)
+                WindowStateStore.Main.save(windowState.size, windowState.position)
             }
             exitApplication()
         },
         state = windowState,
         title = "Wailo",
         icon = appIconPainter,
-        // Preview so the shortcut wins even when a child (e.g. a text field) holds focus. Cmd+= and
-        // Cmd++ share the Equals key on most layouts; NumPad variants are handled for full keyboards.
-        onPreviewKeyEvent = { event ->
-            if (event.type != KeyEventType.KeyDown || !event.isMetaPressed) {
-                false
-            } else when (event.key) {
-                Key.Equals, Key.Plus, Key.NumPadAdd -> {
-                    setScale(TextScale.increased(textScale))
-                    true
-                }
-                Key.Minus, Key.NumPadSubtract -> {
-                    setScale(TextScale.decreased(textScale))
-                    true
-                }
-                Key.Zero, Key.NumPad0 -> {
-                    setScale(TextScale.Default)
-                    true
-                }
-                else -> false
-            }
-        },
+        onPreviewKeyEvent = onScaleKeyEvent,
     ) {
         // Floor the window at its first-run size so the content can't be squeezed below the layout it
         // was built for. AWT enforces this on the OS chrome, covering drag-resize the Compose state
@@ -333,14 +345,66 @@ private fun runWailo() = application {
             onBreakpointLayoutChange = onBreakpointLayoutChange,
             breakpointsEnabled = breakpointsEnabled,
             onBreakpointsEnabledChange = onBreakpointsEnabledChange,
-            pausedFlows = pausedFlows,
-            onResumeBreakpoint = { correlationId, editedRequest, editedResponse ->
-                engine.resumeBreakpoint(correlationId, editedRequest, editedResponse)
-            },
-            onAbortBreakpoint = { correlationId -> engine.abortBreakpoint(correlationId) },
             toolPanelWidthRatio = toolPanelWidthRatio,
             onToolPanelWidthRatioChange = { toolPanelWidthRatio = it },
         )
+    }
+
+    // The paused-traffic inspector is its own OS window (ADR-0034), not a modal over the main window, so
+    // captured traffic stays browsable while a hold is open. Its existence is derived from the engine's
+    // holds: it opens on the first hit and closes once the last hold is resolved. Concurrent holds show
+    // as a queue the user resolves in any order.
+    if (pausedFlows.isNotEmpty()) {
+        // Seeded from — and persisted back to — its own geometry keys, so it reopens at the size/position
+        // the user last left it (across app restarts), exactly like the main window.
+        val breakpointWindowState = rememberWindowState(
+            size = WindowStateStore.Breakpoint.loadSize(DefaultBreakpointWindowSize),
+            position = WindowStateStore.Breakpoint.loadPosition(),
+        )
+        // Persist continuously (crash/force-quit safe) and once more on dispose — the window vanishes both
+        // when its close button clears the holds and when the last hold is resolved from the editor, and
+        // onDispose covers either path so the final geometry is never lost inside the debounce window.
+        LaunchedEffect(breakpointWindowState) {
+            snapshotFlow { Triple(breakpointWindowState.size, breakpointWindowState.position, breakpointWindowState.placement) }
+                .filter { (_, _, placement) -> placement == WindowPlacement.Floating }
+                .debounce(300.milliseconds)
+                .collect { (size, position, _) -> WindowStateStore.Breakpoint.save(size, position) }
+        }
+        DisposableEffect(Unit) {
+            onDispose {
+                if (breakpointWindowState.placement == WindowPlacement.Floating) {
+                    WindowStateStore.Breakpoint.save(breakpointWindowState.size, breakpointWindowState.position)
+                }
+            }
+        }
+        Window(
+            // The window's presence is derived from `pausedFlows`, so the only way its close button can
+            // take effect is to clear the holds. Do it the safe way — proceed each with its original bytes,
+            // the same fail-open as a desktop disconnect (ADR-0027) — rather than aborting the app's calls.
+            onCloseRequest = {
+                pausedFlows.forEach { engine.resumeBreakpoint(it.correlationId, null, null) }
+            },
+            state = breakpointWindowState,
+            title = if (pausedFlows.size > 1) "Breakpoints (${pausedFlows.size})" else "Breakpoint",
+            icon = appIconPainter,
+            onPreviewKeyEvent = onScaleKeyEvent,
+        ) {
+            LaunchedEffect(Unit) {
+                window.minimumSize = Dimension(
+                    MinBreakpointWindowSize.width.value.toInt(),
+                    MinBreakpointWindowSize.height.value.toInt(),
+                )
+            }
+            WailoBreakpointWindowContent(
+                pausedFlows = pausedFlows,
+                darkTheme = darkTheme,
+                textScale = textScale,
+                onResumeBreakpoint = { correlationId, editedRequest, editedResponse ->
+                    engine.resumeBreakpoint(correlationId, editedRequest, editedResponse)
+                },
+                onAbortBreakpoint = { correlationId -> engine.abortBreakpoint(correlationId) },
+            )
+        }
     }
 }
 

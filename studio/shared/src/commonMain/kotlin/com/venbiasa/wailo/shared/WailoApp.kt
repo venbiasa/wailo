@@ -1,14 +1,19 @@
 package com.venbiasa.wailo.shared
 
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Density
 import com.venbiasa.wailo.protocol.HttpRequest
 import com.venbiasa.wailo.protocol.HttpResponse
 import com.venbiasa.wailo.shared.theme.TextScale
 import com.venbiasa.wailo.shared.theme.WailoTheme
+import com.venbiasa.wailo.shared.ui.BreakpointInspector
 import com.venbiasa.wailo.shared.ui.ToolPanelLayout
 import com.venbiasa.wailo.shared.ui.WailoViewer
 
@@ -36,10 +41,10 @@ import com.venbiasa.wailo.shared.ui.WailoViewer
  * (ADR-0030): off, the host pushes no rules and the panel disables its switches, state kept.
  * [breakpointNodes] are the host-owned, persisted breakpoints layout (groups +
  * rules, in priority order) the same tool panel renders (ADR-0026/0027); [onBreakpointLayoutChange] hands
- * back a new layout for any structural change, [breakpointsEnabled]/[onBreakpointsEnabledChange] are that
- * feature's master (ADR-0030, same semantics), [pausedFlows] are the requests/responses devices are
- * currently holding at a breakpoint, and [onResumeBreakpoint]/[onAbortBreakpoint] resolve one by
- * correlation id. The panel's open state and any row-seeded draft are the viewer's own transient state.
+ * back a new layout for any structural change, and [breakpointsEnabled]/[onBreakpointsEnabledChange] are
+ * that feature's master (ADR-0030, same semantics). The requests/responses devices are holding at a
+ * breakpoint are edited in a separate window ([WailoBreakpointWindowContent], ADR-0034), not here. The
+ * panel's open state and any row-seeded draft are the viewer's own transient state.
  * [toolPanelWidthRatio] is the host-owned, persisted width of that docked panel expressed as a
  * fraction of the window (so it scales with the window rather than pinning to a fixed dp);
  * [onToolPanelWidthRatioChange] hands back a new fraction as the user drags the panel's resize handle.
@@ -71,9 +76,6 @@ fun WailoApp(
     onBreakpointLayoutChange: (List<BreakpointNode>) -> Unit = {},
     breakpointsEnabled: Boolean = true,
     onBreakpointsEnabledChange: (Boolean) -> Unit = {},
-    pausedFlows: List<PausedFlow> = emptyList(),
-    onResumeBreakpoint: (String, HttpRequest?, HttpResponse?) -> Unit = { _, _, _ -> },
-    onAbortBreakpoint: (String) -> Unit = {},
     toolPanelWidthRatio: Float = ToolPanelLayout.DefaultWidthRatio,
     onToolPanelWidthRatioChange: (Float) -> Unit = {},
 ) {
@@ -107,12 +109,45 @@ fun WailoApp(
                 onBreakpointLayoutChange = onBreakpointLayoutChange,
                 breakpointsEnabled = breakpointsEnabled,
                 onBreakpointsEnabledChange = onBreakpointsEnabledChange,
-                pausedFlows = pausedFlows,
-                onResumeBreakpoint = onResumeBreakpoint,
-                onAbortBreakpoint = onAbortBreakpoint,
                 toolPanelWidthRatio = toolPanelWidthRatio,
                 onToolPanelWidthRatioChange = onToolPanelWidthRatioChange,
             )
+        }
+    }
+}
+
+/**
+ * The contents of the standalone breakpoint window (ADR-0034): the paused-traffic inspector on its own
+ * top-level window rather than a modal over [WailoApp]. The host shows this window while any device is
+ * holding a request/response at a breakpoint and closes it once none remain, so it is only ever composed
+ * with [pausedFlows] non-empty.
+ *
+ * It carries its own theme so it matches the main window's appearance: [darkTheme] mirrors the host's
+ * choice and [textScale] rides on `fontScale` exactly as in [WailoApp], so Cmd +/- resizes this window's
+ * text too. [onResumeBreakpoint]/[onAbortBreakpoint] resolve a hold by correlation id (Resume applies the
+ * edits or proceeds unchanged; Abort fails the app's call). Concurrent holds are shown as a queue the
+ * user resolves in any order.
+ */
+@Composable
+fun WailoBreakpointWindowContent(
+    pausedFlows: List<PausedFlow>,
+    darkTheme: Boolean = isSystemInDarkTheme(),
+    textScale: Float = TextScale.Default,
+    onResumeBreakpoint: (String, HttpRequest?, HttpResponse?) -> Unit = { _, _, _ -> },
+    onAbortBreakpoint: (String) -> Unit = {},
+) {
+    WailoTheme(darkTheme = darkTheme) {
+        val density = LocalDensity.current
+        CompositionLocalProvider(
+            LocalDensity provides Density(density.density, density.fontScale * textScale),
+        ) {
+            Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+                BreakpointInspector(
+                    flows = pausedFlows,
+                    onResume = onResumeBreakpoint,
+                    onAbort = onAbortBreakpoint,
+                )
+            }
         }
     }
 }

@@ -38,15 +38,12 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import com.venbiasa.wailo.protocol.Header
-import com.venbiasa.wailo.protocol.HttpRequest
-import com.venbiasa.wailo.protocol.HttpResponse
 import com.venbiasa.wailo.shared.BreakpointNode
 import com.venbiasa.wailo.shared.CaptureFilterState
 import com.venbiasa.wailo.shared.FlowEntry
 import com.venbiasa.wailo.shared.MapLocalHeader
 import com.venbiasa.wailo.shared.MapLocalNode
 import com.venbiasa.wailo.shared.MapLocalRuleDef
-import com.venbiasa.wailo.shared.PausedFlow
 import com.venbiasa.wailo.shared.PickedFile
 import com.venbiasa.wailo.shared.format.requestHost
 import com.venbiasa.wailo.shared.resources.Res
@@ -88,9 +85,6 @@ internal fun WailoViewer(
     onBreakpointLayoutChange: (List<BreakpointNode>) -> Unit,
     breakpointsEnabled: Boolean,
     onBreakpointsEnabledChange: (Boolean) -> Unit,
-    pausedFlows: List<PausedFlow>,
-    onResumeBreakpoint: (String, HttpRequest?, HttpResponse?) -> Unit,
-    onAbortBreakpoint: (String) -> Unit,
     toolPanelWidthRatio: Float,
     onToolPanelWidthRatioChange: (Float) -> Unit,
 ) {
@@ -289,17 +283,6 @@ internal fun WailoViewer(
                             captureOpen = false
                         }
                     },
-                )
-            }
-            // The paused-traffic editor floats above everything while a device is holding a request or
-            // response at a breakpoint (ADR-0027). One hold is edited at a time; resolving it reveals the
-            // next. It is not gated by the docked panel — a hold can arrive whether or not the rules
-            // panel is open.
-            pausedFlows.firstOrNull()?.let { paused ->
-                BreakpointEditor(
-                    paused = paused,
-                    onResume = onResumeBreakpoint,
-                    onAbort = onAbortBreakpoint,
                 )
             }
         }
