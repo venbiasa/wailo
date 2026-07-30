@@ -8,19 +8,28 @@ import UIKit
 /// `application(_:didFinishLaunchingWithOptions:)`). This registers the interceptor and begins
 /// streaming captured exchanges to the desktop.
 ///
-/// Simulator note: the Simulator shares the Mac's network stack, so the default `localhost:8899`
-/// reaches the desktop engine with no port forwarding (iOS has no `adb reverse`). For a physical
-/// device, pass the Mac's LAN IP as `host`.
+/// Reaching the desktop needs no address in the common cases. The Simulator shares the Mac's network
+/// stack, so `localhost:8899` works with no port forwarding (iOS has no `adb reverse`). A physical
+/// device finds the desktop over Bonjour. Pass `host` — or set it at runtime via `setHost` — only to
+/// pin a specific machine or when mDNS is blocked; see `WailoCoordinator` for the precedence order.
 public enum Wailo {
 
     public static let defaultHost = "localhost"
     public static let defaultPort = 8899
-    private static let platform = "ios"
+    /// Loopback port the device listens on for USB-tunnelled Studio connections (distinct from LAN).
+    public static let defaultUsbPort = Int(WailoUsb.defaultPort)
+    static let platform = "ios"
 
-    nonisolated(unsafe) private static var client: WailoClient?
+    /// Posted when the live connection opens or closes; read `isConnected` for the current value.
+    public static let connectionDidChangeNotification = Notification.Name("com.venbiasa.wailo.connectionDidChange")
+
+    /// Posted when the set of desktops visible on the LAN changes; read `discoveredDesktops`.
+    public static let discoveryDidChangeNotification = Notification.Name("com.venbiasa.wailo.discoveryDidChange")
 
     /// Registers the interceptor and starts streaming to the desktop.
     ///
+    /// - Parameter host: pins a specific desktop. `nil` (the default) resolves the address at runtime —
+    ///   persisted override, then Bonjour, then `localhost` — so the address can change without a rebuild.
     /// - Parameter instrumentSharedConfigurations: when true, also swizzles
     ///   `URLSessionConfiguration.default`/`.ephemeral` so sessions built by third-party libraries
     ///   are captured too. When false, only `URLSession.shared` and sessions passed to
@@ -31,30 +40,24 @@ public enum Wailo {
     public static func start(
         appId: String = Bundle.main.bundleIdentifier ?? "unknown",
         deviceName: String = defaultDeviceName(),
-        host: String = defaultHost,
-        port: Int = defaultPort,
+        host: String? = nil,
+        port: Int? = nil,
         maxBodyBytes: Int? = nil,
         alsoLogToConsole: Bool = true,
         instrumentSharedConfigurations: Bool = true
     ) {
-        // Idempotent: cleanly replace any prior client (e.g. the `+load` auto-start default) instead of
-        // leaking a second live WebSocket — so "auto default + explicit customize" is one session, not two.
-        client?.stop()
-
-        let hello = Hello(device_name: deviceName, app_id: appId, platform: platform)
-        let webSocket = WailoClient(hello: hello, host: host, port: port)
-        let sink: CaptureSink = alsoLogToConsole ? webSocket + ConsoleSink() : webSocket
-
-        WailoURLProtocol.sink = sink
-        WailoURLProtocol.bodyFetcher = webSocket
-        WailoURLProtocol.breakpointGate = webSocket
-        WailoURLProtocol.maxBodyBytes = maxBodyBytes
+        WailoCoordinator.shared.start(WailoCoordinator.Session(
+            appId: appId,
+            deviceName: deviceName,
+            explicitHost: host,
+            explicitPort: port,
+            maxBodyBytes: maxBodyBytes,
+            alsoLogToConsole: alsoLogToConsole
+        ))
         URLProtocol.registerClass(WailoURLProtocol.self)
         if instrumentSharedConfigurations {
             URLSessionConfiguration.wailo_installProtocolInjection()
         }
-        webSocket.start()
-        client = webSocket
     }
 
     /// Adds the interceptor to a caller-owned `URLSessionConfiguration`. Use this for sessions built
@@ -64,11 +67,7 @@ public enum Wailo {
     }
 
     public static func stop() {
-        client?.stop()
-        client = nil
-        WailoURLProtocol.sink = nil
-        WailoURLProtocol.bodyFetcher = nil
-        WailoURLProtocol.breakpointGate = nil
+        WailoCoordinator.shared.stop()
     }
 
     public static func defaultDeviceName() -> String {
@@ -78,4 +77,43 @@ public enum Wailo {
         return ProcessInfo.processInfo.hostName
         #endif
     }
+
+    // MARK: - Runtime configuration
+
+    /// Re-point at a different desktop and reconnect immediately, persisting the choice across launches.
+    /// Pass `nil` to clear the override and hand control back to Bonjour discovery.
+    ///
+    /// Takes effect without a rebuild — that is the point (ADR-0035). A `host` passed to `start` still
+    /// outranks this for the current process.
+    public static func setHost(_ host: String?, port: Int? = nil) {
+        WailoCoordinator.shared.setHost(host, port: port)
+    }
+
+    /// Move the USB listener to another port and persist the choice; `nil` restores [defaultUsbPort].
+    ///
+    /// Studio must be set to the same port. USB has no equivalent of Bonjour — usbmux forwards to a
+    /// number — so a mismatch simply looks like the app isn't running.
+    public static func setUsbPort(_ port: Int?) {
+        WailoCoordinator.shared.setUsbPort(port)
+    }
+
+    /// The manual override currently in force, or `nil` when the address comes from discovery.
+    public static var configuredHost: String? { WailoCoordinator.shared.configuredHost }
+
+    public static var configuredPort: Int? { WailoCoordinator.shared.configuredPort }
+
+    public static var configuredUsbPort: Int? { WailoCoordinator.shared.configuredUsbPort }
+
+    /// The USB port currently bound. Differs from [configuredUsbPort] before `start()`.
+    public static var usbPort: Int { WailoCoordinator.shared.activeUsbPort }
+
+    /// The `host:port` actually being dialled, however it was resolved. `nil` before `start()`.
+    public static var activeAddress: String? { WailoCoordinator.shared.activeAddress }
+
+    /// Whether the WebSocket is up right now. A `true` here is the only proof traffic is reaching the
+    /// desktop; the client retries forever, so "started" says nothing.
+    public static var isConnected: Bool { WailoCoordinator.shared.isConnected }
+
+    /// Desktops currently advertising `_wailo._tcp` on the LAN. Empty unless discovery is running.
+    public static var discoveredDesktops: [WailoService] { WailoCoordinator.shared.discoveredDesktops }
 }

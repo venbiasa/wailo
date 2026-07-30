@@ -25,7 +25,16 @@ import com.venbiasa.wailo.shared.ui.WailoViewer
  * host's local wall clock (kept out of commonMain, which has no `java.time`). [textScale] is the
  * host-owned text-size multiplier (Cmd +/-); it rides on `fontScale` so only `sp` text resizes.
  * [darkTheme] and [onToggleDarkTheme] are likewise host-owned so the choice can persist across launches.
- * [listenAddress] is where the capture server accepts device connections; [capturing] reflects whether
+ * [listenAddress] is where the capture server accepts device connections and [listenPort] is the port
+ * within it, editable in the settings panel; [listening] says whether the server actually bound (false
+ * greys nothing out but marks the address as dead, since no traffic can arrive), and [onApplyPort] asks
+ * the host to move the server — only the host can try the bind, so it reports the verdict back through
+ * [portError] rather than this guessing which ports are usable. [devices] combines Hello-identified LAN
+ * sessions with host-discovered USB devices for the Devices panel; [usbSupported] controls its platform
+ * guidance — and whether the USB port is offered at all — without leaking platform APIs into `shared`.
+ * [usbPort] is the device-side port Studio dials over USB and [onApplyUsbPort] moves it (rejected values
+ * come back through [usbPortError]); it has to be set to match the SDK by hand, since usbmux forwards to a
+ * port without advertising one. [capturing] reflects whether
  * traffic is being recorded, and [onToggleCapture]/[onClear] drive the top bar (the engine lives in the
  * host, not here). [bookmarks] are the persisted, host-owned bookmarked hosts; [onAddBookmark]/
  * [onRemoveBookmark] let the viewer mutate that set (the host owns its persistence, ADR-0013).
@@ -57,6 +66,15 @@ fun WailoApp(
     onToggleDarkTheme: () -> Unit = {},
     textScale: Float = TextScale.Default,
     listenAddress: String = "",
+    listenPort: Int = 0,
+    listening: Boolean = true,
+    portError: String? = null,
+    onApplyPort: (Int) -> Unit = {},
+    devices: List<DeviceInfo> = emptyList(),
+    usbSupported: Boolean = false,
+    usbPort: Int = 0,
+    usbPortError: String? = null,
+    onApplyUsbPort: (Int) -> Unit = {},
     capturing: Boolean = true,
     onToggleCapture: () -> Unit = {},
     onClear: () -> Unit = {},
@@ -90,6 +108,15 @@ fun WailoApp(
                 darkTheme = darkTheme,
                 onToggleDarkTheme = onToggleDarkTheme,
                 listenAddress = listenAddress,
+                listenPort = listenPort,
+                listening = listening,
+                portError = portError,
+                onApplyPort = onApplyPort,
+                devices = devices,
+                usbSupported = usbSupported,
+                usbPort = usbPort,
+                usbPortError = usbPortError,
+                onApplyUsbPort = onApplyUsbPort,
                 capturing = capturing,
                 onToggleCapture = onToggleCapture,
                 onClear = onClear,

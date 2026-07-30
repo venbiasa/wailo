@@ -7,6 +7,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.graphics.painter.BitmapPainter
@@ -24,9 +25,15 @@ import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
 import com.venbiasa.wailo.engine.MapLocalBodyProvider
+import com.venbiasa.wailo.engine.ConnectedDevice
+import com.venbiasa.wailo.engine.DeviceTransport
 import com.venbiasa.wailo.engine.WailoEngine
+import com.venbiasa.wailo.engine.resolveLanAddress
 import com.venbiasa.wailo.shared.BreakpointNode
 import com.venbiasa.wailo.shared.CaptureFilterState
+import com.venbiasa.wailo.shared.DeviceConnectionStatus
+import com.venbiasa.wailo.shared.DeviceInfo
+import com.venbiasa.wailo.shared.DeviceTransportKind
 import com.venbiasa.wailo.shared.FlowEntry
 import com.venbiasa.wailo.shared.MapLocalNode
 import com.venbiasa.wailo.shared.MapLocalRuleDef
@@ -35,10 +42,14 @@ import com.venbiasa.wailo.shared.PickedFile
 import com.venbiasa.wailo.shared.WailoApp
 import com.venbiasa.wailo.shared.WailoBreakpointWindowContent
 import com.venbiasa.wailo.shared.theme.TextScale
+import com.venbiasa.wailo.desktop.usb.UsbConnectionStatus
+import com.venbiasa.wailo.desktop.usb.UsbDeviceManager
+import com.venbiasa.wailo.desktop.usb.UsbDeviceState
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import java.awt.Dimension
@@ -49,8 +60,6 @@ import java.awt.Taskbar
 import java.awt.image.BufferedImage
 import java.io.File
 import java.io.FilenameFilter
-import java.net.DatagramSocket
-import java.net.InetAddress
 import java.util.TimeZone
 import javax.imageio.ImageIO
 import kotlin.coroutines.resume
@@ -72,13 +81,77 @@ private val MinBreakpointWindowSize = DpSize(560.dp, 420.dp)
 // debounce (used below to coalesce window resize/move writes) is still a coroutines preview API.
 @OptIn(FlowPreview::class)
 private fun runWailo() = application {
-    val engine = remember { WailoEngine().also(WailoEngine::start) }
+    // Seeded from the last port the user chose, so a device pointed at a non-default port keeps working
+    // across restarts. The engine is built once and moved in place by [applyPort] — rebuilding it to
+    // change a port would discard the captured traffic and every rule snapshot it holds.
+    val engine = remember { WailoEngine(port = PortStore.load()) }
     val rows by engine.exchanges.collectAsState()
     val capturing by engine.capturing.collectAsState()
+    val connectedDevices by engine.connectedDevices.collectAsState()
+    val usbManager = remember(engine) { UsbDeviceManager(engine, UsbPortStore.load()) }
+    val usbDevices by usbManager.devices.collectAsState()
+    val usbPort by usbManager.devicePort.collectAsState()
+    DisposableEffect(usbManager) {
+        onDispose { usbManager.close() }
+    }
+    val devices = remember(connectedDevices, usbDevices) {
+        mergeDevices(connectedDevices, usbDevices)
+    }
+
+    // Where the server actually is, versus where it was asked to be. A bind can fail at launch as well as
+    // on a change — the saved port may have been taken since it was chosen — and a server that silently
+    // isn't listening is the one failure a user can't diagnose from the UI, so it's surfaced in both the
+    // settings panel ([portError]) and the top bar ([listening]).
+    var listenPort by remember { mutableStateOf(engine.port) }
+    var listening by remember { mutableStateOf(false) }
+    var portError by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(Unit) {
+        if (!engine.start()) portError = portUnavailable(engine.port)
+        listening = engine.listening
+    }
+
+    // Only the host can try a bind, so it — not `shared` — decides whether a port is usable and hands the
+    // panel the verdict. Suspending: tearing the old server down blocks, which must not happen on the UI
+    // thread. A rejected port leaves the server on the one it was already serving.
+    val scope = rememberCoroutineScope()
+    val applyPort: (Int) -> Unit = { next ->
+        scope.launch {
+            portError = when {
+                next !in WailoEngine.PORT_RANGE ->
+                    "Port must be between ${WailoEngine.PORT_RANGE.first} and ${WailoEngine.PORT_RANGE.last}."
+                engine.rebind(next) -> {
+                    PortStore.save(next)
+                    null
+                }
+                else -> portUnavailable(next)
+            }
+            // The engine is the authority on where it ended up: a rejected port rolls back to the last one
+            // that worked, so read both back rather than assuming the change took.
+            listenPort = engine.port
+            listening = engine.listening
+        }
+    }
+
+    // The USB port is a number on the *phone*, so nothing here can validate it beyond its range — a port
+    // no app is listening on is indistinguishable from an app that hasn't launched, and the Devices panel
+    // is where that shows up. Applying it re-dials every attached device.
+    var usbPortError by remember { mutableStateOf<String?>(null) }
+    val applyUsbPort: (Int) -> Unit = { next ->
+        if (next in WailoEngine.PORT_RANGE) {
+            usbPortError = null
+            UsbPortStore.save(next)
+            usbManager.setDevicePort(next)
+        } else {
+            usbPortError =
+                "Port must be between ${WailoEngine.PORT_RANGE.first} and ${WailoEngine.PORT_RANGE.last}."
+        }
+    }
 
     // The address devices should dial. The server binds every interface; we surface the host's LAN
-    // IPv4 (not the wildcard) so a physical device knows where to point, falling back to localhost.
-    val listenAddress = remember { "${resolveLanAddress()}:${engine.port}" }
+    // IPv4 (not the wildcard) so a physical device knows where to point, falling back to localhost. Only
+    // the host part is fixed — the port follows the setting.
+    val lanAddress = remember { resolveLanAddress() }
+    val listenAddress = "$lanAddress:$listenPort"
 
     // Map the engine's rows into the viewer's model at this boundary — `shared` must not depend on
     // `engine` (module firewall), so the two `Captured*` types are bridged here rather than shared.
@@ -325,6 +398,15 @@ private fun runWailo() = application {
             onToggleDarkTheme = { setDarkTheme(!darkTheme) },
             textScale = textScale,
             listenAddress = listenAddress,
+            listenPort = listenPort,
+            listening = listening,
+            portError = portError,
+            onApplyPort = applyPort,
+            devices = devices,
+            usbSupported = usbManager.supported,
+            usbPort = usbPort,
+            usbPortError = usbPortError,
+            onApplyUsbPort = applyUsbPort,
             capturing = capturing,
             onToggleCapture = { engine.setCapturing(!capturing) },
             onClear = engine::clear,
@@ -408,6 +490,62 @@ private fun runWailo() = application {
     }
 }
 
+private fun mergeDevices(
+    connected: List<ConnectedDevice>,
+    attachedUsb: List<UsbDeviceState>,
+): List<DeviceInfo> {
+    val connectedById = connected.associateBy(ConnectedDevice::connectionId)
+    val usbRows = attachedUsb.map { usb ->
+        val session = connectedById["usb:${usb.udid}"]
+        DeviceInfo(
+            id = "usb:${usb.udid}",
+            name = session?.deviceName ?: "iOS device",
+            appId = session?.appId,
+            platform = session?.platform ?: "ios",
+            transport = DeviceTransportKind.USB,
+            status = usb.status.toSharedStatus(),
+            detail = abbreviatedUdid(usb.udid),
+            error = usb.error,
+        )
+    }
+    val attachedIds = attachedUsb.mapTo(mutableSetOf()) { "usb:${it.udid}" }
+    val connectedRows = connected
+        .filter { it.transport == DeviceTransport.LAN || it.connectionId !in attachedIds }
+        .map { session ->
+            DeviceInfo(
+                id = session.connectionId,
+                name = session.deviceName,
+                appId = session.appId,
+                platform = session.platform,
+                transport = if (session.transport == DeviceTransport.USB) {
+                    DeviceTransportKind.USB
+                } else {
+                    DeviceTransportKind.LAN
+                },
+                status = DeviceConnectionStatus.CONNECTED,
+                detail = session.connectionId.removePrefix("usb:").takeIf { session.transport == DeviceTransport.USB },
+            )
+        }
+    return (usbRows + connectedRows).sortedWith(
+        compareBy<DeviceInfo> { it.transport != DeviceTransportKind.USB }.thenBy { it.name.lowercase() },
+    )
+}
+
+private fun UsbConnectionStatus.toSharedStatus(): DeviceConnectionStatus = when (this) {
+    UsbConnectionStatus.ATTACHED -> DeviceConnectionStatus.ATTACHED
+    UsbConnectionStatus.CONNECTING -> DeviceConnectionStatus.CONNECTING
+    UsbConnectionStatus.WAITING_FOR_APP -> DeviceConnectionStatus.WAITING_FOR_APP
+    UsbConnectionStatus.CONNECTED -> DeviceConnectionStatus.CONNECTED
+    UsbConnectionStatus.ERROR -> DeviceConnectionStatus.ERROR
+}
+
+private fun abbreviatedUdid(udid: String): String =
+    if (udid.length > 16) "${udid.take(8)}…${udid.takeLast(6)}" else udid
+
+// "In use" is the overwhelmingly common cause, but a privileged port (< 1024 without root) fails the same
+// way, so the wording points at the class of problem rather than naming a cause it can't actually confirm.
+private fun portUnavailable(port: Int) = "Port $port is unavailable — another app may be using it."
+
 /**
  * The Wailo app icon (the mark on the near-black accent), loaded from the classpath resource baked in
  * at src/main/resources/icons/wailo.png. Returns null — falling back to the platform default — only if
@@ -457,17 +595,3 @@ private suspend fun awaitNativeFileDialog(owner: Frame?): File? = suspendCancell
         cont.resume(if (name != null && dir != null) File(dir, name) else null)
     }
 }
-
-/**
- * The host's primary LAN IPv4 — the address a device on the same network dials to reach the capture
- * server. We ask the OS which local interface routes toward a public IP via a UDP "connect" (which
- * sends nothing), so we get the active outbound interface, instead of the first
- * enumerated site-local address — which is often a VPN/Docker/utun/bridge IP. Falls back to
- * "localhost" when there is no route (fully offline), which still covers the emulator/simulator case.
- */
-private fun resolveLanAddress(): String = runCatching {
-    DatagramSocket().use { socket ->
-        socket.connect(InetAddress.getByName("8.8.8.8"), 53)
-        socket.localAddress?.hostAddress
-    }
-}.getOrNull()?.takeUnless { it.isBlank() || it == "0.0.0.0" } ?: "localhost"

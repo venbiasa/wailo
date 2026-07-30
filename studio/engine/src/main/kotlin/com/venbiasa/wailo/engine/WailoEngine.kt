@@ -30,6 +30,7 @@ import io.ktor.websocket.readBytes
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -38,9 +39,16 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import okio.ByteString.Companion.toByteString
+import java.net.InetAddress
+import java.net.InetSocketAddress
+import java.net.ServerSocket
+import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
+import javax.jmdns.JmDNS
+import javax.jmdns.ServiceInfo
 
 /** One captured exchange plus the identity of the session that produced it. */
 data class CapturedExchange(
@@ -85,8 +93,9 @@ fun interface MapLocalBodyProvider {
 }
 
 /**
- * Headless capture server: accepts device WebSocket connections, decodes the protobuf stream, and
- * publishes exchanges as a [StateFlow] for any frontend (desktop UI now; CLI/MCP later). It also owns
+ * Headless capture engine: accepts LAN WebSockets plus transport-neutral connections supplied through
+ * [attach], decodes the protobuf stream, and publishes exchanges as a [StateFlow] for any frontend
+ * (desktop UI now; CLI/MCP later). It also owns
  * the reverse direction — Map Local (ADR-0019): it pushes the match-metadata [RuleSet] to every device
  * (versioned by [RuleSet.epoch], re-pushed until the device acks so a lost push self-repairs), and
  * answers a device's [BodyRequest] by reading the body through [bodyProvider]. It likewise pushes
@@ -95,12 +104,22 @@ fun interface MapLocalBodyProvider {
  * by design: no Compose here, and no filesystem access beyond the provider seam.
  */
 class WailoEngine(
-    val port: Int = DEFAULT_PORT,
+    port: Int = DEFAULT_PORT,
     private val maxRetained: Int = DEFAULT_MAX_RETAINED,
     // How often to re-push to a device that hasn't acked the current epoch. Injectable so tests can
     // exercise the anti-entropy retry without waiting the production interval.
     private val ackRetryMs: Long = DEFAULT_ACK_RETRY_MS,
 ) {
+    /**
+     * The port the capture server is listening on. Movable at runtime via [rebind] rather than fixed at
+     * construction, because everything worth keeping — the captured exchanges, the rule/filter/breakpoint
+     * snapshots, their epochs — hangs off this instance, and rebuilding the engine to change a port would
+     * throw all of it away. Read from the registration coroutine, so volatile.
+     */
+    @Volatile
+    var port: Int = port
+        private set
+
     private val _exchanges = MutableStateFlow<List<CapturedExchange>>(emptyList())
     val exchanges: StateFlow<List<CapturedExchange>> = _exchanges.asStateFlow()
 
@@ -142,6 +161,11 @@ class WailoEngine(
      */
     val pausedExchanges: StateFlow<List<PausedExchange>> = _pausedExchanges.asStateFlow()
 
+    private val _connectedDevices = MutableStateFlow<List<ConnectedDevice>>(emptyList())
+
+    /** SDK sessions that completed their Hello, regardless of whether they arrived over LAN or USB. */
+    val connectedDevices: StateFlow<List<ConnectedDevice>> = _connectedDevices.asStateFlow()
+
     /** Set by the frontend (the desktop) to resolve a matched rule's body on demand. */
     @Volatile
     var bodyProvider: MapLocalBodyProvider? = null
@@ -157,19 +181,43 @@ class WailoEngine(
     private val breakpointEpochCounter = AtomicLong(0)
 
     // Live device connections + how far each is acked, so a rule change reaches every attached SDK and a
-    // silently lost push is re-sent. Concurrent because Ktor runs one handler coroutine per connection.
-    private val sessions = ConcurrentHashMap<DefaultWebSocketServerSession, SessionState>()
+    // silently lost push is re-sent. The transport-neutral key lets the same protocol loop serve inbound
+    // LAN sockets and outbound USB sockets.
+    private val sessions = ConcurrentHashMap<DeviceConnection, SessionState>()
 
     // Which session raised each paused exchange, keyed by its correlation id, so a resume/abort routes
     // the decision back to the exact device that is holding that request/response. Entries are removed
     // when the decision is sent or when the owning session disconnects.
-    private val pausedSessions = ConcurrentHashMap<String, DefaultWebSocketServerSession>()
+    private val pausedSessions = ConcurrentHashMap<String, DeviceConnection>()
 
     // Rule pushes run off the caller's thread; serialized so frames to a session never interleave.
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val sendMutex = Mutex()
 
+    // Written by listen()/stop(), read by the Bonjour registration coroutine and by [listening].
+    @Volatile
     private var server: EmbeddedServer<*, *>? = null
+
+    /**
+     * Whether the capture server is bound and accepting devices. False after a failed [start] or [rebind]
+     * — the distinction a caller needs to tell "your new port was refused, the old one is still serving"
+     * from "nothing is listening at all", which a boolean return from those calls can't express.
+     */
+    val listening: Boolean get() = server != null
+
+    // Bumped by every bind and every teardown. Each bind launches one Bonjour registration, which blocks
+    // ~1s inside JmDNS.create; comparing generations on the way out is how a registration that straddled a
+    // [rebind] knows it is stale. Checking `server != null` instead cannot tell — a rebind puts a *new*
+    // server there while the old registration is still in flight, so the stale one would adopt it and
+    // strand an advertiser for a dead port that nothing tracks or closes.
+    private val bindGeneration = AtomicLong(0)
+
+    // Guards the check-then-assign of a freshly created JmDNS against a concurrent stop(). Without it the
+    // window between "my generation is still current" and the assignment is enough to strand an advertiser.
+    // Every read and write of [jmdns] goes through it, which is also what makes the field visible across
+    // the registration coroutine and the caller's thread.
+    private val bonjourLock = Any()
+    private var jmdns: JmDNS? = null
 
     /** Per-connection sync state: the highest snapshot epoch this device has acknowledged applying. */
     private class SessionState {
@@ -178,56 +226,160 @@ class WailoEngine(
         val ackedBreakpointEpoch = AtomicLong(-1)
     }
 
-    fun start() {
-        if (server != null) return
-        server = embeddedServer(CIO, port = port) {
+    private class KtorServerConnection(
+        private val session: DefaultWebSocketServerSession,
+    ) : DeviceConnection {
+        override val id: String = "lan:${UUID.randomUUID()}"
+        override val transport: DeviceTransport = DeviceTransport.LAN
+
+        override suspend fun receive(): ByteArray? {
+            while (true) {
+                val frame = session.incoming.receiveCatching().getOrNull() ?: return null
+                if (frame is Frame.Binary) return frame.readBytes()
+            }
+        }
+
+        override suspend fun send(bytes: ByteArray) {
+            session.outgoing.send(Frame.Binary(true, bytes))
+        }
+
+        override fun close() = Unit
+    }
+
+    /**
+     * Bind the capture server on [port] and start accepting devices. Idempotent.
+     *
+     * Returns false when the port can't be bound, leaving the engine stopped rather than throwing: a port
+     * that was free when it was chosen may be taken by the time it's used again, and that must be something
+     * the caller can report, not something that takes the app down at launch.
+     */
+    fun start(): Boolean = listen()
+
+    /**
+     * Serve a device connection opened by another reachability layer, currently macOS usbmuxd. The
+     * caller owns reconnects; this suspends until the connection closes and applies the same protocol
+     * semantics and cleanup as an inbound LAN WebSocket.
+     */
+    suspend fun attach(connection: DeviceConnection) {
+        handleConnection(connection)
+    }
+
+    /**
+     * Move the capture server to [newPort], keeping everything this instance holds — captured exchanges,
+     * rules, filter, breakpoints, epochs — which is the whole reason this exists instead of rebuilding the
+     * engine. LAN devices are dropped and have to redial; Bonjour re-advertises on the new port, so
+     * devices that discover rather than pin will find it themselves. Connections supplied through
+     * [attach] use their own reachability layer and stay live.
+     *
+     * Returns false and stays on the current port when [newPort] is outside [PORT_RANGE] or can't be bound.
+     * Suspending because tearing the old server down blocks for up to [STOP_TIMEOUT_MS], which must not
+     * happen on a UI thread.
+     */
+    suspend fun rebind(newPort: Int): Boolean {
+        if (newPort !in PORT_RANGE) return false
+        if (newPort == port && server != null) return true
+        return withContext(Dispatchers.IO) {
+            val previous = port
+            stopServer(closeAttachedConnections = false)
+            port = newPort
+            if (listen()) return@withContext true
+            // Never leave the app with nothing listening — go back to the port that was working.
+            port = previous
+            listen()
+            false
+        }
+    }
+
+    // The one bind path, behind both start() and rebind(). Ktor CIO binds on a background coroutine, so a
+    // failed bind doesn't reliably surface out of start(wait = false) — it would leave `server` set with
+    // nothing actually listening. Trial-binding first turns "that port is taken" into an answer a caller
+    // can show the user; runCatching covers the rest, including the narrow race between probe and bind.
+    private fun listen(): Boolean {
+        if (server != null) return true
+        if (!isBindable(port)) return false
+        val bound = runCatching { buildServer().also { it.start(wait = false) } }.getOrNull() ?: return false
+        server = bound
+        val generation = bindGeneration.incrementAndGet()
+        scope.launch(Dispatchers.IO) { registerBonjourService(generation) }
+        return true
+    }
+
+    // Trial-bind with the same address reuse a server sets, so a port our own previous bind left in
+    // TIME_WAIT still reads as free, while one another process is actively listening on reads as taken.
+    private fun isBindable(port: Int): Boolean = runCatching {
+        ServerSocket().use { probe ->
+            probe.reuseAddress = true
+            probe.bind(InetSocketAddress(port))
+        }
+    }.isSuccess
+
+    private fun buildServer(): EmbeddedServer<*, *> =
+        embeddedServer(CIO, port = port) {
             install(WebSockets)
             routing {
                 webSocket("/") {
-                    val state = SessionState()
-                    sessions[this] = state
-                    // Re-push to a lagging device until it acks the current epoch, so a silently dropped
-                    // snapshot self-repairs without waiting for the next edit or reconnect (ADR-0019).
-                    val reconciler = launch { reconcile(this@webSocket, state) }
-                    try {
-                        // Sync the freshly connected (or reconnected) device with the current rules,
-                        // capture filter, and breakpoint rules.
-                        pushRules(this)
-                        pushCaptureFilter(this)
-                        pushBreakpointRules(this)
-                        var hello: Hello? = null
-                        for (frame in incoming) {
-                            if (frame !is Frame.Binary) continue
-                            val envelope = Envelope.ADAPTER.decode(frame.readBytes())
-                            envelope.hello?.let { hello = it }
-                            envelope.exchange?.let { record(hello, it) }
-                            envelope.rule_ack?.let { ack ->
-                                state.ackedEpoch.updateAndGet { cur -> maxOf(cur, ack.epoch) }
-                            }
-                            envelope.capture_filter_ack?.let { ack ->
-                                state.ackedFilterEpoch.updateAndGet { cur -> maxOf(cur, ack.epoch) }
-                            }
-                            envelope.breakpoint_rules_ack?.let { ack ->
-                                state.ackedBreakpointEpoch.updateAndGet { cur -> maxOf(cur, ack.epoch) }
-                            }
-                            // Serve bodies off the read loop so a slow file read can't stall this
-                            // connection's incoming frames; the sendMutex still serializes the reply.
-                            envelope.body_request?.let { req -> launch { serveBody(this@webSocket, req) } }
-                            envelope.breakpoint_hit?.let { hit -> recordBreakpointHit(hello, hit, this@webSocket) }
-                        }
-                    } finally {
-                        reconciler.cancel()
-                        sessions.remove(this)
-                        releasePausedFor(this)
-                    }
+                    handleConnection(KtorServerConnection(this))
                 }
             }
-        }.also { it.start(wait = false) }
+        }
+
+    private suspend fun handleConnection(connection: DeviceConnection) = coroutineScope {
+        val state = SessionState()
+        sessions[connection] = state
+        // Re-push to a lagging device until it acks the current epoch, so a silently dropped snapshot
+        // self-repairs without waiting for the next edit or reconnect (ADR-0019).
+        val reconciler = launch { reconcile(connection, state) }
+        try {
+            pushRules(connection)
+            pushCaptureFilter(connection)
+            pushBreakpointRules(connection)
+            var hello: Hello? = null
+            while (true) {
+                val bytes = connection.receive() ?: break
+                val envelope = Envelope.ADAPTER.decode(bytes)
+                envelope.hello?.let {
+                    hello = it
+                    identify(connection, it)
+                }
+                envelope.exchange?.let { record(hello, it) }
+                envelope.rule_ack?.let { ack ->
+                    state.ackedEpoch.updateAndGet { cur -> maxOf(cur, ack.epoch) }
+                }
+                envelope.capture_filter_ack?.let { ack ->
+                    state.ackedFilterEpoch.updateAndGet { cur -> maxOf(cur, ack.epoch) }
+                }
+                envelope.breakpoint_rules_ack?.let { ack ->
+                    state.ackedBreakpointEpoch.updateAndGet { cur -> maxOf(cur, ack.epoch) }
+                }
+                // Keep a slow body read off this connection's receive loop.
+                envelope.body_request?.let { request -> launch { serveBody(connection, request) } }
+                envelope.breakpoint_hit?.let { hit -> recordBreakpointHit(hello, hit, connection) }
+            }
+        } finally {
+            reconciler.cancel()
+            sessions.remove(connection)
+            _connectedDevices.update { list -> list.filterNot { it.connectionId == connection.id } }
+            releasePausedFor(connection)
+            connection.close()
+        }
     }
 
     fun stop() {
+        stopServer(closeAttachedConnections = true)
+    }
+
+    private fun stopServer(closeAttachedConnections: Boolean) {
+        // Invalidate any in-flight registration before anything else, so one that is still inside
+        // JmDNS.create abandons its instance instead of publishing a port that is about to disappear.
+        bindGeneration.incrementAndGet()
+        if (closeAttachedConnections) sessions.keys.forEach(DeviceConnection::close)
         server?.stop(STOP_GRACE_MS, STOP_TIMEOUT_MS)
         server = null
+        val advertiser = synchronized(bonjourLock) { jmdns.also { jmdns = null } }
+        runCatching {
+            advertiser?.unregisterAllServices()
+            advertiser?.close()
+        }
     }
 
     /** Pause/resume recording. Devices stay connected either way; paused just drops incoming traffic. */
@@ -252,10 +404,10 @@ class WailoEngine(
 
     // Reads _rules under the lock at send time, so a connect-push racing a broadcast still converges
     // on the newest snapshot regardless of which wins the race.
-    private suspend fun pushRules(session: DefaultWebSocketServerSession) {
+    private suspend fun pushRules(session: DeviceConnection) {
         sendMutex.withLock {
             val bytes = Envelope(rule_set = _rules.value).encode()
-            runCatching { session.outgoing.send(Frame.Binary(true, bytes)) }
+            runCatching { session.send(bytes) }
         }
     }
 
@@ -283,10 +435,10 @@ class WailoEngine(
 
     // Mirrors pushRules: reads _captureFilter under the lock at send time so a connect-push racing a
     // broadcast still converges on the newest snapshot.
-    private suspend fun pushCaptureFilter(session: DefaultWebSocketServerSession) {
+    private suspend fun pushCaptureFilter(session: DeviceConnection) {
         sendMutex.withLock {
             val bytes = Envelope(capture_filter = _captureFilter.value).encode()
-            runCatching { session.outgoing.send(Frame.Binary(true, bytes)) }
+            runCatching { session.send(bytes) }
         }
     }
 
@@ -302,16 +454,16 @@ class WailoEngine(
 
     // Mirrors pushRules/pushCaptureFilter: reads _breakpointRules under the lock at send time so a
     // connect-push racing a broadcast still converges on the newest snapshot.
-    private suspend fun pushBreakpointRules(session: DefaultWebSocketServerSession) {
+    private suspend fun pushBreakpointRules(session: DeviceConnection) {
         sendMutex.withLock {
             val bytes = Envelope(breakpoint_rules = _breakpointRules.value).encode()
-            runCatching { session.outgoing.send(Frame.Binary(true, bytes)) }
+            runCatching { session.send(bytes) }
         }
     }
 
     // Re-push the current snapshot to a device that hasn't acked it yet. Cancelled when the connection
     // ends (the launching coroutine is a child of the session handler).
-    private suspend fun reconcile(session: DefaultWebSocketServerSession, state: SessionState) {
+    private suspend fun reconcile(session: DeviceConnection, state: SessionState) {
         while (true) {
             delay(ackRetryMs)
             if (state.ackedEpoch.get() < _rules.value.epoch) pushRules(session)
@@ -322,7 +474,7 @@ class WailoEngine(
 
     // Answer a matched request by reading the body through the provider, or found=false so the device
     // falls open to the real network. The provider owns any IO dispatch.
-    private suspend fun serveBody(session: DefaultWebSocketServerSession, request: BodyRequest) {
+    private suspend fun serveBody(session: DeviceConnection, request: BodyRequest) {
         val served = runCatching {
             bodyProvider?.serve(request.rule_id, request.url, request.method)
         }.getOrNull()
@@ -338,13 +490,13 @@ class WailoEngine(
             BodyResponse(correlation_id = request.correlation_id, found = false)
         }
         sendMutex.withLock {
-            runCatching { session.outgoing.send(Frame.Binary(true, Envelope(body_response = response).encode())) }
+            runCatching { session.send(Envelope(body_response = response).encode()) }
         }
     }
 
     // Record a device's paused request/response and remember which session raised it, so a later
     // resume/abort can route the decision straight back to that connection.
-    private fun recordBreakpointHit(hello: Hello?, hit: BreakpointHit, session: DefaultWebSocketServerSession) {
+    private fun recordBreakpointHit(hello: Hello?, hit: BreakpointHit, session: DeviceConnection) {
         pausedSessions[hit.correlation_id] = session
         val paused = PausedExchange(
             correlationId = hit.correlation_id,
@@ -396,20 +548,29 @@ class WailoEngine(
         _pausedExchanges.update { list -> list.filterNot { it.correlationId == decision.correlation_id } }
         scope.launch {
             sendMutex.withLock {
-                runCatching {
-                    session.outgoing.send(Frame.Binary(true, Envelope(breakpoint_decision = decision).encode()))
-                }
+                runCatching { session.send(Envelope(breakpoint_decision = decision).encode()) }
             }
         }
     }
 
     // Drop every exchange a disconnecting session was holding. The device fails those calls open on its
     // side when the link drops, so the desktop must not keep showing them as pausable.
-    private fun releasePausedFor(session: DefaultWebSocketServerSession) {
+    private fun releasePausedFor(session: DeviceConnection) {
         val orphaned = pausedSessions.entries.filter { it.value == session }.map { it.key }
         if (orphaned.isEmpty()) return
         orphaned.forEach { pausedSessions.remove(it) }
         _pausedExchanges.update { list -> list.filterNot { it.correlationId in orphaned } }
+    }
+
+    private fun identify(connection: DeviceConnection, hello: Hello) {
+        val device = ConnectedDevice(
+            connectionId = connection.id,
+            deviceName = hello.device_name,
+            appId = hello.app_id,
+            platform = hello.platform,
+            transport = connection.transport,
+        )
+        _connectedDevices.update { list -> list.filterNot { it.connectionId == connection.id } + device }
     }
 
     private fun record(hello: Hello?, exchange: HttpExchange) {
@@ -423,11 +584,54 @@ class WailoEngine(
         _exchanges.update { (it + row).takeLast(maxRetained) }
     }
 
+    // Best-effort: JmDNS init can block ~1s and fails without a usable network interface; never wedge a bind.
+    // [generation] is the bind this registration belongs to — see [bindGeneration] for why a stop or a
+    // rebind during that blocking init has to abandon the instance rather than publish it.
+    private suspend fun registerBonjourService(generation: Long) {
+        runCatching {
+            if (bindGeneration.get() != generation) return
+            val lanAddress = resolveLanAddress()
+            if (lanAddress == "localhost") return
+            val instance = JmDNS.create(InetAddress.getByName(lanAddress))
+            // Publish only if this is still the current bind, and do the check and the handover together
+            // so a stop() can't slip between them and lose track of the instance it would have closed.
+            val current = synchronized(bonjourLock) {
+                (bindGeneration.get() == generation).also { if (it) jmdns = instance }
+            }
+            if (!current) {
+                instance.close()
+                return
+            }
+            // A DNS-SD instance name is a single label, and macOS hands back an FQDN here
+            // ("<hostname>.local"). Registering that verbatim publishes an instance whose name
+            // carries a dotted `.local` suffix, which Apple's mDNSResponder ignores outright — so iOS,
+            // which browses through that same stack, never sees the desktop. JmDNS is lax enough to
+            // publish and resolve it either way, so a Kotlin-to-Kotlin check looks perfectly healthy.
+            val serviceName = runCatching { InetAddress.getLocalHost().hostName }
+                .getOrNull()
+                ?.substringBefore('.')
+                ?.takeUnless { it.isBlank() }
+                ?: BONJOUR_FALLBACK_NAME
+            instance.registerService(
+                ServiceInfo.create(BONJOUR_SERVICE_TYPE, serviceName, port, ""),
+            )
+        }
+    }
+
     companion object {
         const val DEFAULT_PORT: Int = 8899
+
+        /**
+         * Ports [rebind] will accept. 0 is excluded because the OS reads it as "any free port", which would
+         * bind fine and then leave the engine listening somewhere nobody was told about.
+         */
+        val PORT_RANGE: IntRange = 1..65535
+
         private const val DEFAULT_MAX_RETAINED: Int = 10000
         private const val STOP_GRACE_MS: Long = 500L
         private const val STOP_TIMEOUT_MS: Long = 1000L
         private const val DEFAULT_ACK_RETRY_MS: Long = 2000L
+        private const val BONJOUR_SERVICE_TYPE = "_wailo._tcp.local."
+        private const val BONJOUR_FALLBACK_NAME = "Wailo"
     }
 }

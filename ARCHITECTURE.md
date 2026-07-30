@@ -21,10 +21,15 @@ does not require rewrites:
 ```mermaid
 flowchart LR
   subgraph device [Device / app under test]
-    ok[OkHttp / URLSession] --> intc["Wailo interceptor + capture model + WS client (sdk-android / sdk-ios)"]
+    ok[OkHttp / URLSession] --> intc["Wailo interceptor + capture model"]
+    intc --> client["LAN WS client"]
+    intc --> listener["iOS USB WS listener"]
   end
-  intc -->|"protobuf Envelope over WebSocket"| server["engine: WS server"]
-  server --> store["engine: SessionStore (per device/app)"]
+  client -->|"protobuf Envelope over WebSocket"| server["engine: LAN WS server"]
+  usb["desktopApp: macOS usbmuxd connector"] --> listener
+  server --> session["engine: transport-neutral session handler"]
+  usb --> session
+  session --> store["engine: SessionStore (per device/app)"]
   store --> ui["shared + desktopApp: live inspector"]
   store -. later .-> cli["CLI (Appium)"]
   store -. later .-> mcp["MCP server"]
@@ -32,14 +37,33 @@ flowchart LR
 
 ## Transport
 
-- WebSocket. Device = client, desktop = server (default port 8899).
+- Protobuf `Envelope`s use one binary WebSocket message each. On LAN the device is the client and the
+  desktop is the server (default port 8899, bound on every interface). The LAN port is changeable at
+  runtime from Settings and persists across restarts; the engine rebinds in place without losing captured
+  traffic or rule snapshots (ADR-0036).
 - Android: forwarded over `adb reverse` per device (`adb -s <serial> reverse tcp:8899 tcp:8899`).
-- iOS: there is no `adb reverse`. The Simulator shares the Mac's network stack, so `localhost:8899`
-  reaches the server directly; a physical device points `host` at the Mac's LAN IP. USB tunnelling
-  (usbmux/PeerTalk) is deferred.
-- Multiple devices/apps each open their own connection; the server distinguishes them by the `Hello`
-  sent on connect.
-- Deferred: mDNS/wifi discovery (for devices not adb-connected) and iOS USB tunnelling.
+- iOS Simulator: shares the Mac's network stack, so `localhost:8899` reaches the LAN server directly.
+- iOS physical device on macOS: Studio monitors Apple's built-in `/var/run/usbmuxd` and connects to the
+  SDK's device-local WebSocket listener on port 8900. This reverses only who opens the socket: the
+  device still sends `Hello` and captures, and the engine still sends control snapshots and decisions.
+  USB is preferred while connected; the existing LAN client resumes on unplug (ADR-0037). Both ends
+  default to 8900 and both can change it — usbmux forwards to a port without advertising one, so the
+  numbers are matched by hand in Settings and the on-device panel, never negotiated.
+- USB recovery is two-sided: the iOS listener re-binds after iOS defuncts it during suspension (and on
+  foreground), and Studio polls `ListDevices` alongside the usbmuxd event stream, so a sleep/wake does
+  not need a re-plug or an app restart.
+- iOS physical device without USB: finds the LAN server over Bonjour (ADR-0035). This path still needs
+  Local Network consent, Bonjour plist declarations, and ATS permission for plaintext `ws://`.
+- Discovery: the desktop advertises `_wailo._tcp` on its LAN address (JmDNS, best-effort — a failure
+  never blocks the server); `sdk-ios` browses with `NWBrowser`. Host apps must declare
+  `NSLocalNetworkUsageDescription` + `NSBonjourServices`, and an ATS exception for plaintext `ws://`
+  to an IP literal. Android doesn't browse — `adb reverse` already makes the desktop local.
+- iOS host resolution, highest first: the `host` passed to `Wailo.start`, then the persisted /
+  `-WailoHost` launch-argument override, then Bonjour, then `localhost`. Every input is runtime-mutable
+  (`Wailo.setHost`, or the `WailoSDKDebug` panel), so changing desktops never needs a rebuild.
+- Multiple devices/apps each have their own engine session. Studio connects to every USB-attached iOS
+  device exposing the configured USB port; `Hello` identifies the app after the tunnel opens.
+- Deferred: Windows/Linux iOS USB support, and mDNS for Android.
 
 ## Multi-session model
 

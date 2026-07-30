@@ -16,6 +16,20 @@ let package = Package(
         // `-ObjC` footgun); a dynamic image is always loaded, so zero-install auto-start is reliable with
         // no host build flags — the iOS analog of Android's manifest-merged WailoStartupProvider (ADR-0009).
         .library(name: "WailoSDK", type: .dynamic, targets: ["WailoSDK", "WailoAutoStart"]),
+        // A superset of WailoSDK: the same interceptor plus the on-device settings panel (ADR-0035).
+        // Link this *instead of* WailoSDK in debug builds — the panel stays out of release binaries
+        // because they never link it, which is what keeps UIKit/SwiftUI out of the shipping SDK
+        // (invariant #3) without a compile-time flag.
+        //
+        // A superset rather than an additive second product because both must be dynamic (same `+load`
+        // reason as below), and two dynamic products sharing the WailoSDK *target* makes Xcode try to
+        // build that target as a dynamic library — which it refuses to do while a product has the same
+        // name. One product means the target is linked exactly once.
+        .library(
+            name: "WailoSDKDebug",
+            type: .dynamic,
+            targets: ["WailoSDK", "WailoAutoStart", "WailoDebugUI", "WailoDebugUIAutoStart"]
+        ),
     ],
     dependencies: [
         // Pinned to the same Wire version as gradle/libs.versions.toml so the generated code and
@@ -41,6 +55,16 @@ let package = Package(
         .target(
             name: "WailoAutoStart",
             dependencies: ["WailoSDK"]
+        ),
+        .target(
+            name: "WailoDebugUI",
+            dependencies: ["WailoSDK"]
+        ),
+        // The debug panel's own `+load` hook; separate target for the same single-language reason as
+        // WailoAutoStart, and resolves its Swift entry point by runtime name.
+        .target(
+            name: "WailoDebugUIAutoStart",
+            dependencies: ["WailoDebugUI"]
         ),
         .testTarget(
             name: "WailoSDKTests",

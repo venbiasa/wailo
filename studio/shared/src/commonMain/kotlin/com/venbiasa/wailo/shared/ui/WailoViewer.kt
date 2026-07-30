@@ -40,6 +40,7 @@ import androidx.compose.ui.unit.dp
 import com.venbiasa.wailo.protocol.Header
 import com.venbiasa.wailo.shared.BreakpointNode
 import com.venbiasa.wailo.shared.CaptureFilterState
+import com.venbiasa.wailo.shared.DeviceInfo
 import com.venbiasa.wailo.shared.FlowEntry
 import com.venbiasa.wailo.shared.MapLocalHeader
 import com.venbiasa.wailo.shared.MapLocalNode
@@ -50,14 +51,23 @@ import com.venbiasa.wailo.shared.resources.Res
 import com.venbiasa.wailo.shared.resources.ic_breakpoint
 import com.venbiasa.wailo.shared.resources.ic_dark_mode
 import com.venbiasa.wailo.shared.resources.ic_delete
+import com.venbiasa.wailo.shared.resources.ic_devices
 import com.venbiasa.wailo.shared.resources.ic_light_mode
 import com.venbiasa.wailo.shared.resources.ic_lock
 import com.venbiasa.wailo.shared.resources.ic_pause
 import com.venbiasa.wailo.shared.resources.ic_play_arrow
 import com.venbiasa.wailo.shared.resources.ic_rule
+import com.venbiasa.wailo.shared.resources.ic_settings
 import com.venbiasa.wailo.shared.theme.LocalWailoColors
 import org.jetbrains.compose.resources.DrawableResource
 import org.jetbrains.compose.resources.vectorResource
+
+/**
+ * The single docked tool slot on the right: at most one panel is open at a time, so the layout never has
+ * to reason about two side panels, and each opens at the one host-owned [WailoViewer] width ratio. Modeled
+ * as one value rather than a flag per panel so "two panels open at once" isn't a state that can be reached.
+ */
+private enum class ToolPanel { CaptureFilter, MapLocal, Breakpoints, Devices, Settings }
 
 @Composable
 internal fun WailoViewer(
@@ -66,6 +76,15 @@ internal fun WailoViewer(
     darkTheme: Boolean,
     onToggleDarkTheme: () -> Unit,
     listenAddress: String,
+    listenPort: Int,
+    listening: Boolean,
+    portError: String?,
+    onApplyPort: (Int) -> Unit,
+    devices: List<DeviceInfo>,
+    usbSupported: Boolean,
+    usbPort: Int,
+    usbPortError: String?,
+    onApplyUsbPort: (Int) -> Unit,
     capturing: Boolean,
     onToggleCapture: () -> Unit,
     onClear: () -> Unit,
@@ -106,21 +125,15 @@ internal fun WailoViewer(
         if (host == null) entries else entries.filter { requestHost(it.exchange.request?.url ?: "") == host }
     }
 
-    // Map Local tool panel: its open/close, the current draft, and the body seed are transient view
-    // state (like the selection/filter above). The host owns the rules and their persistence — the
-    // panel only renders them (ADR-0013/0021).
-    var mapLocalOpen by remember { mutableStateOf(false) }
+    // Which tool panel is docked, plus Map Local's current draft and body seed: transient view state (like
+    // the selection/filter above). The host owns every panel's contents and their persistence — the panels
+    // only render them (ADR-0013/0021). Every panel shares the one host-owned [toolPanelWidthRatio], so a width
+    // dragged for any of them is the width the next one opens at, and it persists across restarts. It's a
+    // fraction of the window, not a fixed dp, so the panel scales with the window (clamped to keep both
+    // panel and content usable, see ToolPanelLayout).
+    var openPanel by remember { mutableStateOf<ToolPanel?>(null) }
     var mapLocalDraft by remember { mutableStateOf<MapLocalRuleDef?>(null) }
     var mapLocalBodySeed by remember { mutableStateOf<ByteArray?>(null) }
-    // The capture-filter panel shares the single docked tool slot with Map Local — opening one closes
-    // the other — so the layout never reasons about two side panels at once, and both size themselves from
-    // the one host-owned [toolPanelWidthRatio]: a width dragged for either panel persists across restarts
-    // and carries over to the other. It's a fraction of the window, not a fixed dp, so the panel scales
-    // with the window (clamped to keep both panel and content usable, see ToolPanelLayout).
-    var captureOpen by remember { mutableStateOf(false) }
-    // The breakpoints panel shares the same single docked tool slot as Map Local and the capture
-    // filter — opening any one closes the others.
-    var breakpointsOpen by remember { mutableStateOf(false) }
     val density = LocalDensity.current
 
     Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
@@ -135,6 +148,7 @@ internal fun WailoViewer(
                     Column(Modifier.fillMaxSize()) {
                         TopBar(
                             listenAddress = listenAddress,
+                            listening = listening,
                             capturing = capturing,
                             onToggleCapture = onToggleCapture,
                             onClear = onClear,
@@ -192,7 +206,7 @@ internal fun WailoViewer(
                                         headers = seededHeaders(responseHeaders),
                                     )
                                     mapLocalBodySeed = seed
-                                    mapLocalOpen = true
+                                    openPanel = ToolPanel.MapLocal
                                 },
                             )
                         }
@@ -209,11 +223,12 @@ internal fun WailoViewer(
                         }
                     }
                 }
-                // The docked tool panel — Map Local or the capture filter, never both — sits to the
-                // right, resizable, between the content and the tool rail (the Android Studio tool-window
-                // model). One [toolPanelWidthRatio] backs the single slot, so a width dragged for one panel
-                // is exactly the width the other opens at, and it persists across restarts.
-                if (mapLocalOpen || captureOpen || breakpointsOpen) {
+                // The docked tool panel sits to the right, resizable, between the content and the tool rail
+                // (the Android Studio tool-window model). One [toolPanelWidthRatio] backs the single slot,
+                // so a width dragged for one panel is exactly the width the next opens at, and it persists
+                // across restarts.
+                val docked = openPanel
+                if (docked != null) {
                     val panelWidth = ToolPanelLayout.widthFor(toolPanelWidthRatio, totalWidth)
                     PanelResizeHandle { deltaPx ->
                         // Drag the handle left (negative delta) to widen; convert the new width back to a
@@ -221,31 +236,50 @@ internal fun WailoViewer(
                         val dragged = panelWidth - with(density) { deltaPx.toDp() }
                         onToolPanelWidthRatioChange(ToolPanelLayout.ratioFor(dragged, totalWidth))
                     }
+                    val closePanel = { openPanel = null }
                     Box(Modifier.width(panelWidth).fillMaxHeight()) {
-                        when {
-                            mapLocalOpen -> MapLocalManager(
+                        when (docked) {
+                            ToolPanel.MapLocal -> MapLocalManager(
                                 nodes = mapLocalNodes,
                                 initialDraft = mapLocalDraft,
                                 initialBodySeed = mapLocalBodySeed,
                                 onLayoutChange = onMapLocalLayoutChange,
                                 enabled = mapLocalEnabled,
                                 onEnabledChange = onMapLocalEnabledChange,
-                                onClose = { mapLocalOpen = false },
+                                onClose = closePanel,
                                 onLoadBody = onLoadMapLocalBody,
                                 onSaveBody = onSaveMapLocalBody,
                                 onPickFile = onPickMapLocalFile,
                             )
-                            captureOpen -> CaptureFilterManager(
+                            ToolPanel.CaptureFilter -> CaptureFilterManager(
                                 filter = captureFilter,
                                 onFilterChange = onCaptureFilterChange,
-                                onClose = { captureOpen = false },
+                                onClose = closePanel,
                             )
-                            else -> BreakpointManager(
+                            ToolPanel.Breakpoints -> BreakpointManager(
                                 nodes = breakpointNodes,
                                 onLayoutChange = onBreakpointLayoutChange,
                                 enabled = breakpointsEnabled,
                                 onEnabledChange = onBreakpointsEnabledChange,
-                                onClose = { breakpointsOpen = false },
+                                onClose = closePanel,
+                            )
+                            ToolPanel.Devices -> DevicesManager(
+                                devices = devices,
+                                usbSupported = usbSupported,
+                                usbPort = usbPort,
+                                onClose = closePanel,
+                            )
+                            ToolPanel.Settings -> SettingsManager(
+                                listenPort = listenPort,
+                                listenAddress = listenAddress,
+                                listening = listening,
+                                portError = portError,
+                                onApplyPort = onApplyPort,
+                                usbSupported = usbSupported,
+                                usbPort = usbPort,
+                                usbPortError = usbPortError,
+                                onApplyUsbPort = onApplyUsbPort,
+                                onClose = closePanel,
                             )
                         }
                     }
@@ -254,33 +288,15 @@ internal fun WailoViewer(
                 ToolRail(
                     darkTheme = darkTheme,
                     onToggleDarkTheme = onToggleDarkTheme,
-                    mapLocalOpen = mapLocalOpen,
-                    onToggleMapLocal = {
-                        if (mapLocalOpen) {
-                            mapLocalOpen = false
-                        } else {
-                            // Opening from the rail lands on the rule list, not a seeded draft.
+                    openPanel = openPanel,
+                    onSelectPanel = { panel ->
+                        // Rail buttons are toggles: picking the open panel closes it.
+                        openPanel = if (openPanel == panel) null else panel
+                        // Reaching Map Local from the rail lands on the rule list; only a row's
+                        // "Map Local…" opens it on a seeded draft.
+                        if (panel == ToolPanel.MapLocal) {
                             mapLocalDraft = null
                             mapLocalBodySeed = null
-                            mapLocalOpen = true
-                            captureOpen = false
-                            breakpointsOpen = false
-                        }
-                    },
-                    captureOpen = captureOpen,
-                    onToggleCapture = {
-                        captureOpen = !captureOpen
-                        if (captureOpen) {
-                            mapLocalOpen = false
-                            breakpointsOpen = false
-                        }
-                    },
-                    breakpointsOpen = breakpointsOpen,
-                    onToggleBreakpoints = {
-                        breakpointsOpen = !breakpointsOpen
-                        if (breakpointsOpen) {
-                            mapLocalOpen = false
-                            captureOpen = false
                         }
                     },
                 )
@@ -318,19 +334,16 @@ private fun seededHeaders(responseHeaders: List<Header>): List<MapLocalHeader> {
 
 /**
  * The right tool rail: an icon-only strip (Android Studio's right tool bar). The dark/light toggle
- * leads as a global app action; below a divider come the side-panel tools — today just Map Local,
- * whose button stays highlighted while its panel is open.
+ * leads as a global app action; below a divider come the side-panel tools, each highlighted while its
+ * panel is docked. Settings sits alone at the foot of the rail — it configures the app rather than
+ * inspecting traffic, and the bottom is where a settings entry is looked for.
  */
 @Composable
 private fun ToolRail(
     darkTheme: Boolean,
     onToggleDarkTheme: () -> Unit,
-    mapLocalOpen: Boolean,
-    onToggleMapLocal: () -> Unit,
-    captureOpen: Boolean,
-    onToggleCapture: () -> Unit,
-    breakpointsOpen: Boolean,
-    onToggleBreakpoints: () -> Unit,
+    openPanel: ToolPanel?,
+    onSelectPanel: (ToolPanel) -> Unit,
 ) {
     Column(
         Modifier.fillMaxHeight()
@@ -342,7 +355,9 @@ private fun ToolRail(
     ) {
         // Icon reflects the target mode (moon = switch to dark, sun = switch to light), the common
         // toggle convention so a glance tells you what clicking will do. It's an app-wide action, not a
-        // tool panel, so it never carries the selected highlight and sits above the tool divider.
+        // tool panel, so it never carries the selected highlight and sits above the tool divider. It stays
+        // on the rail because flipping themes to check a screen in both is a one-click job (ADR-0016),
+        // not something worth opening a panel for.
         ToolRailButton(
             icon = if (darkTheme) Res.drawable.ic_light_mode else Res.drawable.ic_dark_mode,
             contentDescription = if (darkTheme) "Switch to light mode" else "Switch to dark mode",
@@ -353,20 +368,33 @@ private fun ToolRail(
         ToolRailButton(
             icon = Res.drawable.ic_lock,
             contentDescription = "Capture Filter",
-            selected = captureOpen,
-            onClick = onToggleCapture,
+            selected = openPanel == ToolPanel.CaptureFilter,
+            onClick = { onSelectPanel(ToolPanel.CaptureFilter) },
         )
         ToolRailButton(
             icon = Res.drawable.ic_rule,
             contentDescription = "Map Local",
-            selected = mapLocalOpen,
-            onClick = onToggleMapLocal,
+            selected = openPanel == ToolPanel.MapLocal,
+            onClick = { onSelectPanel(ToolPanel.MapLocal) },
         )
         ToolRailButton(
             icon = Res.drawable.ic_breakpoint,
             contentDescription = "Breakpoints",
-            selected = breakpointsOpen,
-            onClick = onToggleBreakpoints,
+            selected = openPanel == ToolPanel.Breakpoints,
+            onClick = { onSelectPanel(ToolPanel.Breakpoints) },
+        )
+        ToolRailButton(
+            icon = Res.drawable.ic_devices,
+            contentDescription = "Devices",
+            selected = openPanel == ToolPanel.Devices,
+            onClick = { onSelectPanel(ToolPanel.Devices) },
+        )
+        Spacer(Modifier.weight(1f))
+        ToolRailButton(
+            icon = Res.drawable.ic_settings,
+            contentDescription = "Settings",
+            selected = openPanel == ToolPanel.Settings,
+            onClick = { onSelectPanel(ToolPanel.Settings) },
         )
     }
 }
@@ -433,6 +461,7 @@ private fun PanelResizeHandle(onDragDelta: (Float) -> Unit) {
 @Composable
 private fun TopBar(
     listenAddress: String,
+    listening: Boolean,
     capturing: Boolean,
     onToggleCapture: () -> Unit,
     onClear: () -> Unit,
@@ -464,18 +493,24 @@ private fun TopBar(
         }
         Spacer(Modifier.width(8.dp))
         // The address a device should dial, prefixed by a recording dot: green while capturing, muted
-        // when paused, so the dot always agrees with the pause/resume button.
+        // when paused, so the dot always agrees with the pause/resume button. A server that couldn't bind
+        // its port overrides both and goes red — otherwise this reads as a working endpoint while nothing
+        // is listening and no traffic will ever arrive, with no hint that the port (in Settings) is why.
         Box(
             Modifier.size(8.dp).background(
-                color = if (capturing) LocalWailoColors.current.success else MaterialTheme.colorScheme.onSurfaceVariant,
+                color = when {
+                    !listening -> MaterialTheme.colorScheme.error
+                    capturing -> LocalWailoColors.current.success
+                    else -> MaterialTheme.colorScheme.onSurfaceVariant
+                },
                 shape = CircleShape,
             ),
         )
         Spacer(Modifier.width(6.dp))
         Text(
-            listenAddress,
+            if (listening) listenAddress else "$listenAddress — not listening",
             style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            color = if (listening) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error,
         )
     }
 }

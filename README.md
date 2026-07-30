@@ -109,6 +109,11 @@ adb shell am start -n com.venbiasa.wailo.sample/.MainActivity
 Captured requests appear live in the desktop window. The sample already wires this up, so
 running the four commands above is enough to see traffic stream across.
 
+If `:8899` is taken, change it in the desktop's **Settings** panel (the gear at the foot of the right
+tool rail) — the server rebinds without losing what it has already captured, and the choice sticks across
+restarts (ADR-0036). Re-run `adb reverse` on the new port; an iOS device using Bonjour re-finds it by
+itself. The macOS USB path is independent, with its own device port (8900 by default) in the same panel.
+
 ## Auto-instrumentation
 
 `Wailo.interceptor()` only reaches OkHttp clients the app itself builds. To also capture clients
@@ -147,18 +152,55 @@ ADR-0017):
 ```
 
 `URLSession.shared` and sessions built by third-party libraries are captured with no wiring, because the
-hook swizzles `URLSessionConfiguration.default`/`.ephemeral` (ADR-0009), defaulting to `localhost:8899`.
-To customize (host/port, device name) call `Wailo.start(...)` once at launch — it's idempotent and cleanly
-replaces the auto-installed default. For a session built before capture is armed, call
-`Wailo.instrument(configuration)`.
+hook swizzles `URLSessionConfiguration.default`/`.ephemeral` (ADR-0009). To customize (device name, or to
+pin a host) call `Wailo.start(...)` once at launch — it's idempotent and cleanly replaces the
+auto-installed default. For a session built before capture is armed, call `Wailo.instrument(configuration)`.
 
-**Reaching the desktop (iOS has no `adb reverse`).** The Simulator shares the Mac's network stack, so
-the default `localhost:8899` reaches the desktop engine with no forwarding. For a physical device, pass
-the Mac's LAN IP:
+**Reaching the desktop.** The Simulator shares the Mac's network stack, so `localhost:8899` reaches the
+engine with no forwarding. On macOS, a USB-connected physical device is automatic: Studio talks directly
+to Apple's built-in `usbmuxd`, finds every attached iPhone, and dials the SDK's device-local listener on
+port 8900. Nothing extra is bundled in the DMG and neither `iproxy` nor Homebrew is required. USB carries
+traffic while connected; unplugging resumes the existing LAN client (ADR-0037). The **Devices** panel in
+the right tool rail shows attached, waiting-for-app, and connected states. The listener is part of both
+`WailoSDK` and `WailoSDKDebug`; the latter only adds the on-device settings UI.
 
-```swift
-Wailo.start(host: "192.168.1.42")       // Mac's LAN IP; device on the same WiFi
-```
+If 8900 collides with something in the host app, move it — `Wailo.setUsbPort(9100)`, the debug panel, or
+`-WailoUsbPort 9100` in the scheme's launch arguments — and set the same number in Studio's **Settings**.
+USB has no discovery to negotiate it, so a mismatch reads as *Waiting for an app*; both surfaces print the
+port they are using. The link also recovers on its own after the phone sleeps or the cable is re-seated,
+with no app restart.
+
+Without USB, a physical device finds the desktop over Bonjour — the engine advertises `_wailo._tcp`, so
+nothing needs to be typed and a DHCP change fixes itself (ADR-0035). The LAN address resolves at runtime,
+highest precedence first:
+
+1. a `host` passed to `Wailo.start` — pins one machine for the process
+2. a saved override — set by `Wailo.setHost("192.168.1.42")`, the debug panel, or `-WailoHost 192.168.1.42`
+   in the Xcode scheme's launch arguments (editing those relaunches without recompiling)
+3. Bonjour discovery
+4. `localhost`
+
+None of these need a rebuild to change. `Wailo.setHost(nil)` clears the override and hands control back
+to discovery.
+
+**On-device panel (`WailoSDKDebug`).** Link the `WailoSDKDebug` product *instead of* `WailoSDK` in debug
+builds and a **two-finger long-press on the bottom half of the screen** opens a panel showing what the SDK
+is connected to and over which transport, every desktop on the network, a field to pin one by hand, and
+the USB listener port. It installs itself — linking the product is the only setup, and it follows the same
+design tokens as the desktop app in light and dark (ADR-0038). Release builds link plain `WailoSDK` and get
+none of it, which is how UIKit/SwiftUI stay out of the shipping interceptor.
+
+**Host app Info.plist (LAN/Bonjour only).** The USB path does not need Local Network or ATS permission.
+The Wi-Fi path needs three things the Simulator doesn't; see `sample-ios/project.yml` for the full block:
+
+| Key | Why |
+|----|----|
+| `NSLocalNetworkUsageDescription` | iOS 14+ gates any outgoing connection to a LAN address behind user consent |
+| `NSBonjourServices` = `[_wailo._tcp]` | browsing is denied outright unless the service type is declared |
+| `NSAppTransportSecurity` | the transport is plaintext `ws://` to an IP literal, which ATS blocks by default from iOS 17 |
+
+The first connection is refused while the Local Network prompt is still on screen; the client retries
+every 2s, so it connects on its own a moment after you tap Allow.
 
 The Swift protobuf types are generated from the shared schema — regenerate after editing `protocol`:
 

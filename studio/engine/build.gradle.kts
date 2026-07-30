@@ -25,6 +25,7 @@ dependencies {
     implementation(libs.ktor.server.core)
     implementation(libs.ktor.server.cio)
     implementation(libs.ktor.server.websockets)
+    implementation(libs.jmdns)
 
     // Test-only: a raw WebSocket client drives the server over a real socket (loopback), replacing
     // the desktopApp test that used the former :core WailoClient.

@@ -1,4 +1,4 @@
-# XcodeGen spec (source of truth; the .xcodeproj is generated and gitignored).
+# XcodeGen spec (source of truth; the .xcodeproj and the generated Info.plist are gitignored).
 # Regenerate with: cd sample-ios && xcodegen generate
 name: WailoSampleiOS
 options:
@@ -16,8 +16,36 @@ targets:
     sources:
       - Sources
     dependencies:
+      # The debug superset: WailoSDK plus the on-device settings panel (ADR-0035) — two-finger
+      # long-press the bottom half to re-point at another desktop without a rebuild. A shipping app
+      # links plain `WailoSDK` for release and this only for debug.
       - package: WailoSDK
-        product: WailoSDK
+        product: WailoSDKDebug
+    info:
+      path: Info.plist
+      properties:
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        UILaunchScreen: {}
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        # A physical device reaches the desktop across the LAN, which iOS 14+ gates behind user consent.
+        # Bonjour browsing is denied outright unless the service type is declared here too.
+        NSLocalNetworkUsageDescription: Wailo finds the Wailo desktop app on your network and streams this app's HTTP traffic to it.
+        NSBonjourServices:
+          - _wailo._tcp
+        # The transport is plaintext ws:// to a LAN IP. ATS exempted IP literals until iOS 17, which now
+        # requires them listed explicitly; NSAllowsLocalNetworking covers the pre-17 behaviour. The three
+        # entries are the RFC 1918 private ranges, so any home/office subnet is covered.
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+          NSExceptionDomains:
+            "192.168.0.0/16":
+              NSExceptionAllowsInsecureHTTPLoads: true
+            "10.0.0.0/8":
+              NSExceptionAllowsInsecureHTTPLoads: true
+            "172.16.0.0/12":
+              NSExceptionAllowsInsecureHTTPLoads: true
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.venbiasa.wailo.sampleios
@@ -25,8 +53,5 @@ targets:
         CURRENT_PROJECT_VERSION: "1"
         SWIFT_VERSION: "5.0"
         TARGETED_DEVICE_FAMILY: "1,2"
-        GENERATE_INFOPLIST_FILE: YES
-        INFOPLIST_KEY_UILaunchScreen_Generation: YES
-        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
         # Simulator builds don't need signing; keeps CI/compile-only runs unsigned.
         CODE_SIGNING_ALLOWED: NO
