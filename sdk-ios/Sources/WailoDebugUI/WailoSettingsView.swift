@@ -90,7 +90,7 @@ struct WailoSettingsView: View {
     private var discoveryCard: some View {
         Card {
             if model.discovered.isEmpty {
-                Text("Nothing yet. The desktop app has to be running on the same Wi-Fi, and this app needs Local Network permission.")
+                Text("Nothing yet. Wailo Studio has to be running on the same Wi-Fi, and this app needs Local Network permission.")
                     .font(WailoTokens.Typography.bodySmall)
                     .foregroundColor(WailoTokens.onSurfaceVariant)
                     .fixedSize(horizontal: false, vertical: true)
@@ -173,7 +173,7 @@ struct WailoSettingsView: View {
                     .frame(width: 110)
                     ActionButton(title: "Apply", enabled: model.canApplyUsbPort, action: model.applyUsbPort)
                 }
-                Text("Studio dials this port over the cable and takes over from Wi-Fi while it is plugged in. Set the same port in Studio's settings — USB has no discovery, so a mismatch looks like the app isn't running.")
+                Text("Wailo Studio dials this port over the cable and takes over from Wi-Fi while it is plugged in. Set the same test in Studio's settings — USB has no discovery, so a mismatch looks like the app isn't running.")
                     .font(WailoTokens.Typography.bodySmall)
                     .foregroundColor(WailoTokens.onSurfaceVariant)
                     .fixedSize(horizontal: false, vertical: true)

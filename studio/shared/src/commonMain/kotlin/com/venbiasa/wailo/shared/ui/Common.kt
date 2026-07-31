@@ -167,6 +167,7 @@ internal fun CompactOutlinedTextField(
     singleLine: Boolean = true,
     enabled: Boolean = true,
     isError: Boolean = false,
+    containerColor: Color = Color.Unspecified,
 ) {
     val interactionSource = remember { MutableInteractionSource() }
     BasicTextField(
@@ -188,6 +189,7 @@ internal fun CompactOutlinedTextField(
                 singleLine = singleLine,
                 placeholder = placeholder,
                 isError = isError,
+                containerColor = containerColor,
                 innerTextField = innerTextField,
             )
         },
@@ -215,6 +217,7 @@ internal fun CompactFieldDecoration(
     singleLine: Boolean = true,
     placeholder: String? = null,
     isError: Boolean = false,
+    containerColor: Color = Color.Unspecified,
     trailingIcon: (@Composable () -> Unit)? = null,
 ) {
     CompositionLocalProvider(LocalMinimumInteractiveComponentSize provides 0.dp) {
@@ -230,6 +233,14 @@ internal fun CompactFieldDecoration(
                 { Text(text, style = MaterialTheme.typography.bodyMedium) }
             },
             trailingIcon = trailingIcon,
+            // Material's outlined container is transparent, so a field inherits whatever it sits on — right
+            // on a plain panel, but on a tinted bar (the editor's find toolbar) it makes the field read as a
+            // greyed-out control instead of an input. Such a caller passes the surface it should look like;
+            // Unspecified keeps Material's default.
+            colors = OutlinedTextFieldDefaults.colors(
+                focusedContainerColor = containerColor,
+                unfocusedContainerColor = containerColor,
+            ),
             contentPadding = OutlinedTextFieldDefaults.contentPadding(
                 start = 12.dp,
                 top = 8.dp,

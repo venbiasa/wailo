@@ -90,6 +90,11 @@ cd studio && ./gradlew :desktopApp:hotRun --auto  # dev loop: auto-recompiles + 
   `MaterialTheme.colorScheme` or the `WailoColors` CompositionLocal (never hard-code), add new colors as
   `tokens.json` entries for both schemes (the `studio` `theme/*.kt` are generated — DO NOT EDIT), keep icons
   tint-driven (mono vector drawables), and smoke-check both via the top-bar toggle. See ADR-0013/0016.
+- Icons are **Material Symbols Rounded**, weight 400, fill 0 — fetched from the `materialsymbolsrounded`
+  folder of `google/material-design-icons` and converted to XML by the `svg-to-compose-vector` skill. All
+  three Material styles share the same icon *names*, so an Outlined glyph imports and compiles perfectly and
+  just looks foreign — verify the variant, don't assume it. Name the file after the symbol (`ic_swap_horiz`),
+  and use fill 1 only where solid *is* the meaning (`ic_lock`, `ic_breakpoint` = `circle` fill 1).
 - Versions live in each build's version catalog — `gradle/libs.versions.toml` (SDK build) and
   `studio/gradle/libs.versions.toml` (studio build); reference via `libs.*` / `libs.plugins.*`. Do not
   hard-code versions in module build files. The two catalogs intentionally differ (ADR-0015).

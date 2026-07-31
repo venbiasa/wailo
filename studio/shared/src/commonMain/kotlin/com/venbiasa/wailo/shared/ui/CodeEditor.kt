@@ -48,6 +48,7 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEvent
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.isCtrlPressed
 import androidx.compose.ui.input.key.isMetaPressed
@@ -75,11 +76,16 @@ import com.venbiasa.wailo.shared.format.jsonHighlightSpans
 import com.venbiasa.wailo.shared.resources.Res
 import com.venbiasa.wailo.shared.resources.ic_arrow_back
 import com.venbiasa.wailo.shared.resources.ic_arrow_drop_down
+import com.venbiasa.wailo.shared.resources.ic_find_replace
+import com.venbiasa.wailo.shared.resources.ic_keyboard_arrow_down
+import com.venbiasa.wailo.shared.resources.ic_match_case
+import com.venbiasa.wailo.shared.resources.ic_swap_horiz
 import com.venbiasa.wailo.shared.resources.ic_wrap_text
 import com.venbiasa.wailo.shared.theme.LocalWailoColors
 import kotlin.math.abs
 import kotlin.math.floor
 import kotlin.math.roundToInt
+import org.jetbrains.compose.resources.DrawableResource
 import org.jetbrains.compose.resources.vectorResource
 
 // A single line longer than this isn't per-line tokenized (a huge minified blob that didn't get
@@ -162,10 +168,19 @@ internal fun CodeEditor(
     val listState = rememberLazyListState()
     val hScroll = rememberScrollState()
     val focusRequester = remember { FocusRequester() }
-    val findFocus = remember { FocusRequester() }
 
     var findOpen by remember { mutableStateOf(false) }
     var findQuery by remember { mutableStateOf("") }
+    var findReplacement by remember { mutableStateOf("") }
+    // The replace row is the rarer half of the widget, so it starts collapsed behind the disclosure arrow.
+    var replaceOpen by remember { mutableStateOf(false) }
+    // Case-insensitive by default (the editor norm — a body is hunted by shape, not by case); the Aa chip flips it.
+    var matchCase by remember { mutableStateOf(false) }
+    // Bumped whenever the query field should take focus. The request has to be made from an effect *inside*
+    // the bar — issuing it here, from the Cmd+F handler, aims at a FocusRequester whose modifier node isn't
+    // attached yet (the bar hasn't composed), which silently does nothing. Keying on a counter rather than
+    // `findOpen` is what makes a second Cmd+F re-focus a bar that's already open.
+    var findFocusRequests by remember { mutableStateOf(0) }
     var viewportWidthPx by remember { mutableStateOf(0) }
     // Soft wrap on by default: long lines reflow onto extra visual rows at the viewport edge instead of
     // scrolling sideways. Held per editor instance (not persisted) and flipped by the corner toggle.
@@ -297,17 +312,44 @@ internal fun CodeEditor(
         }
     }
 
-    fun runFind(forward: Boolean) {
+    // Selects the next/previous match, deliberately leaving focus where it is: the find bar keeps it, so a
+    // run of Enters walks the document instead of the first one throwing the user back into the text (where
+    // the second Enter would insert a newline). The match still shows — the selection highlight doesn't
+    // depend on the editor being focused — and the caret effect above scrolls it into view.
+    // [fromMatchStart] re-tests the current match in place, so flipping Match case updates the highlight
+    // rather than skipping past the hit sitting under it.
+    fun runFind(forward: Boolean, fromMatchStart: Boolean = false) {
         if (findQuery.isEmpty()) return
-        val from = if (forward) state.selectionRange()?.second ?: state.caret
-        else state.selectionRange()?.first ?: state.caret
-        val match = state.find(findQuery, from, forward) ?: return
+        val selection = state.selectionRange()
+        val from = when {
+            fromMatchStart -> selection?.first ?: state.caret
+            forward -> selection?.second ?: state.caret
+            else -> selection?.first ?: state.caret
+        }
+        val match = state.find(findQuery, from, forward, ignoreCase = !matchCase) ?: return
         // Unfold any collapsed region hiding the hit, so the selection isn't stranded off-screen.
         if (match.first.line in hidden) {
             foldedStarts.removeAll { s -> foldRegions[s]?.let { match.first.line in (s + 1)..it.endLine } == true }
         }
         state.setSelection(match.first, match.second)
-        focusRequester.requestFocus()
+    }
+
+    // Rewrites the highlighted match and steps to the next one, which is what makes repeated Replace sweep
+    // the document. It replaces only a selection that *is* a match, so the first press after opening the row
+    // (or after the user has clicked into the text) finds a hit instead of editing at the caret. The raw
+    // selection is used on purpose — no `expandSelectionOverFold`, which would swallow a whole collapsed
+    // block when a match happens to end at a folded opener's bracket.
+    fun runReplace() {
+        if (readOnly || findQuery.isEmpty()) return
+        if (state.hasSelection() && state.selectedText().equals(findQuery, ignoreCase = !matchCase)) {
+            state.insert(findReplacement)
+        }
+        runFind(forward = true)
+    }
+
+    fun runReplaceAll() {
+        if (readOnly || findQuery.isEmpty()) return
+        state.replaceAll(findQuery, findReplacement, ignoreCase = !matchCase)
     }
 
     fun typedChar(cp: Int) {
@@ -420,7 +462,7 @@ internal fun CodeEditor(
 
     // Translates a key press into an edit/navigation. Runs before the focusable consumes the event, and
     // returns true when handled. `cmd` treats Meta (macOS) and Ctrl (elsewhere) alike for shortcuts.
-    fun onKey(event: androidx.compose.ui.input.key.KeyEvent): Boolean {
+    fun onKey(event: KeyEvent): Boolean {
         if (event.type != KeyEventType.KeyDown) return false
         val cmd = event.isMetaPressed || event.isCtrlPressed
         val shift = event.isShiftPressed
@@ -433,7 +475,7 @@ internal fun CodeEditor(
             cmd && (event.key == Key.Y || (shift && event.key == Key.Z)) -> if (!readOnly) state.redo()
             cmd && event.key == Key.F -> {
                 findOpen = true
-                findFocus.requestFocus()
+                findFocusRequests++
             }
             event.key == Key.Escape -> {
                 if (!findOpen) return false
@@ -501,13 +543,25 @@ internal fun CodeEditor(
             FindBar(
                 query = findQuery,
                 onQueryChange = { findQuery = it },
+                replacement = findReplacement,
+                onReplacementChange = { findReplacement = it },
+                matchCase = matchCase,
+                onToggleMatchCase = {
+                    matchCase = !matchCase
+                    runFind(forward = true, fromMatchStart = true)
+                },
+                replaceAvailable = !readOnly,
+                replaceOpen = replaceOpen,
+                onToggleReplaceOpen = { replaceOpen = !replaceOpen },
                 onNext = { runFind(forward = true) },
                 onPrev = { runFind(forward = false) },
+                onReplace = { runReplace() },
+                onReplaceAll = { runReplaceAll() },
                 onClose = {
                     findOpen = false
                     focusRequester.requestFocus()
                 },
-                focusRequester = findFocus,
+                focusSignal = findFocusRequests,
             )
         }
         Box(
@@ -851,18 +905,55 @@ private fun EditorLineRow(
     }
 }
 
-// A slim find toolbar above the editor: type to search, Enter / Shift+Enter for next / previous, Escape
-// to dismiss. Single-line substring find (a JSON string can't hold a raw newline).
+/**
+ * A slim find/replace toolbar above the editor. Type to search, Enter / Shift+Enter for next / previous,
+ * Escape to dismiss; the Aa chip flips case sensitivity. Every action keeps focus in the field it was
+ * invoked from, so the bar can be driven entirely from the keyboard (see `runFind`). The replace half stays
+ * collapsed behind the disclosure arrow until asked for, and is absent on a read-only surface. Single-line
+ * substring find (a JSON string can't hold a raw newline).
+ */
 @Composable
 private fun FindBar(
     query: String,
     onQueryChange: (String) -> Unit,
+    replacement: String,
+    onReplacementChange: (String) -> Unit,
+    matchCase: Boolean,
+    onToggleMatchCase: () -> Unit,
+    replaceAvailable: Boolean,
+    replaceOpen: Boolean,
+    onToggleReplaceOpen: () -> Unit,
     onNext: () -> Unit,
     onPrev: () -> Unit,
+    onReplace: () -> Unit,
+    onReplaceAll: () -> Unit,
     onClose: () -> Unit,
-    focusRequester: FocusRequester,
+    focusSignal: Int,
 ) {
     val scheme = MaterialTheme.colorScheme
+    val queryFocus = remember { FocusRequester() }
+    val replacementFocus = remember { FocusRequester() }
+    // Runs on first composition (the bar exists only while open, so opening it focuses the query) and again
+    // on every later [focusSignal] change, which is how a second Cmd+F pulls the caret back out of the text.
+    LaunchedEffect(focusSignal) { queryFocus.requestFocus() }
+
+    // Both rows share the query field's Enter/Escape contract; only what Enter *does* differs.
+    fun barKeys(onEnter: (KeyEvent) -> Unit): (KeyEvent) -> Boolean = { event ->
+        if (event.type != KeyEventType.KeyDown) {
+            false
+        } else when (event.key) {
+            Key.Enter -> {
+                onEnter(event)
+                true
+            }
+            Key.Escape -> {
+                onClose()
+                true
+            }
+            else -> false
+        }
+    }
+
     Row(
         Modifier.fillMaxWidth()
             .background(scheme.surfaceContainer)
@@ -870,45 +961,140 @@ private fun FindBar(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(4.dp),
     ) {
-        CompactOutlinedTextField(
-            value = query,
-            onValueChange = onQueryChange,
-            modifier = Modifier.weight(1f)
-                .focusRequester(focusRequester)
-                .onPreviewKeyEvent { event ->
-                    if (event.type != KeyEventType.KeyDown) {
-                        false
-                    } else when (event.key) {
-                        Key.Enter -> {
-                            if (event.isShiftPressed) onPrev() else onNext()
-                            true
-                        }
-                        Key.Escape -> {
-                            onClose()
-                            true
-                        }
-                        else -> false
-                    }
-                },
-            placeholder = "Find",
-        )
-        IconButton(onClick = onPrev, modifier = Modifier.size(32.dp)) {
+        if (replaceAvailable) {
+            // A chevron (right = collapsed, down = expanded) rather than the fold gutter's drop-down triangle:
+            // that glyph is drawn to sit under a dropdown's text baseline, so it covers barely a fifth of its
+            // viewport and reads as a speck on a standalone button. The chevron fills the same 16.dp frame.
+            HoverTooltip(if (replaceOpen) "Hide replace" else "Show replace") {
+                IconButton(onClick = onToggleReplaceOpen, modifier = Modifier.size(28.dp)) {
+                    Icon(
+                        vectorResource(Res.drawable.ic_keyboard_arrow_down),
+                        contentDescription = if (replaceOpen) "Hide replace" else "Show replace",
+                        tint = scheme.onSurfaceVariant,
+                        modifier = Modifier.size(16.dp).rotate(if (replaceOpen) 0f else -90f),
+                    )
+                }
+            }
+        }
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                CompactOutlinedTextField(
+                    value = query,
+                    onValueChange = onQueryChange,
+                    modifier = Modifier.weight(1f)
+                        .focusRequester(queryFocus)
+                        .onPreviewKeyEvent(barKeys { if (it.isShiftPressed) onPrev() else onNext() }),
+                    placeholder = "Find",
+                    containerColor = scheme.surface,
+                )
+                FindToggleChip(
+                    icon = Res.drawable.ic_match_case,
+                    label = "Match case",
+                    on = matchCase,
+                    // A pointer click on any of the bar's buttons would otherwise leave focus on the button,
+                    // so typing after one goes nowhere. Hand it back to the field the user was working in.
+                    onToggle = {
+                        onToggleMatchCase()
+                        queryFocus.requestFocus()
+                    },
+                )
+                FindIconButton(
+                    icon = Res.drawable.ic_arrow_back,
+                    label = "Previous match (Shift+Enter)",
+                    onClick = {
+                        onPrev()
+                        queryFocus.requestFocus()
+                    },
+                )
+                FindIconButton(
+                    icon = Res.drawable.ic_arrow_back,
+                    label = "Next match (Enter)",
+                    rotate = 180f,
+                    onClick = {
+                        onNext()
+                        queryFocus.requestFocus()
+                    },
+                )
+                CloseButton(onClose, contentDescription = "Close find")
+            }
+            if (replaceAvailable && replaceOpen) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    CompactOutlinedTextField(
+                        value = replacement,
+                        onValueChange = onReplacementChange,
+                        modifier = Modifier.weight(1f)
+                            .focusRequester(replacementFocus)
+                            .onPreviewKeyEvent(
+                                barKeys { event ->
+                                    if (event.isMetaPressed || event.isCtrlPressed) onReplaceAll() else onReplace()
+                                },
+                            ),
+                        placeholder = "Replace",
+                        containerColor = scheme.surface,
+                    )
+                    FindIconButton(
+                        icon = Res.drawable.ic_swap_horiz,
+                        label = "Replace this match (Enter)",
+                        onClick = {
+                            onReplace()
+                            replacementFocus.requestFocus()
+                        },
+                    )
+                    FindIconButton(
+                        icon = Res.drawable.ic_find_replace,
+                        label = "Replace every match (Cmd/Ctrl+Enter)",
+                        onClick = {
+                            onReplaceAll()
+                            replacementFocus.requestFocus()
+                        },
+                    )
+                }
+            }
+        }
+    }
+}
+
+// A find-bar option: filled and accent-tinted while on, so its state reads at a glance (the same language
+// as the editor's soft-wrap toggle).
+@Composable
+private fun FindToggleChip(icon: DrawableResource, label: String, on: Boolean, onToggle: () -> Unit) {
+    val scheme = MaterialTheme.colorScheme
+    HoverTooltip(label) {
+        Box(
+            Modifier.size(28.dp)
+                .clip(RoundedCornerShape(6.dp))
+                .background(if (on) scheme.primary.copy(alpha = 0.18f) else Color.Transparent)
+                .clickable(onClick = onToggle),
+            contentAlignment = Alignment.Center,
+        ) {
             Icon(
-                vectorResource(Res.drawable.ic_arrow_back),
-                contentDescription = "Previous match",
-                tint = scheme.onSurfaceVariant,
+                vectorResource(icon),
+                contentDescription = label,
+                tint = if (on) scheme.primary else scheme.onSurfaceVariant,
                 modifier = Modifier.size(16.dp),
             )
         }
-        IconButton(onClick = onNext, modifier = Modifier.size(32.dp)) {
+    }
+}
+
+// The bar's stateless actions. [rotate] lets one glyph serve a mirrored pair (back/forward).
+@Composable
+private fun FindIconButton(icon: DrawableResource, label: String, rotate: Float = 0f, onClick: () -> Unit) {
+    HoverTooltip(label) {
+        IconButton(onClick = onClick, modifier = Modifier.size(32.dp)) {
             Icon(
-                vectorResource(Res.drawable.ic_arrow_back),
-                contentDescription = "Next match",
-                tint = scheme.onSurfaceVariant,
-                modifier = Modifier.size(16.dp).rotate(180f),
+                vectorResource(icon),
+                contentDescription = label,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(16.dp).rotate(rotate),
             )
         }
-        CloseButton(onClose, contentDescription = "Close find")
     }
 }
 

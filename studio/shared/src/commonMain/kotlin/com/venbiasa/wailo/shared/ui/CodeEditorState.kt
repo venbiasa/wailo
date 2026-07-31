@@ -214,25 +214,57 @@ internal class CodeEditorState(initialText: String = "") {
      * Finds [query] starting from [from], wrapping once. Single-line queries only (find over a body is a
      * substring hunt, and a JSON string can't hold a raw newline). Returns the match's [start, end).
      */
-    fun find(query: String, from: TextPos, forward: Boolean): Pair<TextPos, TextPos>? {
+    fun find(query: String, from: TextPos, forward: Boolean, ignoreCase: Boolean = false): Pair<TextPos, TextPos>? {
         if (query.isEmpty()) return null
         val count = buffer.lineCount
         for (offset in 0..count) {
             if (forward) {
                 val line = (from.line + offset) % count
                 val startCol = if (offset == 0) from.col else 0
-                val idx = buffer.line(line).indexOf(query, startCol)
+                val idx = buffer.line(line).indexOf(query, startCol, ignoreCase)
                 if (idx >= 0) return TextPos(line, idx) to TextPos(line, idx + query.length)
             } else {
                 val line = ((from.line - offset) % count + count) % count
                 val hay = buffer.line(line)
                 val upTo = if (offset == 0) from.col - 1 else hay.length
                 if (upTo < 0) continue
-                val idx = hay.lastIndexOf(query, upTo.coerceAtMost(hay.length))
+                val idx = hay.lastIndexOf(query, upTo.coerceAtMost(hay.length), ignoreCase)
                 if (idx >= 0) return TextPos(line, idx) to TextPos(line, idx + query.length)
             }
         }
         return null
+    }
+
+    /**
+     * Replaces every occurrence of [query] with [replacement] and returns the number of hits. Applied as one
+     * whole-document edit so the entire sweep undoes in a single step (N separate edits would make the user
+     * press Cmd+Z once per hit) — the O(document) cost is fine for an action the user asks for explicitly.
+     * Single-line queries only, matching [find]: a query the find bar can't navigate to must not be rewritten.
+     */
+    fun replaceAll(query: String, replacement: String, ignoreCase: Boolean = false): Int {
+        if (query.isEmpty() || '\n' in query) return 0
+        val old = buffer.text()
+        val rewritten = StringBuilder(old.length)
+        var scanned = 0
+        var hits = 0
+        while (true) {
+            val idx = old.indexOf(query, scanned, ignoreCase)
+            if (idx < 0) break
+            rewritten.appendRange(old, scanned, idx).append(replacement)
+            scanned = idx + query.length
+            hits++
+        }
+        if (hits == 0) return 0
+        rewritten.appendRange(old, scanned, old.length)
+        val caretBefore = caret
+        applyEdit(TextPos(0, 0), buffer.endPos(), rewritten.toString(), coalesce = false)
+        // A whole-document rewrite can lengthen any line, not only the edit's own (which is all applyEdit
+        // checks), and its caret lands at the very end — which would scroll the viewport away from whatever
+        // the user was looking at. Keep them where they were instead.
+        maxLineLength = maxOf(maxLineLength, buffer.maxLineLength())
+        caret = buffer.clamp(caretBefore)
+        desiredCol = caret.col
+        return hits
     }
 
     private data class EditOp(
