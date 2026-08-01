@@ -168,6 +168,7 @@ internal fun CompactOutlinedTextField(
     enabled: Boolean = true,
     isError: Boolean = false,
     containerColor: Color = Color.Unspecified,
+    leadingIcon: (@Composable () -> Unit)? = null,
 ) {
     val interactionSource = remember { MutableInteractionSource() }
     BasicTextField(
@@ -190,6 +191,7 @@ internal fun CompactOutlinedTextField(
                 placeholder = placeholder,
                 isError = isError,
                 containerColor = containerColor,
+                leadingIcon = leadingIcon,
                 innerTextField = innerTextField,
             )
         },
@@ -218,6 +220,7 @@ internal fun CompactFieldDecoration(
     placeholder: String? = null,
     isError: Boolean = false,
     containerColor: Color = Color.Unspecified,
+    leadingIcon: (@Composable () -> Unit)? = null,
     trailingIcon: (@Composable () -> Unit)? = null,
 ) {
     CompositionLocalProvider(LocalMinimumInteractiveComponentSize provides 0.dp) {
@@ -232,6 +235,7 @@ internal fun CompactFieldDecoration(
             placeholder = placeholder?.let { text ->
                 { Text(text, style = MaterialTheme.typography.bodyMedium) }
             },
+            leadingIcon = leadingIcon,
             trailingIcon = trailingIcon,
             // Material's outlined container is transparent, so a field inherits whatever it sits on — right
             // on a plain panel, but on a tinted bar (the editor's find toolbar) it makes the field read as a
@@ -241,6 +245,10 @@ internal fun CompactFieldDecoration(
                 focusedContainerColor = containerColor,
                 unfocusedContainerColor = containerColor,
             ),
+            // M3 lays the leading icon flush at x=0 and starts the text at
+            // leadingWidth + (start - HorizontalIconPadding[12dp]). We opt out of the 48dp min-interactive
+            // icon box (see above), which is what normally insets the glyph, so the caller pads its own
+            // icon; 24.dp here then leaves a 12.dp gap (24-12) between the icon and the text.
             contentPadding = OutlinedTextFieldDefaults.contentPadding(
                 start = 12.dp,
                 top = 8.dp,

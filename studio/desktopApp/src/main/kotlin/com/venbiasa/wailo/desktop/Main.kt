@@ -15,6 +15,7 @@ import androidx.compose.ui.graphics.toComposeImageBitmap
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEvent
 import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.isCtrlPressed
 import androidx.compose.ui.input.key.isMetaPressed
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.type
@@ -368,6 +369,22 @@ private fun runWailo() = application {
         }
     }
 
+    // Cmd/Ctrl+F opens the traffic list's filter bar. It has to live at the window level, not on a
+    // focusable inside `shared`: Compose only dispatches key events to the focused node's ancestor chain,
+    // and clicking the list background or the top bar seeds no focus at all — so a handler in the content
+    // never ran until something (a detail panel's editor) happened to take focus. The window sees the key
+    // regardless. `onKeyEvent`, not preview, is what preserves the contract that a *focused* code editor's
+    // own find wins: it consumes the shortcut in its preview handler and this is never reached.
+    var openFilterRequests by remember { mutableStateOf(0) }
+    val onFilterKeyEvent: (KeyEvent) -> Boolean = onFilterKeyEvent@{ event ->
+        val find = event.type == KeyEventType.KeyDown &&
+            (event.isMetaPressed || event.isCtrlPressed) &&
+            event.key == Key.F
+        if (!find) return@onFilterKeyEvent false
+        openFilterRequests += 1
+        true
+    }
+
     Window(
         // Capture the final geometry on close too, in case the last move/resize landed inside the
         // debounce window and never flushed.
@@ -381,6 +398,7 @@ private fun runWailo() = application {
         title = "Wailo",
         icon = appIconPainter,
         onPreviewKeyEvent = onScaleKeyEvent,
+        onKeyEvent = onFilterKeyEvent,
     ) {
         // Floor the window at its first-run size so the content can't be squeezed below the layout it
         // was built for. AWT enforces this on the OS chrome, covering drag-resize the Compose state
@@ -397,6 +415,7 @@ private fun runWailo() = application {
             darkTheme = darkTheme,
             onToggleDarkTheme = { setDarkTheme(!darkTheme) },
             textScale = textScale,
+            openFilterSignal = openFilterRequests,
             listenAddress = listenAddress,
             listenPort = listenPort,
             listening = listening,

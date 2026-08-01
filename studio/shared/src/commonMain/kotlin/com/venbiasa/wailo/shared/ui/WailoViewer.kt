@@ -2,9 +2,11 @@ package com.venbiasa.wailo.shared.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.focusable
 import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.draggable
 import androidx.compose.foundation.gestures.rememberDraggableState
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -34,6 +36,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
@@ -41,12 +45,15 @@ import com.venbiasa.wailo.protocol.Header
 import com.venbiasa.wailo.shared.BreakpointNode
 import com.venbiasa.wailo.shared.CaptureFilterState
 import com.venbiasa.wailo.shared.DeviceInfo
+import com.venbiasa.wailo.shared.FilterKey
 import com.venbiasa.wailo.shared.FlowEntry
 import com.venbiasa.wailo.shared.MapLocalHeader
 import com.venbiasa.wailo.shared.MapLocalNode
 import com.venbiasa.wailo.shared.MapLocalRuleDef
 import com.venbiasa.wailo.shared.PickedFile
+import com.venbiasa.wailo.shared.TrafficFilter
 import com.venbiasa.wailo.shared.format.requestHost
+import com.venbiasa.wailo.shared.matches
 import com.venbiasa.wailo.shared.resources.Res
 import com.venbiasa.wailo.shared.resources.ic_breakpoint
 import com.venbiasa.wailo.shared.resources.ic_dark_mode
@@ -69,12 +76,19 @@ import org.jetbrains.compose.resources.vectorResource
  */
 private enum class ToolPanel { CaptureFilter, MapLocal, Breakpoints, Devices, Settings }
 
+// Common HTTP verbs lead the filter's Method menu (in this order); anything else follows alphabetically.
+private val MethodOrder = listOf("GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS")
+
+private fun methodRank(method: String): Int =
+    MethodOrder.indexOf(method).let { if (it < 0) MethodOrder.size else it }
+
 @Composable
 internal fun WailoViewer(
     entries: List<FlowEntry>,
     zoneOffsetMillis: Int,
     darkTheme: Boolean,
     onToggleDarkTheme: () -> Unit,
+    openFilterSignal: Int,
     listenAddress: String,
     listenPort: Int,
     listening: Boolean,
@@ -120,9 +134,58 @@ internal fun WailoViewer(
     LaunchedEffect(bookmarks) {
         if (activeHost != null && activeHost !in bookmarks) activeHost = null
     }
-    val visibleEntries = remember(entries, activeHost) {
+
+    // The traffic list's view filter (search + facets): also transient view state — a non-destructive lens
+    // over the captured rows, ANDed on top of the host chip. It resets on restart, like the selection and
+    // host filter above, so it needs no host/engine plumbing.
+    var trafficFilter by remember { mutableStateOf(TrafficFilter()) }
+    // The filter bar is hidden until Cmd/Ctrl+F opens it (like the code editor's find bar). Closing it (its
+    // × or Esc) clears every filter, so a hidden bar can never leave the list silently filtered.
+    var filterOpen by remember { mutableStateOf(false) }
+    // Bumped to pull focus into the keyword field when the bar opens (and on every later Cmd+F). The
+    // request must fire from an effect inside the bar once it's composed — same trick as the find bar.
+    var filterFocusRequests by remember { mutableStateOf(0) }
+    // The `+ Add filter` modal, rendered by this viewer so its scrim dims only the left pane.
+    var addFilterOpen by remember { mutableStateOf(false) }
+    // Cmd/Ctrl+F arrives as a host-bumped counter rather than a key handler here (see [openFilterSignal]).
+    // Skipped at 0 so the initial composition doesn't spring the bar open unasked.
+    LaunchedEffect(openFilterSignal) {
+        if (openFilterSignal > 0) {
+            filterOpen = true
+            filterFocusRequests += 1
+        }
+    }
+
+    // The autocomplete pools the add-filter modal offers per field, derived from what's actually been
+    // captured so a field only suggests values that exist. Methods are uppercased to match the row's
+    // display and the filter's comparison; common verbs lead (see MethodOrder), then the rest
+    // alphabetically. URL suggests hosts (the useful "contains" seed); Status Code the codes seen.
+    val availableMethods = remember(entries) {
+        entries.map { it.exchange.request?.method?.ifEmpty { "?" } ?: "?" }
+            .map { it.uppercase() }
+            .distinct()
+            .sortedWith(compareBy({ methodRank(it) }, { it }))
+    }
+    val availableAppIds = remember(entries) { entries.map { it.appId }.distinct().sorted() }
+    val filterSuggestions = remember(entries, availableMethods, availableAppIds) {
+        val hosts = entries.map { requestHost(it.exchange.request?.url ?: "") }
+            .filter { it.isNotBlank() }.distinct().sorted()
+        val codes = entries.mapNotNull { it.exchange.response?.code }.distinct().sorted().map { it.toString() }
+        mapOf(
+            FilterKey.Method to availableMethods,
+            FilterKey.Url to hosts,
+            FilterKey.StatusCode to codes,
+            FilterKey.Client to availableAppIds,
+            FilterKey.Edited to listOf("true", "false"),
+        )
+    }
+
+    val visibleEntries = remember(entries, activeHost, trafficFilter) {
         val host = activeHost
-        if (host == null) entries else entries.filter { requestHost(it.exchange.request?.url ?: "") == host }
+        entries.filter { entry ->
+            (host == null || requestHost(entry.exchange.request?.url ?: "") == host) &&
+                trafficFilter.matches(entry)
+        }
     }
 
     // Which tool panel is docked, plus Map Local's current draft and body seed: transient view state (like
@@ -135,9 +198,17 @@ internal fun WailoViewer(
     var mapLocalDraft by remember { mutableStateOf<MapLocalRuleDef?>(null) }
     var mapLocalBodySeed by remember { mutableStateOf<ByteArray?>(null) }
     val density = LocalDensity.current
+    // Somewhere for the caret to land when the filter bar closes, so the keystrokes after it don't fall
+    // into the field that just disappeared. Focusable rather than a bare Box because only a focus target
+    // can be handed focus.
+    val rootFocus = remember { FocusRequester() }
 
     Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-        BoxWithConstraints(Modifier.fillMaxSize()) {
+        BoxWithConstraints(
+            Modifier.fillMaxSize()
+                .focusRequester(rootFocus)
+                .focusable(),
+        ) {
             val totalWidth = maxWidth
             Row(Modifier.fillMaxSize()) {
                 BoxWithConstraints(Modifier.weight(1f).fillMaxHeight()) {
@@ -162,6 +233,25 @@ internal fun WailoViewer(
                                 activeHost = activeHost,
                                 onSelect = { activeHost = it },
                                 onRemove = onRemoveBookmark,
+                            )
+                            RowDivider()
+                        }
+                        // The view filter is hidden until Cmd/Ctrl+F opens it (see [openFilterSignal]), then
+                        // sits closest to the list it narrows.
+                        if (filterOpen) {
+                            FilterBar(
+                                filter = trafficFilter,
+                                onFilterChange = { trafficFilter = it },
+                                onRequestAddFilter = { addFilterOpen = true },
+                                onClose = {
+                                    // Close == clear: never leave a hidden, still-filtered list. Focus goes
+                                    // back to the root so it doesn't die with the field being removed.
+                                    trafficFilter = TrafficFilter()
+                                    addFilterOpen = false
+                                    filterOpen = false
+                                    rootFocus.requestFocus()
+                                },
+                                focusSignal = filterFocusRequests,
                             )
                             RowDivider()
                         }
@@ -209,6 +299,14 @@ internal fun WailoViewer(
                                     openPanel = ToolPanel.MapLocal
                                 },
                             )
+                            // The filter (or the host chip) can hide every row while traffic is still
+                            // captured; say so, rather than an empty table that reads as "no traffic yet".
+                            // Guarded on there being traffic at all, so the pre-traffic view stays blank.
+                            if (entries.isNotEmpty() && visibleEntries.isEmpty()) {
+                                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                    MutedText("No matching traffic")
+                                }
+                            }
                         }
                         if (selected != null) {
                             DragHandle { deltaPx ->
@@ -221,6 +319,36 @@ internal fun WailoViewer(
                                 onClose = { selectedId = null },
                             )
                         }
+                    }
+
+                    // The `+ Add filter` modal dims only this (left) pane: the scrim fills the left
+                    // BoxWithConstraints, so the tool panel on the right stays lit and usable. Scoped here
+                    // (a sibling of the content Column) rather than inside the bar for exactly that reason.
+                    if (addFilterOpen) {
+                        // += 1 (not ++) so the lambda returns Unit: post-increment yields the old Int,
+                        // which would type this as () -> Int and fail the () -> Unit callbacks below.
+                        val dismissModal = {
+                            addFilterOpen = false
+                            filterFocusRequests += 1
+                        }
+                        Box(
+                            Modifier.matchParentSize()
+                                .background(MaterialTheme.colorScheme.scrim.copy(alpha = 0.4f))
+                                .clickable(
+                                    interactionSource = remember { MutableInteractionSource() },
+                                    indication = null,
+                                    onClick = dismissModal,
+                                ),
+                        )
+                        AddFilterCard(
+                            suggestions = filterSuggestions,
+                            onAdd = { clause ->
+                                trafficFilter = trafficFilter.copy(clauses = trafficFilter.clauses + clause)
+                                dismissModal()
+                            },
+                            onCancel = dismissModal,
+                            modifier = Modifier.align(Alignment.Center),
+                        )
                     }
                 }
                 // The docked tool panel sits to the right, resizable, between the content and the tool rail

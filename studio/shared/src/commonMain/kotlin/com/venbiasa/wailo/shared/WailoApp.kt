@@ -25,6 +25,9 @@ import com.venbiasa.wailo.shared.ui.WailoViewer
  * host's local wall clock (kept out of commonMain, which has no `java.time`). [textScale] is the
  * host-owned text-size multiplier (Cmd +/-); it rides on `fontScale` so only `sp` text resizes.
  * [darkTheme] and [onToggleDarkTheme] are likewise host-owned so the choice can persist across launches.
+ * [openFilterSignal] is a counter the host bumps on Cmd/Ctrl+F to open the traffic list's filter bar. The
+ * shortcut is owned by the host's window because Compose only routes key events to whatever holds focus,
+ * and clicking a plain surface seeds none — so a handler inside this tree can't be relied on to run.
  * [listenAddress] is where the capture server accepts device connections and [listenPort] is the port
  * within it, editable in the settings panel; [listening] says whether the server actually bound (false
  * greys nothing out but marks the address as dead, since no traffic can arrive), and [onApplyPort] asks
@@ -65,6 +68,7 @@ fun WailoApp(
     darkTheme: Boolean = isSystemInDarkTheme(),
     onToggleDarkTheme: () -> Unit = {},
     textScale: Float = TextScale.Default,
+    openFilterSignal: Int = 0,
     listenAddress: String = "",
     listenPort: Int = 0,
     listening: Boolean = true,
@@ -107,6 +111,7 @@ fun WailoApp(
                 zoneOffsetMillis = zoneOffsetMillis,
                 darkTheme = darkTheme,
                 onToggleDarkTheme = onToggleDarkTheme,
+                openFilterSignal = openFilterSignal,
                 listenAddress = listenAddress,
                 listenPort = listenPort,
                 listening = listening,
