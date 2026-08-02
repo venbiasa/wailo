@@ -32,6 +32,9 @@ struct WailoSettingsView: View {
         .background(WailoTokens.background.edgesIgnoringSafeArea(.all))
     }
 
+    /// The band bleeds into the top safe area: the root `VStack` is laid out inside it, so a background
+    /// stopping at the inset would leave the status bar painted in the page's `background` — a visible
+    /// strip above the bar, stark in dark mode where the two tokens are `#000000` and `#171717`.
     private var header: some View {
         HStack {
             Text("Wailo")
@@ -47,7 +50,7 @@ struct WailoSettingsView: View {
         }
         .padding(.horizontal, WailoTokens.Spacing.x4)
         .padding(.vertical, WailoTokens.Spacing.x3)
-        .background(WailoTokens.surfaceContainer)
+        .background(WailoTokens.surfaceContainer.edgesIgnoringSafeArea(.top))
         .overlay(Hairline(), alignment: .bottom)
     }
 
@@ -239,12 +242,19 @@ private struct Chip: View {
 
 /// A text field that stays on the palette: SwiftUI's placeholder is a system gray, so it is drawn here
 /// instead of passed to `TextField`.
+///
+/// Outline-only over the card, matching the studio's compact fields. A filled box would draw the input in
+/// `surfaceVariant` behind `onSurfaceDisabled` — the exact pair `ActionButton` uses for its *disabled*
+/// state — so a field awaiting input reads as one that refuses it. The focus ring carries the affordance
+/// instead, and the caret is tinted off the system blue for the same reason the rest of the panel is.
 private struct LabeledField: View {
 
     let label: String
     let placeholder: String
     @Binding var text: String
     let keyboard: UIKeyboardType
+
+    @State private var editing = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: WailoTokens.Spacing.x1) {
@@ -255,22 +265,27 @@ private struct LabeledField: View {
                 if text.isEmpty {
                     Text(placeholder)
                         .font(WailoTokens.Typography.monoMedium)
-                        .foregroundColor(WailoTokens.onSurfaceDisabled)
+                        .foregroundColor(WailoTokens.onSurfaceVariant)
                 }
-                TextField("", text: $text)
+                // `onEditingChanged` rather than `@FocusState`, which needs iOS 15; this ships to iOS 13.
+                TextField("", text: $text, onEditingChanged: { editing = $0 })
                     .font(WailoTokens.Typography.monoMedium)
                     .foregroundColor(WailoTokens.onSurface)
                     .keyboardType(keyboard)
                     .autocapitalization(.none)
                     .disableAutocorrection(true)
+                    .accentColor(WailoTokens.accent)
             }
             .padding(.horizontal, WailoTokens.Spacing.x3)
             .padding(.vertical, WailoTokens.Spacing.x2)
-            .background(WailoTokens.surfaceVariant)
-            .cornerRadius(WailoTokens.Radius.md)
+            .background(WailoTokens.surface)
+            .cornerRadius(WailoTokens.Radius.sm)
             .overlay(
-                RoundedRectangle(cornerRadius: WailoTokens.Radius.md)
-                    .stroke(WailoTokens.outline, lineWidth: 1)
+                RoundedRectangle(cornerRadius: WailoTokens.Radius.sm)
+                    .strokeBorder(
+                        editing ? WailoTokens.accent : WailoTokens.outline,
+                        lineWidth: editing ? 2 : 1
+                    )
             )
         }
     }

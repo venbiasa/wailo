@@ -1,7 +1,8 @@
 #if canImport(UIKit)
 import UIKit
 
-/// Opens the settings panel on a two-finger long-press in the bottom half of the screen.
+/// Opens the settings panel on a two-finger long-press in the bottom half of the screen — anywhere on
+/// screen in the Simulator, for the reason on `shouldReceive` below.
 ///
 /// The gesture hangs off the *host's* own window rather than an overlay of ours, which is what keeps
 /// this free of private API. A quick action would have been the more discoverable affordance, but
@@ -21,6 +22,9 @@ final class WailoDebugGesture: NSObject, UIGestureRecognizerDelegate {
     private static let pressDuration: TimeInterval = 1.0
 
     private var installed = false
+    /// Off leaves the recognizers attached but starves them of touches, so a host that swapped in its own
+    /// affordance can flip back at any time and windows that appeared meanwhile are still covered.
+    var isEnabled = true
     /// Weak so a dismissed window doesn't keep us re-checking it, and so re-attachment is idempotent.
     private let attached = NSHashTable<UIWindow>.weakObjects()
 
@@ -87,9 +91,19 @@ final class WailoDebugGesture: NSObject, UIGestureRecognizerDelegate {
 
     /// Bottom half only. The top of the screen carries the status bar, nav bars, and iPad's multitasking
     /// pill, so ignoring it trims the remaining chance of colliding with something the host cares about.
+    ///
+    /// The Simulator is exempt because there the filter doesn't make the gesture awkward, it makes it
+    /// unreachable: Option-clicking synthesizes two touches mirrored about the *screen's* center, so one of
+    /// them always lands in the top half, and Option-Shift-dragging the pair down into the bottom half
+    /// travels further than a long press's `allowableMovement` allows. No mouse can satisfy both.
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+        guard isEnabled else { return false }
+        #if targetEnvironment(simulator)
+        return true
+        #else
         guard let view = gestureRecognizer.view else { return false }
         return touch.location(in: view).y >= view.bounds.midY
+        #endif
     }
 }
 #endif

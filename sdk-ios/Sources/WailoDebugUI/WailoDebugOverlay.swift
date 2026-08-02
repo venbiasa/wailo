@@ -35,6 +35,20 @@ final class WailoDebugOverlay {
         self.window = window
     }
 
+    /// The entry point for a host driving the panel itself: the gesture learns its scene from the window it
+    /// fired on, while `WailoDebugUI.present()` has none to name. Hops to the main thread rather than trust
+    /// the caller, since a debug hook is as likely to hang off a background callback as off a button.
+    func presentInForegroundScene() {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { self.presentInForegroundScene() }
+            return
+        }
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        guard let scene = scenes.first(where: { $0.activationState == .foregroundActive }) ?? scenes.first
+        else { return }
+        present(in: scene)
+    }
+
     func dismiss() {
         window?.isHidden = true
         window = nil

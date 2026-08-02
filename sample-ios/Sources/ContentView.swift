@@ -55,7 +55,8 @@ struct ContentView: View {
             VStack(spacing: 0) {
                 Text("Wailo captures every URLSession request and streams it to the desktop. "
                     + "Tap Send, then watch the desktop app (and the Xcode console). "
-                    + "Two-finger long-press the bottom half to pick a desktop.")
+                    + "Two-finger long-press the bottom half — Option-press in the Simulator — "
+                    + "to pick a desktop.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     .padding()

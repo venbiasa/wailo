@@ -186,9 +186,21 @@ to discovery.
 **On-device panel (`WailoSDKDebug`).** Link the `WailoSDKDebug` product *instead of* `WailoSDK` in debug
 builds and a **two-finger long-press on the bottom half of the screen** opens a panel showing what the SDK
 is connected to and over which transport, every desktop on the network, a field to pin one by hand, and
-the USB listener port. It installs itself — linking the product is the only setup, and it follows the same
-design tokens as the desktop app in light and dark (ADR-0038). Release builds link plain `WailoSDK` and get
-none of it, which is how UIKit/SwiftUI stay out of the shipping interceptor.
+the USB listener port. **In the Simulator, hold Option and press anywhere for a second**: the bottom-half
+restriction is lifted there because Option-click's two touches are mirrored about the screen's center, so
+one of them always lands in the top half. It installs itself — linking the product is the only setup, and
+it follows the same design tokens as the desktop app in light and dark (ADR-0038). Release builds link
+plain `WailoSDK` and get none of it, which is how UIKit/SwiftUI stay out of the shipping interceptor.
+
+A host that wants its own way in — a debug-menu row, a shake, a hidden button — turns the gesture off and
+drives the panel directly:
+
+```swift
+import WailoDebugUI
+
+WailoDebugUI.isGestureEnabled = false          // optional; leave it on to keep both ways in
+Button("Wailo") { WailoDebugUI.present() }
+```
 
 **Host app Info.plist (LAN/Bonjour only).** The USB path does not need Local Network or ATS permission.
 The Wi-Fi path needs three things the Simulator doesn't; see `sample-ios/project.yml` for the full block:

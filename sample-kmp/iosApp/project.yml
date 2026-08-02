@@ -21,7 +21,8 @@ targets:
       - Sources
     dependencies:
       # The debug superset: WailoSDK plus the on-device settings panel (ADR-0035) — two-finger
-      # long-press the bottom half to re-point at another desktop without a rebuild.
+      # long-press the bottom half (Option-press in the Simulator) to re-point at another desktop
+      # without a rebuild.
       - package: WailoSDK
         product: WailoSDKDebug
     preBuildScripts:
