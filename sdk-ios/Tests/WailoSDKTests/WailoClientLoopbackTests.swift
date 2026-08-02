@@ -31,8 +31,7 @@ final class WailoClientLoopbackTests: XCTestCase {
 
         let client = WailoClient(
             hello: Hello(device_name: "test", app_id: "com.test", platform: "ios"),
-            host: "127.0.0.1",
-            port: Int(port)
+            url: loopbackURL(port)
         )
         client.start()
         // Captured during the (healthy) connection's handshake; delivered live after the Hello.
@@ -41,6 +40,32 @@ final class WailoClientLoopbackTests: XCTestCase {
         wait(for: [helloReceived, exchangeReceived], timeout: 10)
         client.stopAndWaitForTeardown()
         server.stop()
+    }
+
+    /// The panel's crash, end to end. An address typed with its port made the coordinator build
+    /// `ws://127.0.0.1:<port>:8899/` — not a URL Foundation will parse — and the transport force-unwrapped
+    /// it, taking the host app down. The port has to be split off the address and dialled.
+    func testAddressCarryingItsPortIsDialled() throws {
+        // Pinned before start so no Bonjour browser (and no permission prompt) enters this test.
+        WailoHostStore.host = "127.0.0.1"
+        defer { WailoHostStore.clear() }
+
+        let server = LoopbackWebSocketServer()
+        let port = try server.start()
+        defer { server.stop() }
+
+        let helloReceived = expectation(description: "hello on the port typed into the address")
+        helloReceived.assertForOverFulfill = false
+        server.onEnvelope = { envelope in
+            if case .hello = envelope.message { helloReceived.fulfill() }
+        }
+
+        Wailo.start(appId: "com.test.inline", deviceName: "inline-port", alsoLogToConsole: false)
+        defer { Wailo.stop() }
+
+        XCTAssertTrue(Wailo.setHost("127.0.0.1:\(port)"))
+        wait(for: [helloReceived], timeout: 10)
+        XCTAssertEqual(Wailo.activeAddress, "127.0.0.1:\(port)")
     }
 
     /// Map Local rides the same socket (desktop -> device RuleSet pushes). Prove the reconnect
@@ -74,8 +99,7 @@ final class WailoClientLoopbackTests: XCTestCase {
 
         let client = WailoClient(
             hello: Hello(device_name: "test", app_id: "com.test", platform: "ios"),
-            host: "127.0.0.1",
-            port: Int(port)
+            url: loopbackURL(port)
         )
         client.start()
         defer { client.stopAndWaitForTeardown() }
@@ -115,8 +139,7 @@ final class WailoClientLoopbackTests: XCTestCase {
 
         let client = WailoClient(
             hello: Hello(device_name: "test", app_id: "com.test", platform: "ios"),
-            host: "127.0.0.1",
-            port: Int(port),
+            url: loopbackURL(port),
             reconnectDelay: 0.2
         )
         client.start()
@@ -179,8 +202,7 @@ final class WailoClientLoopbackTests: XCTestCase {
 
         let client = WailoClient(
             hello: Hello(device_name: "test", app_id: "com.test", platform: "ios"),
-            host: "127.0.0.1",
-            port: Int(port)
+            url: loopbackURL(port)
         )
         client.start()
         defer { client.stopAndWaitForTeardown() }
@@ -234,8 +256,7 @@ final class WailoClientLoopbackTests: XCTestCase {
 
         let client = WailoClient(
             hello: Hello(device_name: "test", app_id: "com.test", platform: "ios"),
-            host: "127.0.0.1",
-            port: Int(port)
+            url: loopbackURL(port)
         )
         client.start()
         defer { client.stopAndWaitForTeardown() }
@@ -278,8 +299,7 @@ final class WailoClientLoopbackTests: XCTestCase {
 
         let client = WailoClient(
             hello: Hello(device_name: "test", app_id: "com.test", platform: "ios"),
-            host: "127.0.0.1",
-            port: Int(port),
+            url: loopbackURL(port),
             reconnectDelay: 0.2
         )
         client.start()
@@ -337,8 +357,7 @@ final class WailoClientLoopbackTests: XCTestCase {
 
         let client = WailoClient(
             hello: Hello(device_name: "test", app_id: "com.test", platform: "ios"),
-            host: "127.0.0.1",
-            port: Int(port)
+            url: loopbackURL(port)
         )
         client.start()
         defer { client.stopAndWaitForTeardown() }
@@ -362,8 +381,7 @@ final class WailoClientLoopbackTests: XCTestCase {
     func testFetchBodyFailsOpenWhenNotConnected() {
         let client = WailoClient(
             hello: Hello(device_name: "test", app_id: "com.test", platform: "ios"),
-            host: "127.0.0.1",
-            port: 1
+            url: loopbackURL(1)
         )
         // Never started: there is no task, so the fetch has no authority to ask.
         let fetched = expectation(description: "fetch resolved")
@@ -385,8 +403,7 @@ final class WailoClientLoopbackTests: XCTestCase {
 
         let client = WailoClient(
             hello: Hello(device_name: "test", app_id: "com.test", platform: "ios"),
-            host: "127.0.0.1",
-            port: Int(port),
+            url: loopbackURL(port),
             reconnectDelay: 0.2
         )
         client.start()
@@ -441,8 +458,7 @@ final class WailoClientLoopbackTests: XCTestCase {
 
         let client = WailoClient(
             hello: Hello(device_name: "test", app_id: "com.test", platform: "ios"),
-            host: "127.0.0.1",
-            port: Int(port),
+            url: loopbackURL(port),
             reconnectDelay: 0.2
         )
         client.start()

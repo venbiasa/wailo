@@ -27,16 +27,18 @@ final class WailoClient: NSObject, CaptureSink, WailoBodyFetcher, WailoBreakpoin
         set { session.onConnectionChange = newValue }
     }
 
+    /// Takes a URL rather than a host and port: whether free text names a diallable address is
+    /// `WailoAddress`'s question, and building the URL here meant a force-unwrap that crashed the host
+    /// app on a mistyped address.
     init(
         hello: Hello,
-        host: String,
-        port: Int,
+        url: URL,
         bufferCapacity: Int = 512,
         reconnectDelay: TimeInterval = 2.0,
         pingInterval: TimeInterval = 20.0,
         bodyTimeout: TimeInterval = 10.0
     ) {
-        self.url = URL(string: "ws://\(host):\(port)/")!
+        self.url = url
         self.reconnectDelay = reconnectDelay
         self.session = WailoTransportSession(
             hello: hello,

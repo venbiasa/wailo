@@ -33,9 +33,20 @@ final class WailoCoordinator: @unchecked Sendable {
         let alsoLogToConsole: Bool
     }
 
+    /// A resolved target: what is being dialled, plus the URL it forms. Failable because forming that
+    /// URL is the step a bad address fails at, and failing it must refuse the address rather than trap
+    /// (see `WailoAddress`).
     private struct Endpoint: Equatable {
         let host: String
         let port: Int
+        let url: URL
+
+        init?(host: String, port: Int) {
+            guard let url = WailoAddress.webSocketURL(host: host, port: port) else { return nil }
+            self.host = host
+            self.port = port
+            self.url = url
+        }
     }
 
     private let lock = NSLock()
@@ -82,12 +93,37 @@ final class WailoCoordinator: @unchecked Sendable {
     }
 
     /// Persist a manual override (or `nil` to fall back to discovery) and re-dial immediately.
-    func setHost(_ host: String?, port: Int?) {
+    ///
+    /// Returns whether the address was taken. Text that names nothing diallable changes nothing — a
+    /// working address must survive a typo, and above all a value that cannot be dialled must never
+    /// reach `UserDefaults`, where every later launch would read it back.
+    @discardableResult
+    func setHost(_ host: String?, port: Int?) -> Bool {
         lock.lock()
-        WailoHostStore.host = host
-        WailoHostStore.port = port
+        defer { lock.unlock() }
+
+        if let port, !WailoAddress.portRange.contains(port) {
+            print("Wailo: port \(port) is outside 1-65535; keeping the current address")
+            return false
+        }
+        // Clearing the host hands the address back to discovery; a port given alongside still stands,
+        // since overriding a discovered desktop's port is the one reason to pass both.
+        guard let host else {
+            WailoHostStore.host = nil
+            WailoHostStore.port = port
+            apply()
+            return true
+        }
+        guard let address = WailoAddress(host) else {
+            print("Wailo: \"\(host)\" is not an address that can be dialled; keeping the current one")
+            return false
+        }
+        // A port typed into the address itself is the more specific answer, and splitting it out here
+        // keeps the store holding a bare host — the shape everything downstream expects.
+        WailoHostStore.host = address.host
+        WailoHostStore.port = address.port ?? port
         apply()
-        lock.unlock()
+        return true
     }
 
     /// Persist the USB listener port and re-bind on it immediately. Studio has to be pointed at the same
@@ -168,19 +204,30 @@ final class WailoCoordinator: @unchecked Sendable {
     private func apply() {
         guard let session else { return }
 
-        let override = session.explicitHost ?? WailoHostStore.host
-        if override == nil { startDiscovery() } else { stopDiscovery() }
+        // Parsed here rather than trusted, because a host reaching this point may never have passed
+        // `setHost` — `start(host:)` and the `-WailoHost` launch argument both land straight here. An
+        // unusable one falls through to discovery instead of taking the app down with it.
+        let pinned = (session.explicitHost ?? WailoHostStore.host).flatMap(WailoAddress.init)
+        if pinned == nil { startDiscovery() } else { stopDiscovery() }
 
         let forcedPort = session.explicitPort ?? WailoHostStore.port
-        let target: Endpoint
-        if let override {
-            target = Endpoint(host: override, port: forcedPort ?? Wailo.defaultPort)
+        let host: String
+        let port: Int
+        if let pinned {
+            host = pinned.host
+            port = pinned.port ?? forcedPort ?? Wailo.defaultPort
         } else if let found = discovered.first {
-            target = Endpoint(host: found.host, port: forcedPort ?? found.port)
+            host = found.host
+            port = forcedPort ?? found.port
         } else {
-            target = Endpoint(host: Wailo.defaultHost, port: forcedPort ?? Wailo.defaultPort)
+            host = Wailo.defaultHost
+            port = forcedPort ?? Wailo.defaultPort
         }
 
+        guard let target = Endpoint(host: host, port: port) else {
+            print("Wailo: cannot dial \(host):\(port); leaving the connection as it is")
+            return
+        }
         guard target != endpoint || client == nil else { return }
         endpoint = target
         rebuildClient(session: session, target: target)
@@ -190,7 +237,7 @@ final class WailoCoordinator: @unchecked Sendable {
         client?.stop()
 
         let hello = Hello(device_name: session.deviceName, app_id: session.appId, platform: Wailo.platform)
-        let webSocket = WailoClient(hello: hello, host: target.host, port: target.port)
+        let webSocket = WailoClient(hello: hello, url: target.url)
         webSocket.onConnectionChange = { [weak self, weak webSocket] isConnected in
             guard let self, let webSocket else { return }
             self.lanConnectionChanged(isConnected, from: webSocket)

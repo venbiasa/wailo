@@ -47,6 +47,21 @@ final class WailoHostStoreTests: XCTestCase {
         XCTAssertNil(WailoHostStore.host)
     }
 
+    /// The store is the reason a mistyped address was fatal *twice*: the panel wrote it before anything
+    /// dialled it, so the next launch read it back and crashed again. Undiallable text must not land here.
+    func testUndiallableHostReadsAsUnset() {
+        WailoHostStore.host = "192.168.1.42"
+        WailoHostStore.host = "192.168.1.42:80:90"
+        XCTAssertNil(WailoHostStore.host)
+    }
+
+    /// Stored as canonical text, because the same key doubles as the `-WailoHost` launch argument and a
+    /// pasted URL is a plausible thing to put there.
+    func testHostIsStoredCanonically() {
+        WailoHostStore.host = "ws://192.168.1.42:8080/"
+        XCTAssertEqual(WailoHostStore.host, "192.168.1.42:8080")
+    }
+
     func testPortRoundTrips() {
         WailoHostStore.port = 9001
         XCTAssertEqual(WailoHostStore.port, 9001)
@@ -60,5 +75,33 @@ final class WailoHostStoreTests: XCTestCase {
 
         WailoHostStore.port = 0
         XCTAssertNil(WailoHostStore.port)
+    }
+
+    // MARK: - what the panel's Connect button goes through
+
+    /// An address typed with its port belongs in both slots: the port must not be lost, and it must not
+    /// stay glued to the host — `ws://host:8080:8899/` is the URL that used to crash the app.
+    func testSetHostSplitsAPortTypedIntoTheAddress() {
+        XCTAssertTrue(Wailo.setHost("192.168.1.42:8080"))
+        XCTAssertEqual(Wailo.configuredHost, "192.168.1.42")
+        XCTAssertEqual(Wailo.configuredPort, 8080)
+    }
+
+    /// A typo must cost the typo, not the working address behind it.
+    func testSetHostRefusesUndiallableTextAndKeepsTheCurrentAddress() {
+        XCTAssertTrue(Wailo.setHost("192.168.1.42", port: 9001))
+
+        XCTAssertFalse(Wailo.setHost("192.168.1.42:80:90"))
+        XCTAssertFalse(Wailo.setHost("192.168.1.42", port: 70_000))
+
+        XCTAssertEqual(Wailo.configuredHost, "192.168.1.42")
+        XCTAssertEqual(Wailo.configuredPort, 9001)
+    }
+
+    func testSetHostNilRestoresDiscovery() {
+        XCTAssertTrue(Wailo.setHost("192.168.1.42", port: 9001))
+        XCTAssertTrue(Wailo.setHost(nil))
+        XCTAssertNil(Wailo.configuredHost)
+        XCTAssertNil(Wailo.configuredPort)
     }
 }

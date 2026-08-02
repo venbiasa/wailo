@@ -181,7 +181,10 @@ highest precedence first:
 4. `localhost`
 
 None of these need a rebuild to change. `Wailo.setHost(nil)` clears the override and hands control back
-to discovery.
+to discovery. An address is free text — `192.168.1.42`, `192.168.1.42:8899`, an IPv6 literal, or a pasted
+`ws://…` all resolve, and a port written into the address wins over a separate `port` — but only if it can
+actually be dialled: `setHost` returns `false` and changes nothing otherwise, so a typo can neither replace
+a working address nor be persisted for the next launch to read back.
 
 **On-device panel (`WailoSDKDebug`).** Link the `WailoSDKDebug` product *instead of* `WailoSDK` in debug
 builds and a **two-finger long-press on the bottom half of the screen** opens a panel showing what the SDK

@@ -135,15 +135,23 @@ struct WailoSettingsView: View {
                         label: "Desktop IP",
                         placeholder: "192.168.1.20",
                         text: $model.host,
-                        keyboard: .numbersAndPunctuation
+                        keyboard: .numbersAndPunctuation,
+                        isInvalid: model.hostError != nil
                     )
                     LabeledField(
                         label: "Port",
                         placeholder: String(Wailo.defaultPort),
                         text: $model.port,
-                        keyboard: .numberPad
+                        keyboard: .numberPad,
+                        isInvalid: model.portError != nil
                     )
                     .frame(width: 84)
+                }
+                if let message = model.hostError ?? model.portError {
+                    Text(message)
+                        .font(WailoTokens.Typography.bodySmall)
+                        .foregroundColor(WailoTokens.error)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 HStack(spacing: WailoTokens.Spacing.x2) {
                     ActionButton(title: "Connect", enabled: model.canApply, action: model.apply)
@@ -253,6 +261,7 @@ private struct LabeledField: View {
     let placeholder: String
     @Binding var text: String
     let keyboard: UIKeyboardType
+    var isInvalid = false
 
     @State private var editing = false
 
@@ -282,12 +291,16 @@ private struct LabeledField: View {
             .cornerRadius(WailoTokens.Radius.sm)
             .overlay(
                 RoundedRectangle(cornerRadius: WailoTokens.Radius.sm)
-                    .strokeBorder(
-                        editing ? WailoTokens.accent : WailoTokens.outline,
-                        lineWidth: editing ? 2 : 1
-                    )
+                    .strokeBorder(borderColor, lineWidth: editing || isInvalid ? 2 : 1)
             )
         }
+    }
+
+    /// Editing outranks the rejection: the ring has to follow the caret while the user fixes the value
+    /// the message is complaining about.
+    private var borderColor: Color {
+        if editing { return WailoTokens.accent }
+        return isInvalid ? WailoTokens.error : WailoTokens.outline
     }
 }
 

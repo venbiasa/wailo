@@ -83,9 +83,15 @@ public enum Wailo {
     /// Re-point at a different desktop and reconnect immediately, persisting the choice across launches.
     /// Pass `nil` to clear the override and hand control back to Bonjour discovery.
     ///
+    /// `host` is free text: `10.0.0.2`, `10.0.0.2:8899`, a bare IPv6 literal, and a pasted `ws://…` all
+    /// resolve, and a port named inside `host` wins over the `port` argument. Returns false — changing
+    /// nothing, so a working address survives a typo — when the text names no address that can be
+    /// dialled.
+    ///
     /// Takes effect without a rebuild — that is the point (ADR-0035). A `host` passed to `start` still
     /// outranks this for the current process.
-    public static func setHost(_ host: String?, port: Int? = nil) {
+    @discardableResult
+    public static func setHost(_ host: String?, port: Int? = nil) -> Bool {
         WailoCoordinator.shared.setHost(host, port: port)
     }
 

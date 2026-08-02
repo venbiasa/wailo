@@ -62,9 +62,12 @@ enum WailoHostStore {
         usbPort = nil
     }
 
+    /// Validated on read as well as on write, because the launch-argument domain is not ours to
+    /// sanitize: `-WailoHost <typo>` is written by Xcode, and a value that cannot be dialled has to read
+    /// as "no override" rather than reach the transport. Canonical text, so what is stored re-parses to
+    /// the same address (see `WailoAddress`).
     private static func normalize(_ raw: String) -> String? {
-        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
+        WailoAddress(raw)?.description
     }
 
     private static func validPort(_ raw: Int) -> Int? {

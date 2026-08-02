@@ -14,6 +14,13 @@ func reserveEphemeralPort() throws -> UInt16 {
     return port
 }
 
+/// What the coordinator hands `WailoClient` for a loopback server. Force-unwrapped because the literal
+/// is fixed here; in the SDK the same construction is `WailoAddress`'s job precisely because a typed
+/// address is not.
+func loopbackURL(_ port: UInt16) -> URL {
+    URL(string: "ws://127.0.0.1:\(port)/")!
+}
+
 /// Minimal WebSocket server for tests. Accepts one connection and decodes each binary frame as an
 /// `Envelope`, exactly as the real engine does.
 final class LoopbackWebSocketServer {
