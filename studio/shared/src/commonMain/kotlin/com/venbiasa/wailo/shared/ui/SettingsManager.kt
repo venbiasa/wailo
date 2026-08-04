@@ -15,7 +15,11 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import com.venbiasa.wailo.shared.PairingAction
+import com.venbiasa.wailo.shared.PairingState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -59,6 +63,8 @@ internal fun SettingsManager(
     usbPort: Int,
     usbPortError: String?,
     onApplyUsbPort: (Int) -> Unit,
+    pairing: PairingState = PairingState(),
+    onPairingAction: (PairingAction) -> Unit = {},
     onClose: () -> Unit = {},
 ) {
     Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
@@ -109,8 +115,101 @@ internal fun SettingsManager(
                             "attached devices and leaves LAN sessions alone.",
                     )
                 }
+
+                if (pairing.supported) {
+                    SectionHeader("Wi-Fi security")
+                    ToggleRow(
+                        label = "Only paired devices over Wi-Fi",
+                        checked = pairing.requirePairing,
+                        onCheckedChange = { onPairingAction(PairingAction.SetRequirePairing(it)) },
+                        help = "Off, a device that dials an address you typed is taken at its word the " +
+                            "first time and remembered from then on — the usual case, your own phone " +
+                            "and your own Mac. On, a device must scan the QR or type the code from the " +
+                            "Devices panel first. Either way the session is encrypted; this decides " +
+                            "what has to be proved before it starts. Devices you already trust stay " +
+                            "connected.",
+                    )
+                    RowDivider()
+                    IdentityRow(studioId = pairing.studioId, deviceCount = pairing.devices.size) {
+                        onPairingAction(PairingAction.ResetIdentity)
+                    }
+                }
             }
         }
+    }
+}
+
+// Resetting the identity is rare, irreversible and disconnects everything, so it asks first and says
+// exactly what it will cost — a plain button here would be a trap sitting next to a port field.
+@Composable
+private fun IdentityRow(studioId: String, deviceCount: Int, onReset: () -> Unit) {
+    var confirming by remember { mutableStateOf(false) }
+
+    Column(
+        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Text(
+            "This Studio's identity",
+            style = MaterialTheme.typography.labelLarge,
+            color = MaterialTheme.colorScheme.onSurface,
+        )
+        Text(
+            studioId.ifEmpty { "unavailable" },
+            style = monoSmall(),
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        if (confirming) {
+            Text(
+                "Resetting disconnects and forgets " +
+                    when (deviceCount) {
+                        0 -> "every paired device"
+                        1 -> "the 1 paired device"
+                        else -> "all $deviceCount paired devices"
+                    } +
+                    ". Each has to pair again.",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.error,
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = { confirming = false; onReset() }) { Text("Reset identity") }
+                TextButton(onClick = { confirming = false }) { Text("Cancel") }
+            }
+        } else {
+            Button(onClick = { confirming = true }) { Text("Reset identity…") }
+        }
+        MutedText(
+            "Devices pin this fingerprint the first time they connect, and refuse anything else at " +
+                "that address. Reset it if you think the key store leaked — forgetting devices one " +
+                "at a time does not help when the leak is on this side.",
+        )
+    }
+}
+
+@Composable
+private fun ToggleRow(
+    label: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+    help: String,
+) {
+    Column(
+        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Row(
+            Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                label,
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+            Spacer(Modifier.weight(1f))
+            Switch(checked = checked, onCheckedChange = onCheckedChange)
+        }
+        MutedText(help)
     }
 }
 

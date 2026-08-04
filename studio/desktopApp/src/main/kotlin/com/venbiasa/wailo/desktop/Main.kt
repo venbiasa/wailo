@@ -29,6 +29,9 @@ import com.venbiasa.wailo.engine.MapLocalBodyProvider
 import com.venbiasa.wailo.engine.ConnectedDevice
 import com.venbiasa.wailo.engine.DeviceTransport
 import com.venbiasa.wailo.engine.WailoEngine
+import com.venbiasa.wailo.engine.pairing.InMemoryPairingKeyStore
+import com.venbiasa.wailo.engine.pairing.PairingCode
+import com.venbiasa.wailo.engine.pairing.PairingManager
 import com.venbiasa.wailo.engine.resolveLanAddress
 import com.venbiasa.wailo.shared.BreakpointNode
 import com.venbiasa.wailo.shared.CaptureFilterState
@@ -38,16 +41,24 @@ import com.venbiasa.wailo.shared.DeviceTransportKind
 import com.venbiasa.wailo.shared.FlowEntry
 import com.venbiasa.wailo.shared.MapLocalNode
 import com.venbiasa.wailo.shared.MapLocalRuleDef
+import com.venbiasa.wailo.shared.PairedDeviceInfo
+import com.venbiasa.wailo.shared.PairingAction
+import com.venbiasa.wailo.shared.PairingOfferInfo
+import com.venbiasa.wailo.shared.PairingRefusal
+import com.venbiasa.wailo.shared.PairingState
 import com.venbiasa.wailo.shared.PausedFlow
 import com.venbiasa.wailo.shared.PickedFile
 import com.venbiasa.wailo.shared.WailoApp
 import com.venbiasa.wailo.shared.WailoBreakpointWindowContent
 import com.venbiasa.wailo.shared.theme.TextScale
+import com.venbiasa.wailo.desktop.pairing.KeychainPairingKeyStore
+import com.venbiasa.wailo.desktop.pairing.PairingQr
 import com.venbiasa.wailo.desktop.usb.UsbConnectionStatus
 import com.venbiasa.wailo.desktop.usb.UsbDeviceManager
 import com.venbiasa.wailo.desktop.usb.UsbDeviceState
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.launch
@@ -65,6 +76,7 @@ import java.util.TimeZone
 import javax.imageio.ImageIO
 import kotlin.coroutines.resume
 import kotlin.time.Duration.Companion.milliseconds
+import kotlin.time.Duration.Companion.seconds
 
 fun main() = runWailo()
 
@@ -85,7 +97,20 @@ private fun runWailo() = application {
     // Seeded from the last port the user chose, so a device pointed at a non-default port keeps working
     // across restarts. The engine is built once and moved in place by [applyPort] — rebuilding it to
     // change a port would discard the captured traffic and every rule snapshot it holds.
-    val engine = remember { WailoEngine(port = PortStore.load()) }
+    // The pairing identity has to outlive the process — every device pins this public key, so a new one
+    // each launch would silently un-pair all of them. On a host with no Keychain the engine keeps its
+    // in-memory default: loopback and USB still work, and those are the paths that never needed a key.
+    val engine = remember {
+        WailoEngine(
+            port = PortStore.load(),
+            pairings = if (KeychainPairingKeyStore.isSupported) {
+                PairingManager(KeychainPairingKeyStore())
+            } else {
+                PairingManager(InMemoryPairingKeyStore())
+            },
+            requirePairing = RequirePairingStore.load(),
+        )
+    }
     val rows by engine.exchanges.collectAsState()
     val capturing by engine.capturing.collectAsState()
     val connectedDevices by engine.connectedDevices.collectAsState()
@@ -153,6 +178,68 @@ private fun runWailo() = application {
     // the host part is fixed — the port follows the setting.
     val lanAddress = remember { resolveLanAddress() }
     val listenAddress = "$lanAddress:$listenPort"
+
+    // --- Wi-Fi pairing (ADR-0039) ---------------------------------------------------------------
+    // The engine owns the keys; the host owns the QR (ZXing is a desktop dependency, and `shared` has
+    // no encoder) and the countdown, since `shared` is stateless and has no clock in commonMain.
+    val pairedDevices by engine.pairings.devices.collectAsState()
+    val pairingOffer by engine.pairings.offer.collectAsState()
+    val refusedDevices by engine.refusedDevices.collectAsState()
+    val suspectedClones by engine.suspectedClones.collectAsState()
+    val requirePairing by engine.requirePairing.collectAsState()
+    var offerRemaining by remember { mutableStateOf(0) }
+    LaunchedEffect(pairingOffer) {
+        val offer = pairingOffer ?: return@LaunchedEffect
+        while (true) {
+            val remaining = ((offer.expiresAtEpochMs - System.currentTimeMillis()) / 1000)
+                .coerceAtLeast(0).toInt()
+            offerRemaining = remaining
+            if (remaining == 0) break
+            delay(1.seconds)
+        }
+        // Drop the offer once it lapses rather than leaving a dead code on screen; the engine already
+        // refuses it, and a code that looks live but is not is worse than none.
+        engine.pairings.cancelPairing()
+    }
+    val identity by engine.pairings.identity.collectAsState()
+    val offerQr = remember(pairingOffer, identity, listenPort) {
+        pairingOffer?.let {
+            PairingQr.render(it.qrPayload(identity.studioId, identity.publicKey, lanAddress, listenPort))
+        }
+    }
+    val pairingState = PairingState(
+        offer = pairingOffer?.let {
+            PairingOfferInfo(qr = offerQr, code = PairingCode.format(it.code), remainingSeconds = offerRemaining)
+        },
+        devices = pairedDevices.map {
+            PairedDeviceInfo(
+                deviceId = it.deviceId,
+                name = it.name,
+                pairedAtEpochMs = it.pairedAtEpochMs,
+                lastSeenEpochMs = it.lastSeenEpochMs,
+                suspectedClone = it.deviceId in suspectedClones,
+                trustedOnFirstUse = it.trustedOnFirstUse,
+            )
+        },
+        refusals = refusedDevices.map { PairingRefusal(it.deviceId, it.reason) },
+        supported = KeychainPairingKeyStore.isSupported,
+        requirePairing = requirePairing,
+        studioId = identity.studioId,
+    )
+    val onPairingAction: (PairingAction) -> Unit = { action ->
+        when (action) {
+            PairingAction.Begin -> engine.pairings.beginPairing()
+            PairingAction.Cancel -> engine.pairings.cancelPairing()
+            is PairingAction.Forget -> engine.forgetDevice(action.deviceId)
+            PairingAction.ForgetAll -> engine.forgetAllDevices()
+            PairingAction.ResetIdentity -> engine.resetIdentity()
+            is PairingAction.SetRequirePairing -> {
+                engine.setRequirePairing(action.enabled)
+                RequirePairingStore.save(action.enabled)
+            }
+            is PairingAction.DismissRefusal -> engine.dismissRefusal(action.deviceId)
+        }
+    }
 
     // Map the engine's rows into the viewer's model at this boundary — `shared` must not depend on
     // `engine` (module firewall), so the two `Captured*` types are bridged here rather than shared.
@@ -426,6 +513,8 @@ private fun runWailo() = application {
             usbPort = usbPort,
             usbPortError = usbPortError,
             onApplyUsbPort = applyUsbPort,
+            pairing = pairingState,
+            onPairingAction = onPairingAction,
             capturing = capturing,
             onToggleCapture = { engine.setCapturing(!capturing) },
             onClear = engine::clear,

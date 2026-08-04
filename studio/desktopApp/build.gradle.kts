@@ -44,6 +44,7 @@ dependencies {
     // frontend over engine, and the two never talk to the transport directly).
     implementation(projects.engine)
     implementation(projects.shared)
+    implementation(libs.zxing.core)
 
     testImplementation(kotlin("test"))
 }

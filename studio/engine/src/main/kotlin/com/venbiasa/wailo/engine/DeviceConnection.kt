@@ -26,6 +26,14 @@ interface DeviceConnection {
     val id: String
     val transport: DeviceTransport
 
+    /**
+     * Whether the peer is reachable only from this machine — loopback, or a USB tunnel that terminates
+     * on it. Those need no pairing: the address itself is the proof, and requiring a key would break
+     * the zero-config Simulator and `adb reverse` paths for nothing. Anything arriving over WiFi is
+     * whoever answered an mDNS advertisement, and has to authenticate (ADR-0039).
+     */
+    val isTrusted: Boolean
+
     suspend fun receive(): ByteArray?
     suspend fun send(bytes: ByteArray)
     fun close()

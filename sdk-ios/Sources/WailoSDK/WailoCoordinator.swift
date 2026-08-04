@@ -1,5 +1,16 @@
+import CryptoKit
 import Foundation
 import WailoProtocol
+
+/// A remembered address now answered by a different identity (ADR-0040). Surfaced rather than acted
+/// on: this is either a machine that changed hands or someone standing in the path, and from the
+/// device's side the two are indistinguishable.
+public struct WailoIdentityChange: Equatable, Sendable {
+    public let host: String
+    /// The `sid` this device pinned when it first trusted this address.
+    public let expected: String
+    public let actual: String
+}
 
 /// Owns the live transport and decides *which* desktop it dials.
 ///
@@ -49,12 +60,34 @@ final class WailoCoordinator: @unchecked Sendable {
         }
     }
 
+    /// How a resolved endpoint may be talked to (ADR-0039, revised by ADR-0040).
+    private enum Trust {
+        /// Loopback: Simulator, `adb reverse`, the usbmux tunnel. The kernel already guarantees the
+        /// peer is this machine, so there is nothing a key would add.
+        case loopback
+        /// WiFi. Whatever the device knows about this peer, which decides what it can demand.
+        case wifi(WailoHandshake.Trust)
+        /// WiFi that must not be dialled: an address nobody chose, or one whose identity changed.
+        /// Sending even a `Hello` would name the app to whatever answered.
+        case blocked
+    }
+
     private let lock = NSLock()
+    private let pairingStore = WailoPairingStore.shared
     private var session: Session?
     private var client: WailoClient?
     private var endpoint: Endpoint?
     private var discovery: WailoDiscovery?
     private var discovered: [WailoService] = []
+    /// Set by `pair`, cleared once the handshake it authorises succeeds. Outranks everything else so a
+    /// freshly scanned QR connects immediately rather than waiting for discovery to catch up.
+    private var pendingInvite: WailoPairingInvite?
+    private var refusal: String?
+    private var identityChange: WailoIdentityChange?
+    /// Hosts the user has said "yes, that new identity is fine" about, cleared once one is taken. Kept
+    /// in memory only: accepting a changed identity is a decision about right now, and a stale one
+    /// surviving a relaunch would silently widen it.
+    private var acceptedIdentityChanges: Set<String> = []
     private var usbListener: WailoUsbListener?
     private var usbConnection: WailoUsbConnection?
     private var usbActive = false
@@ -111,6 +144,7 @@ final class WailoCoordinator: @unchecked Sendable {
         guard let host else {
             WailoHostStore.host = nil
             WailoHostStore.port = port
+            identityChange = nil
             apply()
             return true
         }
@@ -118,12 +152,107 @@ final class WailoCoordinator: @unchecked Sendable {
             print("Wailo: \"\(host)\" is not an address that can be dialled; keeping the current one")
             return false
         }
+        // A warning about a different address has nothing to say about this one, and leaving it up
+        // would attach it to whatever the user typed next.
+        if identityChange?.host != address.host { identityChange = nil }
         // A port typed into the address itself is the more specific answer, and splitting it out here
         // keeps the store holding a bare host — the shape everything downstream expects.
         WailoHostStore.host = address.host
         WailoHostStore.port = address.port ?? port
         apply()
         return true
+    }
+
+    // MARK: - pairing
+
+    /// Take a scanned QR or a typed code and dial the Studio it names. The key is derived here and
+    /// only persisted once the handshake proves the peer really is that Studio, so a mistyped code
+    /// leaves nothing behind.
+    func pair(_ invite: WailoPairingInvite) {
+        lock.lock()
+        pendingInvite = invite
+        refusal = nil
+        // A pinned manual address would otherwise outrank the invite we were just handed.
+        WailoHostStore.host = nil
+        apply()
+        lock.unlock()
+        post(Wailo.connectionDidChangeNotification)
+    }
+
+    func forget(studioId: String) {
+        lock.lock()
+        pairingStore.forget(studioId: studioId)
+        if pendingInvite?.studioId == studioId { pendingInvite = nil }
+        refusal = nil
+        apply()
+        lock.unlock()
+        post(Wailo.connectionDidChangeNotification)
+    }
+
+    func forgetAllPairings() {
+        lock.lock()
+        pairingStore.forgetAll()
+        pendingInvite = nil
+        refusal = nil
+        apply()
+        lock.unlock()
+        post(Wailo.connectionDidChangeNotification)
+    }
+
+    /// Clears the "this Studio does not know you" latch so the device tries once more. Deliberately a
+    /// human action: the refusal arrives unauthenticated, so retrying on a timer would let anyone hold
+    /// the device in a re-pair loop.
+    func retryAfterRefusal() {
+        lock.lock()
+        refusal = nil
+        for var pairing in pairingStore.all where pairing.refused {
+            pairing.refused = false
+            pairingStore.save(pairing)
+        }
+        apply()
+        lock.unlock()
+        post(Wailo.connectionDidChangeNotification)
+    }
+
+    var pairings: [WailoPairing] {
+        lock.lock(); defer { lock.unlock() }
+        return pairingStore.all
+    }
+
+    var refusalMessage: String? {
+        lock.lock(); defer { lock.unlock() }
+        return refusal
+    }
+
+    var pendingIdentityChange: WailoIdentityChange? {
+        lock.lock(); defer { lock.unlock() }
+        return identityChange
+    }
+
+    /// Take the new identity at that address: drop the old pin and let the next connection establish
+    /// a fresh one. Only ever called from an explicit user action, which is what separates "my Mac
+    /// changed hands" from "someone is in the path" — nothing on the wire can tell them apart.
+    func acceptIdentityChange() {
+        lock.lock()
+        guard let change = identityChange else { lock.unlock(); return }
+        acceptedIdentityChanges.insert(change.host)
+        identityChange = nil
+        apply()
+        lock.unlock()
+        post(Wailo.connectionDidChangeNotification)
+    }
+
+    /// Leave the pin alone and stop dialling that address.
+    func rejectIdentityChange() {
+        lock.lock()
+        guard let change = identityChange else { lock.unlock(); return }
+        acceptedIdentityChanges.remove(change.host)
+        identityChange = nil
+        // Hand the address back to discovery, which only reconnects to identities already known.
+        if WailoHostStore.host == change.host { WailoHostStore.host = nil }
+        apply()
+        lock.unlock()
+        post(Wailo.connectionDidChangeNotification)
     }
 
     /// Persist the USB listener port and re-bind on it immediately. Studio has to be pointed at the same
@@ -213,34 +342,132 @@ final class WailoCoordinator: @unchecked Sendable {
         let forcedPort = session.explicitPort ?? WailoHostStore.port
         let host: String
         let port: Int
-        if let pinned {
+        // Whether a human named this endpoint. It is the whole basis for a lenient first contact: an
+        // address someone typed carries an intent that an mDNS advertisement never does.
+        let chosen: Bool
+        if let invite = pendingInvite {
+            host = invite.host
+            port = invite.port
+            chosen = true
+        } else if let pinned {
             host = pinned.host
             port = pinned.port ?? forcedPort ?? Wailo.defaultPort
-        } else if let found = discovered.first {
+            chosen = true
+        } else if let found = firstKnownDesktop() {
             host = found.host
             port = forcedPort ?? found.port
+            chosen = false
         } else {
             host = Wailo.defaultHost
             port = forcedPort ?? Wailo.defaultPort
+            chosen = false
         }
 
         guard let target = Endpoint(host: host, port: port) else {
             print("Wailo: cannot dial \(host):\(port); leaving the connection as it is")
             return
         }
-        guard target != endpoint || client == nil else { return }
-        endpoint = target
-        rebuildClient(session: session, target: target)
+
+        let trust = self.trust(for: target, chosen: chosen)
+        guard case .blocked = trust else {
+            guard target != endpoint || client == nil else { return }
+            endpoint = target
+            rebuildClient(session: session, target: target, trust: trust)
+            return
+        }
+        // Nothing worth saying to whoever is on the other end, so do not open the socket at all.
+        endpoint = nil
+        client?.stop()
+        client = nil
     }
 
-    private func rebuildClient(session: Session, target: Endpoint) {
+    /// Discovery may only reconnect to a desktop this device already holds a key for.
+    ///
+    /// That restriction is the original fix: a colleague's Studio on the same WiFi advertises a `sid`
+    /// we know nothing about, and used to win simply because its hostname sorted first. Reaching a new
+    /// desktop is now always something the user does on purpose — by typing its address or scanning
+    /// its QR — and discovery's job is only to find one already trusted, wherever DHCP has moved it.
+    private func firstKnownDesktop() -> WailoService? {
+        discovered.first { service in
+            guard !service.studioId.isEmpty else { return false }
+            guard let pairing = pairingStore.pairing(studioId: service.studioId) else { return false }
+            return !pairing.refused
+        }
+    }
+
+    private func trust(for target: Endpoint, chosen: Bool) -> Trust {
+        if Self.isLoopback(target.host) { return .loopback }
+
+        if let invite = pendingInvite, invite.host == target.host {
+            let key = WailoCrypto.deviceKey(
+                pairingSecret: invite.pairingSecret,
+                studioId: invite.studioId,
+                deviceId: pairingStore.deviceId
+            )
+            return .wifi(.invited(
+                studioId: invite.studioId,
+                deviceKey: key,
+                publicKey: invite.publicKey,
+                byCode: invite.pairedByCode
+            ))
+        }
+
+        // An identity change already seen at this address, not yet accepted. Nothing is dialled until
+        // the user resolves it; retrying would just reproduce the same warning every two seconds.
+        if let identityChange, identityChange.host == target.host,
+           !acceptedIdentityChanges.contains(target.host) {
+            return .blocked
+        }
+
+        if let pairing = pairing(forHost: target.host), !pairing.refused,
+           !acceptedIdentityChanges.contains(target.host) {
+            return .wifi(.paired(
+                studioId: pairing.studioId,
+                deviceKey: SymmetricKey(data: pairing.deviceKey),
+                publicKey: pairing.publicKey,
+                sessionCounter: pairing.sessionCounter
+            ))
+        }
+
+        // Nothing known about this address. Only worth a word if the user put it there.
+        return chosen ? .wifi(.firstContact) : .blocked
+    }
+
+    /// A typed IP names a machine, not an identity, so work back to one: the advertised `sid` at that
+    /// address, else the Studio last reached there, else the only pairing there is — which is the
+    /// normal case, one developer with one Mac.
+    private func pairing(forHost host: String) -> WailoPairing? {
+        if let advertised = discovered.first(where: { $0.host == host && !$0.studioId.isEmpty }),
+           let pairing = pairingStore.pairing(studioId: advertised.studioId) {
+            return pairing
+        }
+        let all = pairingStore.all
+        if let remembered = all.first(where: { $0.lastHost == host }) { return remembered }
+        return all.count == 1 ? all.first : nil
+    }
+
+    private static func isLoopback(_ host: String) -> Bool {
+        ["localhost", "127.0.0.1", "::1", "[::1]"].contains(host.lowercased())
+    }
+
+    private func rebuildClient(session: Session, target: Endpoint, trust: Trust) {
         client?.stop()
 
         let hello = Hello(device_name: session.deviceName, app_id: session.appId, platform: Wailo.platform)
-        let webSocket = WailoClient(hello: hello, url: target.url)
+        let webSocket = WailoClient(hello: hello, url: target.url, security: security(for: trust, host: target.host))
         webSocket.onConnectionChange = { [weak self, weak webSocket] isConnected in
             guard let self, let webSocket else { return }
             self.lanConnectionChanged(isConnected, from: webSocket)
+        }
+        webSocket.onHandshakeEstablished = { [weak self] pairing in
+            self?.handshakeEstablished(pairing)
+        }
+        webSocket.onHandshakeRefused = { [weak self] reason in
+            self?.handshakeRefused(reason)
+        }
+        webSocket.onIdentityChanged = { [weak self, weak webSocket] expected, actual in
+            guard let self, let webSocket else { return }
+            self.identityChanged(expected: expected, actual: actual, from: webSocket)
         }
         webSocket.start()
         client = webSocket
@@ -250,6 +477,84 @@ final class WailoCoordinator: @unchecked Sendable {
         } else {
             webSocket.suspend()
         }
+    }
+
+    private func security(for trust: Trust, host: String) -> WailoSessionSecurity {
+        switch trust {
+        case .loopback, .blocked:
+            return .open
+        case let .wifi(handshakeTrust):
+            let deviceId = pairingStore.deviceId
+            let store = pairingStore
+            // Built per connection: each handshake needs its own nonce and ephemeral key, and the
+            // session counter has to be read fresh because the previous connection advanced it.
+            return .guarded {
+                WailoHandshake(trust: Self.refreshed(handshakeTrust, in: store), deviceId: deviceId, host: host)
+            }
+        }
+    }
+
+    /// The counter advances on every handshake, and `apply` may have resolved this trust several
+    /// reconnects ago. Everything else in it is fixed for the life of the pairing.
+    private static func refreshed(
+        _ trust: WailoHandshake.Trust,
+        in store: WailoPairingStore
+    ) -> WailoHandshake.Trust {
+        guard case let .paired(studioId, deviceKey, publicKey, _) = trust else { return trust }
+        return .paired(
+            studioId: studioId,
+            deviceKey: deviceKey,
+            publicKey: publicKey,
+            sessionCounter: store.pairing(studioId: studioId)?.sessionCounter ?? 0
+        )
+    }
+
+    private func handshakeEstablished(_ pairing: WailoPairing) {
+        lock.lock()
+        // A previous entry for this address is stale the moment a different identity is accepted
+        // there; leaving it would keep resolving the host back to a Studio that has moved on.
+        if acceptedIdentityChanges.remove(pairing.lastHost) != nil {
+            for stale in pairingStore.all
+            where stale.lastHost == pairing.lastHost && stale.studioId != pairing.studioId {
+                pairingStore.forget(studioId: stale.studioId)
+            }
+        }
+        pairingStore.save(pairing)
+        if pendingInvite?.studioId == pairing.studioId { pendingInvite = nil }
+        refusal = nil
+        if identityChange?.host == pairing.lastHost { identityChange = nil }
+        lock.unlock()
+        post(Wailo.discoveryDidChangeNotification)
+    }
+
+    /// A pinned address answered by someone else. Stop, and leave it to a human — the whole point of
+    /// having pinned the key is that this decision is not made automatically (ADR-0040).
+    private func identityChanged(expected: String, actual: String, from source: WailoClient) {
+        lock.lock()
+        guard client === source, let host = endpoint?.host else { lock.unlock(); return }
+        identityChange = WailoIdentityChange(host: host, expected: expected, actual: actual)
+        client?.stop()
+        client = nil
+        endpoint = nil
+        lock.unlock()
+        post(Wailo.connectionDidChangeNotification)
+    }
+
+    private func handshakeRefused(_ reason: String) {
+        lock.lock()
+        refusal = reason
+        // Latch it on the pairing so `apply` stops choosing this desktop. The key itself stays: the
+        // refusal is unauthenticated, so deleting on it would be a lever to force a re-pair.
+        if var pairing = endpoint.flatMap({ pairing(forHost: $0.host) }) {
+            pairing.refused = true
+            pairingStore.save(pairing)
+        }
+        pendingInvite = nil
+        client?.stop()
+        client = nil
+        endpoint = nil
+        lock.unlock()
+        post(Wailo.connectionDidChangeNotification)
     }
 
     private func wireTransport(

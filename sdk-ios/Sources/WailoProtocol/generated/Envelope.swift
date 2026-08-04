@@ -11,6 +11,10 @@ import Wire
  * Hello and whenever they change, replies to a BodyRequest with a BodyResponse (ADR-0019), and replies
  * to a BreakpointHit with a BreakpointDecision. The receiver keys on which oneof field is set; new kinds
  * are a oneof extension (ADR-0008), so this stays backward-compatible.
+ *
+ * Over WiFi the exchange above is preceded by the AuthRequest/AuthChallenge/AuthResponse/AuthResult
+ * handshake and every frame after it is wrapped in a SealedFrame (ADR-0039). Loopback sessions —
+ * Simulator, `adb reverse`, the usbmux tunnel — skip both and start at Hello as before.
  */
 public struct Envelope {
 
@@ -71,6 +75,11 @@ extension Envelope : Proto3Codable {
             case 10: message = .breakpoint_rules_ack(try protoReader.decode(BreakpointRulesAck.self))
             case 11: message = .breakpoint_hit(try protoReader.decode(BreakpointHit.self))
             case 12: message = .breakpoint_decision(try protoReader.decode(BreakpointDecision.self))
+            case 13: message = .auth_request(try protoReader.decode(AuthRequest.self))
+            case 14: message = .auth_challenge(try protoReader.decode(AuthChallenge.self))
+            case 15: message = .auth_response(try protoReader.decode(AuthResponse.self))
+            case 16: message = .auth_result(try protoReader.decode(AuthResult.self))
+            case 17: message = .sealed_frame(try protoReader.decode(SealedFrame.self))
             default: try protoReader.readUnknownField(tag: tag)
             }
         }
@@ -137,6 +146,26 @@ extension Envelope : Codable {
             self.message = .breakpoint_decision(breakpoint_decision)
         } else if let breakpoint_decision = try container.decodeIfPresent(BreakpointDecision.self, forKey: "breakpoint_decision") {
             self.message = .breakpoint_decision(breakpoint_decision)
+        } else if let auth_request = try container.decodeIfPresent(AuthRequest.self, forKey: "authRequest") {
+            self.message = .auth_request(auth_request)
+        } else if let auth_request = try container.decodeIfPresent(AuthRequest.self, forKey: "auth_request") {
+            self.message = .auth_request(auth_request)
+        } else if let auth_challenge = try container.decodeIfPresent(AuthChallenge.self, forKey: "authChallenge") {
+            self.message = .auth_challenge(auth_challenge)
+        } else if let auth_challenge = try container.decodeIfPresent(AuthChallenge.self, forKey: "auth_challenge") {
+            self.message = .auth_challenge(auth_challenge)
+        } else if let auth_response = try container.decodeIfPresent(AuthResponse.self, forKey: "authResponse") {
+            self.message = .auth_response(auth_response)
+        } else if let auth_response = try container.decodeIfPresent(AuthResponse.self, forKey: "auth_response") {
+            self.message = .auth_response(auth_response)
+        } else if let auth_result = try container.decodeIfPresent(AuthResult.self, forKey: "authResult") {
+            self.message = .auth_result(auth_result)
+        } else if let auth_result = try container.decodeIfPresent(AuthResult.self, forKey: "auth_result") {
+            self.message = .auth_result(auth_result)
+        } else if let sealed_frame = try container.decodeIfPresent(SealedFrame.self, forKey: "sealedFrame") {
+            self.message = .sealed_frame(sealed_frame)
+        } else if let sealed_frame = try container.decodeIfPresent(SealedFrame.self, forKey: "sealed_frame") {
+            self.message = .sealed_frame(sealed_frame)
         } else {
             self.message = nil
         }
@@ -159,6 +188,11 @@ extension Envelope : Codable {
         case .breakpoint_rules_ack(let breakpoint_rules_ack): try container.encode(breakpoint_rules_ack, forKey: preferCamelCase ? "breakpointRulesAck" : "breakpoint_rules_ack")
         case .breakpoint_hit(let breakpoint_hit): try container.encode(breakpoint_hit, forKey: preferCamelCase ? "breakpointHit" : "breakpoint_hit")
         case .breakpoint_decision(let breakpoint_decision): try container.encode(breakpoint_decision, forKey: preferCamelCase ? "breakpointDecision" : "breakpoint_decision")
+        case .auth_request(let auth_request): try container.encode(auth_request, forKey: preferCamelCase ? "authRequest" : "auth_request")
+        case .auth_challenge(let auth_challenge): try container.encode(auth_challenge, forKey: preferCamelCase ? "authChallenge" : "auth_challenge")
+        case .auth_response(let auth_response): try container.encode(auth_response, forKey: preferCamelCase ? "authResponse" : "auth_response")
+        case .auth_result(let auth_result): try container.encode(auth_result, forKey: preferCamelCase ? "authResult" : "auth_result")
+        case .sealed_frame(let sealed_frame): try container.encode(sealed_frame, forKey: preferCamelCase ? "sealedFrame" : "sealed_frame")
         case Optional.none: break
         }
     }
@@ -185,6 +219,15 @@ extension Envelope {
         case breakpoint_rules_ack(BreakpointRulesAck)
         case breakpoint_hit(BreakpointHit)
         case breakpoint_decision(BreakpointDecision)
+        case auth_request(AuthRequest)
+        case auth_challenge(AuthChallenge)
+        case auth_response(AuthResponse)
+        case auth_result(AuthResult)
+        /**
+         * Not `sealed`: that is a Kotlin modifier, and Wire escapes it to `sealed_` on that side only,
+         * leaving the two generated APIs spelling the same field differently.
+         */
+        case sealed_frame(SealedFrame)
 
         fileprivate func encode(to protoWriter: ProtoWriter) throws {
             switch self {
@@ -200,6 +243,11 @@ extension Envelope {
             case .breakpoint_rules_ack(let breakpoint_rules_ack): try protoWriter.encode(tag: 10, value: breakpoint_rules_ack)
             case .breakpoint_hit(let breakpoint_hit): try protoWriter.encode(tag: 11, value: breakpoint_hit)
             case .breakpoint_decision(let breakpoint_decision): try protoWriter.encode(tag: 12, value: breakpoint_decision)
+            case .auth_request(let auth_request): try protoWriter.encode(tag: 13, value: auth_request)
+            case .auth_challenge(let auth_challenge): try protoWriter.encode(tag: 14, value: auth_challenge)
+            case .auth_response(let auth_response): try protoWriter.encode(tag: 15, value: auth_response)
+            case .auth_result(let auth_result): try protoWriter.encode(tag: 16, value: auth_result)
+            case .sealed_frame(let sealed_frame): try protoWriter.encode(tag: 17, value: sealed_frame)
             }
         }
 

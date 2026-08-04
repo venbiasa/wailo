@@ -67,6 +67,7 @@ class WailoEngineDeviceConnectionTest {
     private class FakeConnection : DeviceConnection {
         override val id = "usb:test"
         override val transport = DeviceTransport.USB
+        override val isTrusted = true
         val incoming = Channel<ByteArray>(Channel.UNLIMITED)
         val outgoing = Channel<ByteArray>(Channel.UNLIMITED)
         var closed = false

@@ -24,6 +24,8 @@ import androidx.compose.ui.unit.dp
 import com.venbiasa.wailo.shared.DeviceConnectionStatus
 import com.venbiasa.wailo.shared.DeviceInfo
 import com.venbiasa.wailo.shared.DeviceTransportKind
+import com.venbiasa.wailo.shared.PairingAction
+import com.venbiasa.wailo.shared.PairingState
 import com.venbiasa.wailo.shared.theme.LocalWailoColors
 
 /**
@@ -37,6 +39,8 @@ internal fun DevicesManager(
     devices: List<DeviceInfo>,
     usbSupported: Boolean,
     usbPort: Int,
+    pairing: PairingState,
+    onPairingAction: (PairingAction) -> Unit,
     onClose: () -> Unit = {},
 ) {
     Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
@@ -54,27 +58,34 @@ internal fun DevicesManager(
             }
             RowDivider()
 
-            if (devices.isEmpty()) {
-                Box(Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text(
-                            "No devices",
-                            style = MaterialTheme.typography.titleSmall,
-                            color = MaterialTheme.colorScheme.onSurface,
-                        )
-                        Spacer(Modifier.height(6.dp))
-                        MutedText(
-                            if (usbSupported) {
-                                "Connect an iPhone by USB and open an app using Wailo, or connect over " +
-                                    "LAN. USB dials port $usbPort on the device."
-                            } else {
-                                "Connect an app using Wailo over LAN. USB discovery is currently macOS-only."
-                            },
-                        )
-                    }
+            LazyColumn(Modifier.fillMaxSize()) {
+                item {
+                    PairingPanel(pairing, onPairingAction)
+                    RowDivider()
                 }
-            } else {
-                LazyColumn(Modifier.fillMaxSize()) {
+                if (devices.isEmpty()) {
+                    item {
+                        Column(
+                            Modifier.fillMaxWidth().padding(24.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                        ) {
+                            Text(
+                                "No devices",
+                                style = MaterialTheme.typography.titleSmall,
+                                color = MaterialTheme.colorScheme.onSurface,
+                            )
+                            Spacer(Modifier.height(6.dp))
+                            MutedText(
+                                if (usbSupported) {
+                                    "Connect an iPhone by USB and open an app using Wailo, or pair it over " +
+                                        "Wi-Fi. USB dials port $usbPort on the device."
+                                } else {
+                                    "Pair an app using Wailo over Wi-Fi. USB discovery is currently macOS-only."
+                                },
+                            )
+                        }
+                    }
+                } else {
                     items(devices, key = { it.id }) { device ->
                         DeviceRow(device, usbPort)
                         RowDivider()

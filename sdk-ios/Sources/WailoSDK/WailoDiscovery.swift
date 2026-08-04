@@ -9,6 +9,14 @@ public struct WailoService: Hashable, Identifiable, Sendable {
     public let host: String
     public let port: Int
 
+    /// Studio's public-key fingerprint, from the TXT record. Empty for a desktop too old to advertise
+    /// one, which the coordinator treats the same as unpaired: something has to be scanned first.
+    ///
+    /// Read straight off the browse result, before resolving, so a desktop this device has no pairing
+    /// for is never even dialled. The value is unauthenticated on its own — anyone can claim any
+    /// string — but the handshake binds it: the key that signs has to hash back to this.
+    public let studioId: String
+
     public var id: String { "\(name)|\(host):\(port)" }
     public var address: String { "\(host):\(port)" }
 }
@@ -23,6 +31,9 @@ final class WailoDiscovery: @unchecked Sendable {
 
     static let serviceType = "_wailo._tcp"
 
+    /// TXT key carrying Studio's public-key fingerprint.
+    static let studioIdKey = "sid"
+
     /// Backoff for rebuilding a browser the OS reported as failed. Doubles up to the cap because the
     /// commonest cause is permanent — a host app that never declared `NSBonjourServices` /
     /// `NSLocalNetworkUsageDescription` gets denied on every attempt — and retrying that at a fixed
@@ -36,6 +47,9 @@ final class WailoDiscovery: @unchecked Sendable {
     /// Throwaway connections used purely to turn a Bonjour service into an address, keyed by instance name.
     private var resolvers: [String: NWConnection] = [:]
     private var resolved: [String: WailoService] = [:]
+    /// Kept beside the resolved set because the TXT record arrives with the browse result, well before
+    /// the address does.
+    private var studioIds: [String: String] = [:]
     private var started = false
     private var restartDelay = WailoDiscovery.minRestartDelay
 
@@ -60,6 +74,7 @@ final class WailoDiscovery: @unchecked Sendable {
             self.resolvers.removeAll()
             let hadResults = !self.resolved.isEmpty
             self.resolved.removeAll()
+            self.studioIds.removeAll()
             if hadResults { self.publish() }
         }
     }
@@ -94,6 +109,7 @@ final class WailoDiscovery: @unchecked Sendable {
         for result in results {
             guard case let .service(name, type, domain, _) = result.endpoint else { continue }
             seen.insert(name)
+            studioIds[name] = Self.studioId(from: result.metadata)
             guard resolvers[name] == nil, resolved[name] == nil else { continue }
             resolve(name: name, endpoint: .service(name: name, type: type, domain: domain, interface: nil))
         }
@@ -103,8 +119,14 @@ final class WailoDiscovery: @unchecked Sendable {
         for name in vanished {
             resolvers.removeValue(forKey: name)?.cancel()
             resolved.removeValue(forKey: name)
+            studioIds.removeValue(forKey: name)
         }
         publish()
+    }
+
+    private static func studioId(from metadata: NWBrowser.Result.Metadata) -> String {
+        guard case let .bonjour(record) = metadata else { return "" }
+        return record[Self.studioIdKey] ?? ""
     }
 
     /// Bonjour hands back a *service*, but `URLSessionWebSocketTask` needs a `ws://host:port` URL and
@@ -136,7 +158,12 @@ final class WailoDiscovery: @unchecked Sendable {
         guard let connection = resolvers.removeValue(forKey: name) else { return }
         connection.cancel()
         guard case let .hostPort(host, port)? = remote, let address = Self.address(from: host) else { return }
-        resolved[name] = WailoService(name: name, host: address, port: Int(port.rawValue))
+        resolved[name] = WailoService(
+            name: name,
+            host: address,
+            port: Int(port.rawValue),
+            studioId: studioIds[name] ?? ""
+        )
         publish()
     }
 

@@ -8,6 +8,7 @@ coroutines = "1.10.2"
 navigation3 = "1.1.1"
 ktor = "3.4.3"
 jmdns = "3.6.3"
+zxing = "3.5.3"
 # The published SDK artifact this build consumes; matches the root build's group/version.
 wailoProtocol = "0.1.0-SNAPSHOT"
 
@@ -22,6 +23,7 @@ ktor-client-cio = { module = "io.ktor:ktor-client-cio", version.ref = "ktor" }
 ktor-client-websockets = { module = "io.ktor:ktor-client-websockets", version.ref = "ktor" }
 wailo-protocol = { module = "com.venbiasa.wailo:wailo-protocol", version.ref = "wailoProtocol" }
 jmdns = { module = "org.jmdns:jmdns", version.ref = "jmdns" }
+zxing-core = { module = "com.google.zxing:core", version.ref = "zxing" }
 
 [plugins]
 kotlinMultiplatform = { id = "org.jetbrains.kotlin.multiplatform", version.ref = "kotlin" }

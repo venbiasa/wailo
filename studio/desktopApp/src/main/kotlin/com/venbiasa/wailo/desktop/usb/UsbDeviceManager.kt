@@ -251,6 +251,10 @@ private class JavaWebSocketConnection private constructor(
 ) : DeviceConnection, WebSocket.Listener {
     override val id: String = "usb:$udid"
     override val transport: DeviceTransport = DeviceTransport.USB
+
+    // usbmuxd terminates on this machine, so the peer is a cable away rather than a network away —
+    // the same standing as loopback, and the reason USB stays zero-config while WiFi pairs (ADR-0039).
+    override val isTrusted: Boolean = true
     private val incoming = Channel<ByteArray>(Channel.UNLIMITED)
     private val fragments = mutableListOf<ByteArray>()
     @Volatile

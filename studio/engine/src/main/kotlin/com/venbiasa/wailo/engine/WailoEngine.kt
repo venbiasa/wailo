@@ -15,6 +15,11 @@ import com.venbiasa.wailo.protocol.Hello
 import com.venbiasa.wailo.protocol.HttpExchange
 import com.venbiasa.wailo.protocol.HttpRequest
 import com.venbiasa.wailo.protocol.HttpResponse
+import com.venbiasa.wailo.engine.pairing.Admission
+import com.venbiasa.wailo.engine.pairing.DeviceAdmission
+import com.venbiasa.wailo.engine.pairing.InMemoryPairingKeyStore
+import com.venbiasa.wailo.engine.pairing.PairingManager
+import com.venbiasa.wailo.engine.pairing.RefusedDevice
 import com.venbiasa.wailo.protocol.MapLocalRule
 import com.venbiasa.wailo.protocol.RuleSet
 import io.ktor.server.application.install
@@ -109,7 +114,97 @@ class WailoEngine(
     // How often to re-push to a device that hasn't acked the current epoch. Injectable so tests can
     // exercise the anti-entropy retry without waiting the production interval.
     private val ackRetryMs: Long = DEFAULT_ACK_RETRY_MS,
+    /**
+     * Who this Studio is and which devices it trusts (ADR-0039). Defaults to an in-memory store so a
+     * test gets a throwaway identity; the desktop passes one backed by the macOS Keychain, because a
+     * signing key that does not survive a restart would re-pair every device every launch.
+     */
+    val pairings: PairingManager = PairingManager(InMemoryPairingKeyStore()),
+    requirePairing: Boolean = false,
 ) {
+    private val _requirePairing = MutableStateFlow(requirePairing)
+
+    /**
+     * Whether a WiFi device must have paired through a QR or a typed code before it is let in
+     * (ADR-0040). Off by default: the common case is one developer and one Mac, where the address was
+     * typed by the person who owns both, and a ceremony there buys nothing. On, it refuses anything it
+     * has not been introduced to — for a shared or untrusted network.
+     *
+     * Devices already trusted stay trusted when this goes on. It gates the first contact, which is the
+     * only moment it could have made a difference; dropping known devices would just be a surprise.
+     */
+    val requirePairing: StateFlow<Boolean> = _requirePairing.asStateFlow()
+
+    fun setRequirePairing(enabled: Boolean) {
+        _requirePairing.value = enabled
+    }
+
+    private val admission = DeviceAdmission(pairings) { _requirePairing.value }
+
+    private val _refusedDevices = MutableStateFlow<List<RefusedDevice>>(emptyList())
+
+    /**
+     * Devices that dialled in and were turned away. Surfaced rather than logged: a device the user
+     * expects to see connected but does not is otherwise indistinguishable from a network problem.
+     */
+    val refusedDevices: StateFlow<List<RefusedDevice>> = _refusedDevices.asStateFlow()
+
+    private val _suspectedClones = MutableStateFlow<Set<String>>(emptySet())
+
+    /**
+     * Devices whose session counter went backwards, meaning the same key authenticated from somewhere
+     * else. Nothing here can stop it — both ends hold the same secret — but a silent compromise is
+     * worse than a visible one.
+     */
+    val suspectedClones: StateFlow<Set<String>> = _suspectedClones.asStateFlow()
+
+    /** Clear the refusal notice once the user has read it or paired the device. */
+    fun dismissRefusal(deviceId: String) {
+        _refusedDevices.update { list -> list.filterNot { it.deviceId == deviceId } }
+    }
+
+    fun dismissCloneWarning(deviceId: String) {
+        _suspectedClones.update { it - deviceId }
+    }
+
+    /**
+     * Stop trusting a device and hang up on it if it is connected right now. Revoking the key alone
+     * would only take effect on its next reconnect, which is not what "forget" means when the user is
+     * looking at a device that is currently streaming their traffic.
+     */
+    fun forgetDevice(deviceId: String) {
+        pairings.forget(deviceId)
+        dismissRefusal(deviceId)
+        dismissCloneWarning(deviceId)
+        disconnectAuthenticated { it == deviceId }
+    }
+
+    fun forgetAllDevices() {
+        pairings.forgetAll()
+        disconnectAuthenticated { true }
+    }
+
+    /**
+     * Rotate this Studio's identity: forget every device, generate a new keypair, and re-advertise
+     * under the new fingerprint so devices that pinned the old one stop finding a Studio that looks
+     * like the one they know.
+     */
+    fun resetIdentity() {
+        pairings.resetIdentity()
+        _refusedDevices.value = emptyList()
+        _suspectedClones.value = emptySet()
+        disconnectAuthenticated { true }
+        readvertise()
+    }
+
+    // Only sessions that had to prove a key are dropped. Loopback and USB never paired, so revocation
+    // has nothing to say about them and cutting them would just interrupt a working capture.
+    private fun disconnectAuthenticated(matching: (String) -> Boolean) {
+        sessions.entries
+            .filter { (_, state) -> state.pairedDeviceId?.let(matching) == true }
+            .forEach { (connection, _) -> connection.close() }
+    }
+
     /**
      * The port the capture server is listening on. Movable at runtime via [rebind] rather than fixed at
      * construction, because everything worth keeping — the captured exchanges, the rule/filter/breakpoint
@@ -220,7 +315,10 @@ class WailoEngine(
     private var jmdns: JmDNS? = null
 
     /** Per-connection sync state: the highest snapshot epoch this device has acknowledged applying. */
-    private class SessionState {
+    private class SessionState(
+        /** Null for a connection admitted on trust (loopback/USB) rather than by proving a key. */
+        val pairedDeviceId: String?,
+    ) {
         val ackedEpoch = AtomicLong(-1)
         val ackedFilterEpoch = AtomicLong(-1)
         val ackedBreakpointEpoch = AtomicLong(-1)
@@ -228,6 +326,7 @@ class WailoEngine(
 
     private class KtorServerConnection(
         private val session: DefaultWebSocketServerSession,
+        override val isTrusted: Boolean,
     ) : DeviceConnection {
         override val id: String = "lan:${UUID.randomUUID()}"
         override val transport: DeviceTransport = DeviceTransport.LAN
@@ -318,13 +417,46 @@ class WailoEngine(
             install(WebSockets)
             routing {
                 webSocket("/") {
-                    handleConnection(KtorServerConnection(this))
+                    handleConnection(
+                        KtorServerConnection(this, isTrusted = isLoopbackPeer(call.request.local.remoteAddress)),
+                    )
                 }
             }
         }
 
-    private suspend fun handleConnection(connection: DeviceConnection) = coroutineScope {
-        val state = SessionState()
+    /**
+     * A peer on loopback reached this process through the kernel, not the network, so it is this
+     * machine by construction: the Simulator, `adb reverse`, or the usbmux tunnel. Everything else came
+     * over WiFi and has to pair (ADR-0039).
+     */
+    private fun isLoopbackPeer(remoteAddress: String): Boolean =
+        runCatching { InetAddress.getByName(remoteAddress.substringAfterLast('%')).isLoopbackAddress }
+            .getOrDefault(false)
+
+    private suspend fun handleConnection(unadmitted: DeviceConnection) = coroutineScope {
+        // Nothing below this line may run for a peer that has not proved itself: the three pushes that
+        // follow describe every host being intercepted and every Map Local path, and they used to go
+        // out the instant a socket opened (ADR-0039).
+        val admitted = when (val admission = admission.admit(unadmitted)) {
+            is Admission.Sealed -> {
+                if (admission.suspectedClone) _suspectedClones.update { it + admission.deviceId }
+                admission
+            }
+
+            is Admission.Refused -> {
+                _refusedDevices.update { list -> list.filterNot { it.deviceId == admission.refusal.deviceId } + admission.refusal }
+                unadmitted.close()
+                return@coroutineScope
+            }
+
+            Admission.Rejected -> {
+                unadmitted.close()
+                return@coroutineScope
+            }
+        }
+        val connection = admitted.connection
+
+        val state = SessionState(pairedDeviceId = admitted.deviceId.takeUnless { unadmitted.isTrusted })
         sessions[connection] = state
         // Re-push to a lagging device until it acks the current epoch, so a silently dropped snapshot
         // self-repairs without waiting for the next edit or reconnect (ADR-0019).
@@ -340,6 +472,16 @@ class WailoEngine(
                 envelope.hello?.let {
                     hello = it
                     identify(connection, it)
+                    // The paired list is keyed by an opaque device id; Hello is the first and only
+                    // place a human-readable name for it appears.
+                    pairings.known(admitted.deviceId)?.let { paired ->
+                        pairings.remember(
+                            deviceId = paired.deviceId,
+                            key = paired.key,
+                            name = it.device_name,
+                            sessionCounter = paired.sessionCounter,
+                        )
+                    }
                 }
                 envelope.exchange?.let { record(hello, it) }
                 envelope.rule_ack?.let { ack ->
@@ -379,6 +521,22 @@ class WailoEngine(
         runCatching {
             advertiser?.unregisterAllServices()
             advertiser?.close()
+        }
+    }
+
+    // Republish the Bonjour record. The TXT carries the studio fingerprint, so a rotated identity has to
+    // go back out or devices keep browsing for a Studio that no longer exists. Takes the same generation
+    // path as a bind, which is what makes a registration still inside JmDNS.create abandon its instance.
+    private fun readvertise() {
+        if (server == null) return
+        val stale = synchronized(bonjourLock) { jmdns.also { jmdns = null } }
+        val generation = bindGeneration.incrementAndGet()
+        scope.launch(Dispatchers.IO) {
+            runCatching {
+                stale?.unregisterAllServices()
+                stale?.close()
+            }
+            registerBonjourService(generation)
         }
     }
 
@@ -612,8 +770,20 @@ class WailoEngine(
                 ?.substringBefore('.')
                 ?.takeUnless { it.isBlank() }
                 ?: BONJOUR_FALLBACK_NAME
+            // The TXT record carries this Studio's public-key fingerprint so a device can tell, before
+            // opening a socket, whether this is one it has paired with — and skip everyone else's
+            // Studio on the same WiFi rather than dialling whichever sorted first (ADR-0039). The value
+            // is unauthenticated here, but the handshake binds it: only the matching private key can
+            // sign, and the fingerprint is of that key.
             instance.registerService(
-                ServiceInfo.create(BONJOUR_SERVICE_TYPE, serviceName, port, ""),
+                ServiceInfo.create(
+                    BONJOUR_SERVICE_TYPE,
+                    serviceName,
+                    port,
+                    0,
+                    0,
+                    mapOf(BONJOUR_STUDIO_ID_KEY to pairings.studioId),
+                ),
             )
         }
     }
@@ -633,5 +803,6 @@ class WailoEngine(
         private const val DEFAULT_ACK_RETRY_MS: Long = 2000L
         private const val BONJOUR_SERVICE_TYPE = "_wailo._tcp.local."
         private const val BONJOUR_FALLBACK_NAME = "Wailo"
+        private const val BONJOUR_STUDIO_ID_KEY = "sid"
     }
 }

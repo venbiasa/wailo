@@ -22,6 +22,7 @@ import io.ktor.websocket.readBytes
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
+import java.net.ServerSocket
 import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -34,7 +35,8 @@ import kotlin.test.assertTrue
  * reverse control channel (Map Local): versioned rule pushes + acks and the body-fetch RPC (ADR-0019). */
 class WailoEngineLoopbackTest {
 
-    private val port = 18899
+    // Each test rebinds a fresh engine, so a fixed port would race the previous one's teardown.
+    private val port = ServerSocket(0).use { it.localPort }
     // Small ack-retry so the anti-entropy re-push is observable quickly in tests.
     private val engine = WailoEngine(port = port, ackRetryMs = 300)
     private val client = HttpClient(CIO) { install(WebSockets) }

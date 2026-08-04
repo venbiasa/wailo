@@ -12,9 +12,21 @@ protocol WailoTransportLink: AnyObject {
     func closeLink()
 }
 
+/// Whether this session has to prove anything before it talks (ADR-0039).
+///
+/// `open` is loopback and USB — the Simulator, `adb reverse`, the usbmux tunnel. A peer on 127.0.0.1
+/// cannot be another machine, so there is nothing a key would establish and the session starts at
+/// `Hello` exactly as it always did. `guarded` is WiFi, where the peer is whoever answered an mDNS
+/// advertisement. The factory runs per connection because each handshake needs its own nonce.
+enum WailoSessionSecurity {
+    case open
+    case guarded(() -> WailoHandshake)
+}
+
 final class WailoTransportSession: CaptureSink, WailoBodyFetcher, WailoBreakpointGate, @unchecked Sendable {
 
     private let hello: Hello
+    private let security: WailoSessionSecurity
     private let bufferCapacity: Int
     private let bodyTimeout: TimeInterval
     private let pingInterval: TimeInterval
@@ -25,6 +37,10 @@ final class WailoTransportSession: CaptureSink, WailoBodyFetcher, WailoBreakpoin
     private var buffer: [HttpExchange] = []
     private var pending: [String: (WailoMappedResponse?) -> Void] = [:]
     private var pendingBreakpoints: [String: (BreakpointDecision?) -> Void] = [:]
+    /// Non-nil only between dialling and `AuthResult`; every frame in that window is an auth frame.
+    private var handshake: WailoHandshake?
+    /// Installed the moment auth succeeds, which is also the moment anything else may be sent.
+    private var codec: WailoFrameCodec?
     private var bound = false
     private var connected = false {
         didSet {
@@ -38,14 +54,29 @@ final class WailoTransportSession: CaptureSink, WailoBodyFetcher, WailoBreakpoin
     /// Fires on the session queue when the link opens or closes.
     var onConnectionChange: ((Bool) -> Void)?
 
+    /// A pairing worth persisting: the whole record on a first pairing, the advanced session counter
+    /// afterwards.
+    var onHandshakeEstablished: ((WailoPairing) -> Void)?
+
+    /// Studio answered that it does not know this device. Distinct from a plain disconnect because the
+    /// caller has to stop retrying rather than reconnect into the same refusal every two seconds.
+    var onHandshakeRefused: ((String) -> Void)?
+
+    /// A different identity is answering at an address this device has a pinned key for. Never
+    /// reconciled down here: only a human can say whether the machine changed hands or someone is in
+    /// the path (ADR-0040).
+    var onIdentityChanged: ((String, String) -> Void)?
+
     init(
         hello: Hello,
         queue: DispatchQueue,
+        security: WailoSessionSecurity = .open,
         bufferCapacity: Int = 512,
         bodyTimeout: TimeInterval = 10.0,
         pingInterval: TimeInterval = 20.0
     ) {
         self.hello = hello
+        self.security = security
         self.queue = queue
         self.bufferCapacity = bufferCapacity
         self.bodyTimeout = bodyTimeout
@@ -80,10 +111,12 @@ final class WailoTransportSession: CaptureSink, WailoBodyFetcher, WailoBreakpoin
 
     func receive(_ data: Data) {
         onQueue {
-            guard self.link != nil,
-                  let envelope = try? ProtoDecoder().decode(Envelope.self, from: data)
-            else { return }
-            self.handleIncoming(envelope)
+            guard self.link != nil, let envelope = self.decodeFromWire(data) else { return }
+            if self.handshake != nil {
+                self.advanceHandshake(envelope)
+            } else {
+                self.handleIncoming(envelope)
+            }
         }
     }
 
@@ -105,7 +138,52 @@ final class WailoTransportSession: CaptureSink, WailoBodyFetcher, WailoBreakpoin
         let gen = generation
         self.link = link
         bound = true
-        send(Envelope { $0.message = .hello(hello) }, isHandshake: true, gen: gen)
+        switch security {
+        case .open:
+            send(Envelope { $0.message = .hello(hello) }, isHandshake: true, gen: gen)
+        case let .guarded(makeHandshake):
+            let handshake = makeHandshake()
+            self.handshake = handshake
+            sendAuth(handshake.begin(), gen: gen)
+        }
+    }
+
+    /// Auth frames bypass the exchange pump entirely: they must not flip `connected`, must not be
+    /// sealed (there is no session key yet), and must not queue behind buffered traffic.
+    private func sendAuth(_ envelope: Envelope, gen: Int) {
+        guard let link, let data = try? ProtoEncoder().encode(envelope) else { return }
+        link.send(data) { [weak self] error in
+            guard let self, error != nil else { return }
+            self.queue.async { if gen == self.generation { self.unbindLocked() } }
+        }
+    }
+
+    private func advanceHandshake(_ envelope: Envelope) {
+        guard let handshake else { return }
+        let gen = generation
+        switch handshake.handle(envelope) {
+        case let .send(response):
+            sendAuth(response, gen: gen)
+        case let .established(result):
+            self.handshake = nil
+            codec = WailoFrameCodec(
+                sessionKey: result.sessionKey, sealing: .deviceToStudio, opening: .studioToDevice
+            )
+            onHandshakeEstablished?(result.pairing)
+            send(Envelope { $0.message = .hello(hello) }, isHandshake: true, gen: gen)
+        case let .refused(reason):
+            self.handshake = nil
+            onHandshakeRefused?(reason)
+            unbindLocked()
+        case let .identityChanged(expected, actual):
+            self.handshake = nil
+            onIdentityChanged?(expected, actual)
+            unbindLocked()
+        case .failed:
+            unbindLocked()
+        case .ignore:
+            break
+        }
     }
 
     // MARK: - WailoBodyFetcher
@@ -189,6 +267,8 @@ final class WailoTransportSession: CaptureSink, WailoBodyFetcher, WailoBreakpoin
         connected = false
         sending = false
         bound = false
+        handshake = nil
+        codec = nil
         buffer.removeAll()
         dropCachedRules()
         drainPending()
@@ -250,8 +330,33 @@ final class WailoTransportSession: CaptureSink, WailoBodyFetcher, WailoBreakpoin
         for resolver in waiting { resolver(nil) }
     }
 
+    /// Seals once the session has a key. Before that — loopback for its whole life, or WiFi during the
+    /// handshake — an envelope goes out as itself.
+    private func wireData(_ envelope: Envelope) -> Data? {
+        guard let plaintext = try? ProtoEncoder().encode(envelope) else { return nil }
+        guard let codec else { return plaintext }
+        guard let sealed = try? codec.seal(plaintext) else { return nil }
+        return try? ProtoEncoder().encode(Envelope {
+            $0.message = .sealed_frame(SealedFrame(seq: sealed.seq, ciphertext: sealed.ciphertext))
+        })
+    }
+
+    private func decodeFromWire(_ data: Data) -> Envelope? {
+        guard let envelope = try? ProtoDecoder().decode(Envelope.self, from: data) else { return nil }
+        guard let codec else { return envelope }
+        guard case let .sealed_frame(frame)? = envelope.message,
+              let plaintext = try? codec.open(seq: frame.seq, ciphertext: frame.ciphertext),
+              let inner = try? ProtoDecoder().decode(Envelope.self, from: plaintext) else {
+            // Once a session is sealed, a frame that arrives unsealed, replayed or altered is an
+            // attack rather than a glitch, and the session is not worth continuing.
+            unbindLocked()
+            return nil
+        }
+        return inner
+    }
+
     private func sendControl(_ envelope: Envelope) {
-        guard let link, let data = try? ProtoEncoder().encode(envelope) else { return }
+        guard let link, let data = wireData(envelope) else { return }
         let gen = generation
         link.send(data) { [weak self] error in
             guard let self, error != nil else { return }
@@ -268,10 +373,7 @@ final class WailoTransportSession: CaptureSink, WailoBodyFetcher, WailoBreakpoin
 
     private func send(_ envelope: Envelope, isHandshake: Bool, gen: Int) {
         guard let link else { return }
-        let data: Data
-        do {
-            data = try ProtoEncoder().encode(envelope)
-        } catch {
+        guard let data = wireData(envelope) else {
             sending = false
             return
         }

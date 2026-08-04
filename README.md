@@ -213,9 +213,32 @@ The Wi-Fi path needs three things the Simulator doesn't; see `sample-ios/project
 | `NSLocalNetworkUsageDescription` | iOS 14+ gates any outgoing connection to a LAN address behind user consent |
 | `NSBonjourServices` = `[_wailo._tcp]` | browsing is denied outright unless the service type is declared |
 | `NSAppTransportSecurity` | the transport is plaintext `ws://` to an IP literal, which ATS blocks by default from iOS 17 |
+| `NSCameraUsageDescription` | *optional* — only to scan Studio's pairing QR (ADR-0039); without it the panel offers the typed code instead, and connecting by address needs neither |
 
 The first connection is refused while the Local Network prompt is still on screen; the client retries
 every 2s, so it connects on its own a moment after you tap Allow.
+
+**Connecting over Wi-Fi.** A Wi-Fi peer is whoever answered an mDNS advertisement, so reaching a *new*
+desktop is always something you do on purpose: type its address in the on-device panel and press
+**Connect**, or scan the QR from Studio's Devices panel. Tapping a row in the discovered list only fills
+the address field. Discovery on its own will reconnect to a desktop this device already knows, and to
+nothing else — that is what stops a colleague's Studio on the same network from catching your traffic.
+
+The first connection to an address you typed is taken at its word and remembered, along with the
+desktop's fingerprint; every later connection to that address must present the same one. If a different
+desktop answers there, the panel stops and shows both fingerprints so you can decide (ADR-0040). Either
+way the session is encrypted end to end.
+
+Turn on **Only paired devices over Wi-Fi** in Studio's Settings for a shared or untrusted network: a
+device then has to scan the QR or type the code before it is let in. Devices you already trust stay
+connected when you switch it on.
+
+Loopback is exempt throughout — the Simulator, `adb reverse` and the USB tunnel all reach a machine the
+kernel guarantees is this one, so they connect with no key at all.
+
+The handshake is implemented in `sdk-ios` only so far. `sdk-android` speaks the pre-ADR-0039 wire and is
+admitted over loopback (its `adb reverse` default) but refused over Wi-Fi, so an Android host app must
+not be pointed at a LAN address until the Kotlin half lands.
 
 The Swift protobuf types are generated from the shared schema — regenerate after editing `protocol`:
 

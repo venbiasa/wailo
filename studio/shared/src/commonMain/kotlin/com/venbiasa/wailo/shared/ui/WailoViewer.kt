@@ -45,6 +45,8 @@ import com.venbiasa.wailo.protocol.Header
 import com.venbiasa.wailo.shared.BreakpointNode
 import com.venbiasa.wailo.shared.CaptureFilterState
 import com.venbiasa.wailo.shared.DeviceInfo
+import com.venbiasa.wailo.shared.PairingAction
+import com.venbiasa.wailo.shared.PairingState
 import com.venbiasa.wailo.shared.FilterKey
 import com.venbiasa.wailo.shared.FlowEntry
 import com.venbiasa.wailo.shared.MapLocalHeader
@@ -99,6 +101,8 @@ internal fun WailoViewer(
     usbPort: Int,
     usbPortError: String?,
     onApplyUsbPort: (Int) -> Unit,
+    pairing: PairingState,
+    onPairingAction: (PairingAction) -> Unit,
     capturing: Boolean,
     onToggleCapture: () -> Unit,
     onClear: () -> Unit,
@@ -395,6 +399,8 @@ internal fun WailoViewer(
                                 devices = devices,
                                 usbSupported = usbSupported,
                                 usbPort = usbPort,
+                                pairing = pairing,
+                                onPairingAction = onPairingAction,
                                 onClose = closePanel,
                             )
                             ToolPanel.Settings -> SettingsManager(
@@ -407,6 +413,8 @@ internal fun WailoViewer(
                                 usbPort = usbPort,
                                 usbPortError = usbPortError,
                                 onApplyUsbPort = onApplyUsbPort,
+                                pairing = pairing,
+                                onPairingAction = onPairingAction,
                                 onClose = closePanel,
                             )
                         }

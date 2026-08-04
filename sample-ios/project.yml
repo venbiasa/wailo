@@ -34,6 +34,11 @@ targets:
         NSLocalNetworkUsageDescription: Wailo finds the Wailo desktop app on your network and streams this app's HTTP traffic to it.
         NSBonjourServices:
           - _wailo._tcp
+        # Only for scanning Studio's pairing QR (ADR-0039). Optional: the panel checks for this key
+        # before touching AVFoundation and falls back to the typed code without it — asking for camera
+        # access with no usage description terminates the app, which is not something an SDK may do to
+        # its host. The typed code needs nothing here.
+        NSCameraUsageDescription: Wailo scans the pairing code shown by the Wailo desktop app, so this device can prove which desktop it is talking to over Wi-Fi.
         # The transport is plaintext ws:// to a LAN IP. ATS exempted IP literals until iOS 17, which now
         # requires them listed explicitly; NSAllowsLocalNetworking covers the pre-17 behaviour. The three
         # entries are the RFC 1918 private ranges, so any home/office subnet is covered.

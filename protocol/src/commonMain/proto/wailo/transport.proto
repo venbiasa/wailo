@@ -12,6 +12,10 @@ import "wailo/capture.proto";
 // Hello and whenever they change, replies to a BodyRequest with a BodyResponse (ADR-0019), and replies
 // to a BreakpointHit with a BreakpointDecision. The receiver keys on which oneof field is set; new kinds
 // are a oneof extension (ADR-0008), so this stays backward-compatible.
+//
+// Over WiFi the exchange above is preceded by the AuthRequest/AuthChallenge/AuthResponse/AuthResult
+// handshake and every frame after it is wrapped in a SealedFrame (ADR-0039). Loopback sessions —
+// Simulator, `adb reverse`, the usbmux tunnel — skip both and start at Hello as before.
 message Envelope {
   oneof message {
     Hello hello = 1;
@@ -26,6 +30,13 @@ message Envelope {
     BreakpointRulesAck breakpoint_rules_ack = 10;
     BreakpointHit breakpoint_hit = 11;
     BreakpointDecision breakpoint_decision = 12;
+    AuthRequest auth_request = 13;
+    AuthChallenge auth_challenge = 14;
+    AuthResponse auth_response = 15;
+    AuthResult auth_result = 16;
+    // Not `sealed`: that is a Kotlin modifier, and Wire escapes it to `sealed_` on that side only,
+    // leaving the two generated APIs spelling the same field differently.
+    SealedFrame sealed_frame = 17;
   }
 }
 
@@ -33,4 +44,79 @@ message Hello {
   string device_name = 1;
   string app_id = 2;
   string platform = 3;
+}
+
+// Opens a WiFi session. Carries no identifying detail — Hello's device name and app id stay back
+// until the peer has proved itself, so anything that merely advertises _wailo._tcp learns nothing
+// beyond an opaque device_id.
+message AuthRequest {
+  // Studio's public-key fingerprint, as advertised in the Bonjour TXT record. Lets Studio reject a
+  // device that is dialling an identity it has since rotated away from. Empty on a first contact the
+  // user initiated by typing an address, where the device has not been told who is listening yet.
+  string studio_id = 1;
+  string device_id = 2;
+  bytes nonce = 3;
+  // Which half of the pairing offer this device derived from — the QR's full-entropy secret, or the
+  // stretched typed code. The two are deliberately independent so neither is capped by the other, and
+  // Studio has to answer under the right one before it ever sees the device's proof. Not a trust
+  // decision: naming the wrong half only makes the handshake fail.
+  bool paired_by_code = 4;
+  // The device's ephemeral P-256 public key (X9.63), fresh per connection.
+  //
+  // Present on every WiFi handshake, not just a first contact. Where there is no shared secret yet it
+  // is the *only* way to reach one; where there is, mixing it in anyway means a long-term key that
+  // leaks later cannot open traffic captured earlier, which is the property that makes revoking a key
+  // worth anything.
+  bytes ephemeral_key = 5;
+}
+
+// Studio answers first, and proves itself two ways because the two proofs cover different moments.
+//
+// The ECDSA P-256 signature is the durable one: no material a device stores — nor anything that leaks
+// from Studio's own key store — can forge it, only the private key can. Since studio_id is that key's
+// fingerprint, an impostor claiming someone else's studio_id fails here rather than racing the real
+// Studio for the device's attention.
+//
+// The signature alone proves nothing during a *first* pairing over a typed code, though: the device
+// has no trusted copy of the key yet, so an impostor would simply sign with its own and present the
+// matching fingerprint. The mac closes that — it is keyed by the pairing secret, which only the real
+// Studio displayed. public_key then lets the device pin the key it just authenticated; a QR pairing
+// already carries the key out of band and ignores this field.
+//
+// A lenient first contact (ADR-0040) has neither a pinned key nor a pairing secret, so it gets
+// neither guarantee: the device pins whatever key signs here. That is trust-on-first-use, and it is
+// only offered for a host the user named on purpose — an active attacker has to already be in the
+// path at that moment, and every connection afterwards is pinned against what was accepted.
+message AuthChallenge {
+  bytes nonce = 1;
+  // Covers both nonces *and* both ephemeral keys. Leaving the ephemeral keys out would let anyone in
+  // the path swap their own into a replayed challenge and agree a key with each side separately.
+  bytes signature = 2;
+  bytes mac = 3;
+  bytes public_key = 4;
+  // Studio's ephemeral P-256 public key (X9.63), fresh per connection. See AuthRequest.ephemeral_key.
+  bytes ephemeral_key = 5;
+}
+
+message AuthResponse {
+  bytes proof = 1;
+  // Increments on every successful handshake. Studio treats a counter that moves backwards as a
+  // cloned key: it cannot stop the clone, but it makes one visible instead of silent.
+  uint64 session_counter = 2;
+}
+
+// Sent whether or not auth succeeded, so a refused device can say why in its own UI instead of
+// looking like a broken connection. A device must not delete its stored key on a failure: this
+// frame is unauthenticated, so honouring it that way would let anyone force a re-pair on demand.
+message AuthResult {
+  bool ok = 1;
+  string reason = 2;
+}
+
+// Every frame after a successful WiFi handshake. seq is the AES-GCM nonce counter, unique per
+// direction and per session, and must arrive strictly increasing — a repeat is a replay and a gap
+// means something other than TCP is delivering these frames.
+message SealedFrame {
+  uint64 seq = 1;
+  bytes ciphertext = 2;
 }

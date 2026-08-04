@@ -122,4 +122,74 @@ public enum Wailo {
 
     /// Desktops currently advertising `_wailo._tcp` on the LAN. Empty unless discovery is running.
     public static var discoveredDesktops: [WailoService] { WailoCoordinator.shared.discoveredDesktops }
+
+    // MARK: - Pairing
+
+    /// Pair with the Studio a QR code names, and connect to it (ADR-0039).
+    ///
+    /// WiFi is the one transport where the peer is whoever answered an mDNS advertisement, so it is
+    /// the one that has to be paired. Loopback needs none of this: the Simulator, `adb reverse` and
+    /// the USB tunnel all reach a machine the kernel guarantees is this one.
+    ///
+    /// Returns false when the text is not a Wailo invite, in which case nothing changes.
+    @discardableResult
+    public static func pair(qr text: String) -> Bool {
+        guard let invite = WailoPairingInvite(qr: text) else { return false }
+        WailoCoordinator.shared.pair(invite)
+        return true
+    }
+
+    /// Pair using the code Studio displays, against a desktop already visible on the network.
+    ///
+    /// The weaker of the two paths: a code short enough to type carries far less than a scanned key,
+    /// so it leans on a slow KDF and a code that expires. Prefer the QR where a camera is available.
+    @discardableResult
+    public static func pair(code: String, with desktop: WailoService) -> Bool {
+        guard !desktop.studioId.isEmpty,
+              let invite = WailoPairingInvite(
+                  code: code, studioId: desktop.studioId, host: desktop.host, port: desktop.port
+              ) else { return false }
+        WailoCoordinator.shared.pair(invite)
+        return true
+    }
+
+    /// Every Studio this device is paired with.
+    public static var pairings: [WailoPairing] { WailoCoordinator.shared.pairings }
+
+    /// Stop trusting one Studio. It has to be paired again before this device will talk to it.
+    public static func forgetPairing(studioId: String) {
+        WailoCoordinator.shared.forget(studioId: studioId)
+    }
+
+    public static func forgetAllPairings() {
+        WailoCoordinator.shared.forgetAllPairings()
+    }
+
+    /// Set when a Studio answered that it does not recognise this device — usually because it was
+    /// forgotten there. The device stops retrying until [retryPairing] is called, because the refusal
+    /// arrives before anything is authenticated and reconnecting into it forever would be a gift to
+    /// anyone able to forge one.
+    public static var pairingRefusal: String? { WailoCoordinator.shared.refusalMessage }
+
+    public static func retryPairing() {
+        WailoCoordinator.shared.retryAfterRefusal()
+    }
+
+    /// Set when an address this device has a pinned key for is answered by a different Studio — a Mac
+    /// that changed hands, or someone standing in the path. Nothing is dialled there until
+    /// [acceptIdentityChange] or [rejectIdentityChange] settles it, because on the wire the two look
+    /// exactly the same and only a person knows which happened (ADR-0040).
+    public static var identityChange: WailoIdentityChange? {
+        WailoCoordinator.shared.pendingIdentityChange
+    }
+
+    /// Trust the new identity at that address and forget the old one.
+    public static func acceptIdentityChange() {
+        WailoCoordinator.shared.acceptIdentityChange()
+    }
+
+    /// Keep the pinned identity and stop dialling that address.
+    public static func rejectIdentityChange() {
+        WailoCoordinator.shared.rejectIdentityChange()
+    }
 }
