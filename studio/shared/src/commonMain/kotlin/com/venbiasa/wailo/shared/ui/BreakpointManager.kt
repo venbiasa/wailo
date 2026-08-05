@@ -23,7 +23,9 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -63,11 +65,15 @@ import org.jetbrains.compose.resources.vectorResource
  * [enabled] is the feature master (ADR-0030): off dims the list and disables every rule/group switch (and
  * the editor's), their remembered state kept, while the host pushes no rules — so breakpoints go inert
  * without erasing what's configured. [onEnabledChange] flips it.
+ *
+ * [initialDraft] seeds the editor: non-null opens straight into the form (used when launched from a traffic
+ * row so the URL/method are pre-filled, mirroring Map Local), null shows the list.
  */
 @Composable
 internal fun BreakpointManager(
     nodes: List<BreakpointNode>,
     onLayoutChange: (List<BreakpointNode>) -> Unit,
+    initialDraft: BreakpointRuleDef? = null,
     enabled: Boolean = true,
     onEnabledChange: (Boolean) -> Unit = {},
     onClose: () -> Unit = {},
@@ -78,6 +84,12 @@ internal fun BreakpointManager(
     // The rule loaded into the editor page; null shows the list. A new (add) or list-tapped rule lives
     // here until Save persists it into [nodes]. Transient session state.
     var editing by remember { mutableStateOf<BreakpointRuleDef?>(null) }
+
+    // A row's "Breakpoints…" hands over a fresh draft, possibly while the panel already shows another page;
+    // load it so the panel lands on the editor, leaving Back pointing at the rule list.
+    LaunchedEffect(initialDraft) {
+        if (initialDraft != null) editing = initialDraft
+    }
 
     val target = editing
     if (target == null) {
@@ -103,21 +115,26 @@ internal fun BreakpointManager(
         // its own state preserved).
         val persisted = nodes.findRule(target.id)
         val groupEnabled = nodes.groupOf(target.id)?.enabled ?: true
-        BreakpointRuleEditor(
-            initial = target,
-            enabled = (persisted ?: target).enabled,
-            enabledToggleable = enabled && groupEnabled,
-            onToggleEnabled = { next ->
-                if (nodes.findRule(target.id) != null) onLayoutChange(nodes.setRuleEnabled(target.id, next))
-                else editing = target.copy(enabled = next)
-            },
-            onSave = { rule ->
-                onLayoutChange(nodes.upsertRule(rule))
-                editing = null
-            },
-            onBack = { editing = null },
-            onClose = onClose,
-        )
+        // Keyed on the rule so its form state is rebuilt when a different rule is loaded into an already-open
+        // editor (a row's "Breakpoints…" can do that): the fields remember [initial] on first composition, so
+        // without this they'd keep showing the rule the editor opened on.
+        key(target.id) {
+            BreakpointRuleEditor(
+                initial = target,
+                enabled = (persisted ?: target).enabled,
+                enabledToggleable = enabled && groupEnabled,
+                onToggleEnabled = { next ->
+                    if (nodes.findRule(target.id) != null) onLayoutChange(nodes.setRuleEnabled(target.id, next))
+                    else editing = target.copy(enabled = next)
+                },
+                onSave = { rule ->
+                    onLayoutChange(nodes.upsertRule(rule))
+                    editing = null
+                },
+                onBack = { editing = null },
+                onClose = onClose,
+            )
+        }
     }
 }
 

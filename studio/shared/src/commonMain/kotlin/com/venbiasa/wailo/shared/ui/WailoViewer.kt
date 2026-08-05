@@ -43,6 +43,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import com.venbiasa.wailo.protocol.Header
 import com.venbiasa.wailo.shared.BreakpointNode
+import com.venbiasa.wailo.shared.BreakpointRuleDef
 import com.venbiasa.wailo.shared.CaptureFilterState
 import com.venbiasa.wailo.shared.DeviceInfo
 import com.venbiasa.wailo.shared.PairingAction
@@ -192,15 +193,16 @@ internal fun WailoViewer(
         }
     }
 
-    // Which tool panel is docked, plus Map Local's current draft and body seed: transient view state (like
-    // the selection/filter above). The host owns every panel's contents and their persistence — the panels
-    // only render them (ADR-0013/0021). Every panel shares the one host-owned [toolPanelWidthRatio], so a width
-    // dragged for any of them is the width the next one opens at, and it persists across restarts. It's a
-    // fraction of the window, not a fixed dp, so the panel scales with the window (clamped to keep both
-    // panel and content usable, see ToolPanelLayout).
+    // Which tool panel is docked, plus the rule drafts a traffic row can seed (Map Local's, with its body,
+    // and a breakpoint's): transient view state (like the selection/filter above). The host owns every
+    // panel's contents and their persistence — the panels only render them (ADR-0013/0021). Every panel
+    // shares the one host-owned [toolPanelWidthRatio], so a width dragged for any of them is the width the
+    // next one opens at, and it persists across restarts. It's a fraction of the window, not a fixed dp, so
+    // the panel scales with the window (clamped to keep both panel and content usable, see ToolPanelLayout).
     var openPanel by remember { mutableStateOf<ToolPanel?>(null) }
     var mapLocalDraft by remember { mutableStateOf<MapLocalRuleDef?>(null) }
     var mapLocalBodySeed by remember { mutableStateOf<ByteArray?>(null) }
+    var breakpointDraft by remember { mutableStateOf<BreakpointRuleDef?>(null) }
     val density = LocalDensity.current
     // Somewhere for the caret to land when the filter bar closes, so the keystrokes after it don't fall
     // into the field that just disappeared. Focusable rather than a bare Box because only a focus target
@@ -302,6 +304,17 @@ internal fun WailoViewer(
                                     mapLocalBodySeed = seed
                                     openPanel = ToolPanel.MapLocal
                                 },
+                                // Same seam for breakpoints: the row's exact URL + method become a draft
+                                // rule and the panel opens on its editor. Nothing about a captured row says
+                                // which phase to pause, so the draft keeps the model's default (response).
+                                onBreakpointFromUrl = { url, method ->
+                                    breakpointDraft = BreakpointRuleDef(
+                                        id = BreakpointRuleDef.newId(),
+                                        urlPattern = url,
+                                        method = method,
+                                    )
+                                    openPanel = ToolPanel.Breakpoints
+                                },
                             )
                             // The filter (or the host chip) can hide every row while traffic is still
                             // captured; say so, rather than an empty table that reads as "no traffic yet".
@@ -391,6 +404,7 @@ internal fun WailoViewer(
                             ToolPanel.Breakpoints -> BreakpointManager(
                                 nodes = breakpointNodes,
                                 onLayoutChange = onBreakpointLayoutChange,
+                                initialDraft = breakpointDraft,
                                 enabled = breakpointsEnabled,
                                 onEnabledChange = onBreakpointsEnabledChange,
                                 onClose = closePanel,
@@ -428,12 +442,13 @@ internal fun WailoViewer(
                     onSelectPanel = { panel ->
                         // Rail buttons are toggles: picking the open panel closes it.
                         openPanel = if (openPanel == panel) null else panel
-                        // Reaching Map Local from the rail lands on the rule list; only a row's
-                        // "Map Local…" opens it on a seeded draft.
+                        // Reaching a rule panel from the rail lands on its rule list; only a row's
+                        // "Map Local…"/"Breakpoints…" opens one on a seeded draft.
                         if (panel == ToolPanel.MapLocal) {
                             mapLocalDraft = null
                             mapLocalBodySeed = null
                         }
+                        if (panel == ToolPanel.Breakpoints) breakpointDraft = null
                     },
                 )
             }

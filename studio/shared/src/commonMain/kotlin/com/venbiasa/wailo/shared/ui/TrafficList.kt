@@ -87,6 +87,7 @@ internal fun TrafficList(
     onToggleAllowHost: (String) -> Unit,
     onToggleBlockHost: (String) -> Unit,
     onMapLocalFromUrl: (String, String, List<Header>, ByteArray?) -> Unit,
+    onBreakpointFromUrl: (String, String) -> Unit,
 ) {
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
@@ -181,6 +182,7 @@ internal fun TrafficList(
                             onToggleAllowHost = onToggleAllowHost,
                             onToggleBlockHost = onToggleBlockHost,
                             onMapLocalFromUrl = onMapLocalFromUrl,
+                            onBreakpointFromUrl = onBreakpointFromUrl,
                         )
                         RowDivider()
                     }
@@ -284,6 +286,7 @@ private fun TrafficRow(
     onToggleAllowHost: (String) -> Unit,
     onToggleBlockHost: (String) -> Unit,
     onMapLocalFromUrl: (String, String, List<Header>, ByteArray?) -> Unit,
+    onBreakpointFromUrl: (String, String) -> Unit,
 ) {
     val exchange = entry.exchange
     val request = exchange.request
@@ -295,13 +298,16 @@ private fun TrafficRow(
 
     // Right-click offers bookmarking this row's host (a tick once saved; the slot is reserved when not,
     // so the label never shifts as it toggles), adding/removing the host in the capture filter's allow or
-    // block list, and mapping its URL to a local file. The Allowlist/Blocklist ticks track *exact*
-    // membership (so a subdomain isn't shown as listed under a `*.example.com` entry, and toggling removes
-    // only the exact host it added — a wildcard entry is never silently dropped); arming each list stays a
-    // deliberate switch in the capture-filter panel. A row with no parseable host skips the bookmark/filter
-    // entries; one with no URL skips Map Local — an all-empty list is a plain passthrough (no menu).
+    // block list, and authoring a rule from its URL — a local mapping or a breakpoint. The
+    // Allowlist/Blocklist ticks track *exact* membership (so a subdomain isn't shown as listed under a
+    // `*.example.com` entry, and toggling removes only the exact host it added — a wildcard entry is never
+    // silently dropped); arming each list stays a deliberate switch in the capture-filter panel. A row with
+    // no parseable host skips the bookmark/filter entries; one with no URL skips the rule-authoring pair —
+    // an all-empty list is a plain passthrough (no menu).
     val url = request?.url ?: ""
     val host = remember(url) { requestHost(url) }
+    // A rule matches the method as captured; the display fallback above ("?") is not one.
+    val ruleMethod = request?.method.orEmpty().trim().uppercase()
     val bookmarked = host in bookmarks
     val allowed = host in allowHosts
     val blocked = host in blockHosts
@@ -316,21 +322,21 @@ private fun TrafficRow(
             add(ContextMenuAction("Blocklist", checked = blocked) { onToggleBlockHost(host) })
         }
         if (url.isNotEmpty()) {
-            // Seed a new rule from this row: the exact URL and method, this response's captured headers,
-            // plus its body's raw bytes (the editor decodes them as JSON text or previews them as an image
-            // per the Content-Type) so it opens ready to map-and-tweak. Computed on select, not per row.
+            // Both seed a new rule with this row's exact URL and method, so the panel opens on the values
+            // that were right-clicked rather than asking for them again. Map Local also carries this
+            // response's captured headers and its body's raw bytes (the editor decodes them as JSON text or
+            // previews them as an image per the Content-Type), so the rule opens ready to map-and-tweak;
+            // the bytes are copied on select, not per row.
             add(
                 ContextMenuAction("Map Local\u2026") {
                     val body = response?.body
                     val seed = body?.takeIf { it.size > 0 }?.toByteArray()
-                    onMapLocalFromUrl(
-                        url,
-                        request?.method.orEmpty().trim().uppercase(),
-                        response?.headers ?: emptyList(),
-                        seed,
-                    )
+                    onMapLocalFromUrl(url, ruleMethod, response?.headers ?: emptyList(), seed)
                 },
             )
+            // Which phase(s) to pause isn't observable from a captured row, so the seeded rule takes the
+            // editor's own default (request) and the user adjusts it there.
+            add(ContextMenuAction("Breakpoints\u2026") { onBreakpointFromUrl(url, ruleMethod) })
         }
     }
 
