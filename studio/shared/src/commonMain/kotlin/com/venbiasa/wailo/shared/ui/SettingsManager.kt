@@ -15,7 +15,6 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import com.venbiasa.wailo.shared.PairingAction
@@ -97,9 +96,8 @@ internal fun SettingsManager(
                     canReapplyUnchanged = !listening,
                     onApply = onApplyPort,
                     status = "Devices dial $listenAddress",
-                    help = "Changing the port restarts the LAN server, so LAN-connected devices drop. " +
-                        "Android needs adb reverse re-run on the new port; iOS devices using Bonjour " +
-                        "find it on their own.",
+                    help = "Changing it restarts the server, so connected devices drop. Android needs " +
+                        "adb reverse re-run on the new port; iOS finds it over Bonjour.",
                 )
                 if (usbSupported) {
                     RowDivider()
@@ -111,23 +109,19 @@ internal fun SettingsManager(
                         onApply = onApplyUsbPort,
                         status = "Studio dials usb:$usbPort",
                         help = "Must match the port the iOS SDK listens on. USB has no discovery, so a " +
-                            "mismatch looks exactly like an app that isn't running. Applying re-dials " +
-                            "attached devices and leaves LAN sessions alone.",
+                            "mismatch looks exactly like an app that isn't running.",
                     )
                 }
 
                 if (pairing.supported) {
-                    SectionHeader("Wi-Fi security")
+                    SectionHeader("Local area network security")
                     ToggleRow(
-                        label = "Only paired devices over Wi-Fi",
+                        label = "Allow only paired devices over local area network",
                         checked = pairing.requirePairing,
                         onCheckedChange = { onPairingAction(PairingAction.SetRequirePairing(it)) },
-                        help = "Off, a device that dials an address you typed is taken at its word the " +
-                            "first time and remembered from then on — the usual case, your own phone " +
-                            "and your own Mac. On, a device must scan the QR or type the code from the " +
-                            "Devices panel first. Either way the session is encrypted; this decides " +
-                            "what has to be proved before it starts. Devices you already trust stay " +
-                            "connected.",
+                        help = "On, a device must scan the QR or type the code from Devices first. Off, " +
+                            "one that dials an address you typed is trusted on first contact. Sessions " +
+                            "are encrypted either way, and devices you already trust stay connected.",
                     )
                     RowDivider()
                     IdentityRow(studioId = pairing.studioId, deviceCount = pairing.devices.size) {
@@ -172,16 +166,15 @@ private fun IdentityRow(studioId: String, deviceCount: Int, onReset: () -> Unit)
                 color = MaterialTheme.colorScheme.error,
             )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = { confirming = false; onReset() }) { Text("Reset identity") }
+                Button(onClick = { confirming = false; onReset() }) { Text("Reset") }
                 TextButton(onClick = { confirming = false }) { Text("Cancel") }
             }
         } else {
-            Button(onClick = { confirming = true }) { Text("Reset identity…") }
+            Button(onClick = { confirming = true }) { Text("Reset") }
         }
         MutedText(
-            "Devices pin this fingerprint the first time they connect, and refuse anything else at " +
-                "that address. Reset it if you think the key store leaked — forgetting devices one " +
-                "at a time does not help when the leak is on this side.",
+            "Devices pin this fingerprint and refuse anything else at this address. Reset it if the " +
+                "key store leaked — forgetting devices one at a time won't help.",
         )
     }
 }
@@ -199,15 +192,18 @@ private fun ToggleRow(
     ) {
         Row(
             Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
+            // The label takes the weight rather than a trailing spacer: the panel is user-resizable down
+            // to 340.dp, and a label that can't wrap would otherwise push the switch out of the panel.
             Text(
                 label,
+                Modifier.weight(1f),
                 style = MaterialTheme.typography.labelLarge,
                 color = MaterialTheme.colorScheme.onSurface,
             )
-            Spacer(Modifier.weight(1f))
-            Switch(checked = checked, onCheckedChange = onCheckedChange)
+            CompactSwitch(checked = checked, onCheckedChange = onCheckedChange)
         }
         MutedText(help)
     }
@@ -284,19 +280,4 @@ private fun PortField(
         }
         MutedText(help)
     }
-}
-
-// The same header band the capture filter's lists use, so the settings groups read as the panel sections
-// they are rather than as loose rows.
-@Composable
-private fun SectionHeader(title: String) {
-    Text(
-        title,
-        Modifier.fillMaxWidth()
-            .background(MaterialTheme.colorScheme.surfaceVariant)
-            .padding(horizontal = 16.dp, vertical = 8.dp),
-        style = MaterialTheme.typography.titleSmall,
-        color = MaterialTheme.colorScheme.onSurface,
-    )
-    RowDivider()
 }

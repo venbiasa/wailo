@@ -1,6 +1,8 @@
 package com.venbiasa.wailo.shared.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -18,6 +20,10 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
@@ -29,7 +35,10 @@ import com.venbiasa.wailo.shared.PairingState
 import com.venbiasa.wailo.shared.theme.LocalWailoColors
 
 /**
- * Everything currently streaming, plus everything Studio can see but hasn't reached yet.
+ * Everything currently streaming, plus everything Studio can see but hasn't reached yet — split from the
+ * devices merely *allowed* in, which are their own section ([pairedDevicesSection]). The two answer
+ * different questions ("why isn't my phone showing up" vs "who may connect"), and a device can sit in
+ * either without the other.
  *
  * [usbPort] is named on each USB row because it is the one setting that can silently mismatch: usbmux has
  * no discovery, so a device listening on another port is indistinguishable from an app that never started.
@@ -43,54 +52,77 @@ internal fun DevicesManager(
     onPairingAction: (PairingAction) -> Unit,
     onClose: () -> Unit = {},
 ) {
-    Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-        Column(Modifier.fillMaxSize()) {
-            Row(
-                Modifier.fillMaxWidth()
-                    .height(TopBarHeight)
-                    .background(MaterialTheme.colorScheme.surfaceContainer)
-                    .padding(start = 16.dp, end = 8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text("Devices", style = MaterialTheme.typography.titleSmall)
-                Spacer(Modifier.weight(1f))
-                CloseButton(onClose, contentDescription = "Close devices")
-            }
-            RowDivider()
+    // Transient, panel-scoped: arming "forget all" dies with the panel, so reopening never lands on a
+    // primed destructive button.
+    var confirmingForgetAll by remember { mutableStateOf(false) }
 
-            LazyColumn(Modifier.fillMaxSize()) {
-                item {
-                    PairingPanel(pairing, onPairingAction)
-                    RowDivider()
+    Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+        Box(Modifier.fillMaxSize()) {
+            Column(Modifier.fillMaxSize()) {
+                Row(
+                    Modifier.fillMaxWidth()
+                        .height(TopBarHeight)
+                        .background(MaterialTheme.colorScheme.surfaceContainer)
+                        .padding(start = 16.dp, end = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text("Devices", style = MaterialTheme.typography.titleSmall)
+                    Spacer(Modifier.weight(1f))
+                    CloseButton(onClose, contentDescription = "Close devices")
                 }
-                if (devices.isEmpty()) {
-                    item {
-                        Column(
-                            Modifier.fillMaxWidth().padding(24.dp),
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                        ) {
-                            Text(
-                                "No devices",
-                                style = MaterialTheme.typography.titleSmall,
-                                color = MaterialTheme.colorScheme.onSurface,
-                            )
-                            Spacer(Modifier.height(6.dp))
-                            MutedText(
+                RowDivider()
+
+                // Keys are prefixed per section: a live device and a paired one describe the same phone
+                // and can carry the same id, which would collide in one lazy list.
+                LazyColumn(Modifier.fillMaxSize()) {
+                    item(key = "connected-header") { SectionHeader("Connected") }
+                    if (devices.isEmpty()) {
+                        item(key = "connected-empty") {
+                            SectionEmptyText(
                                 if (usbSupported) {
-                                    "Connect an iPhone by USB and open an app using Wailo, or pair it over " +
-                                        "Wi-Fi. USB dials port $usbPort on the device."
+                                    "No devices connected — attach an iPhone by USB (Studio dials port " +
+                                        "$usbPort on it) or pair one over the local area network."
                                 } else {
-                                    "Pair an app using Wailo over Wi-Fi. USB discovery is currently macOS-only."
+                                    "No devices connected — pair one over the local area network. USB " +
+                                        "discovery is currently macOS-only."
                                 },
                             )
                         }
+                    } else {
+                        items(devices, key = { "connected-${it.id}" }) { device ->
+                            DeviceRow(device, usbPort)
+                            RowDivider()
+                        }
                     }
-                } else {
-                    items(devices, key = { it.id }) { device ->
-                        DeviceRow(device, usbPort)
-                        RowDivider()
-                    }
+                    pairedDevicesSection(
+                        pairing = pairing,
+                        confirmingForgetAll = confirmingForgetAll,
+                        onConfirmingForgetAllChange = { confirmingForgetAll = it },
+                        onAction = onPairingAction,
+                    )
                 }
+            }
+
+            // An open pairing offer takes over this panel and nothing else: the scrim is a child of the
+            // Devices surface, so the traffic list beside it stays lit and readable while the QR is up
+            // (the same scoping the `+ Add filter` modal uses, mirrored to this side). Dismissing cancels
+            // the offer rather than just hiding it — a live pairing window nobody can see is worse than none.
+            pairing.offer?.let { offer ->
+                val cancel = { onPairingAction(PairingAction.Cancel) }
+                Box(
+                    Modifier.matchParentSize()
+                        .background(MaterialTheme.colorScheme.scrim.copy(alpha = 0.4f))
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null,
+                            onClick = cancel,
+                        ),
+                )
+                PairingOfferCard(
+                    offer = offer,
+                    onCancel = cancel,
+                    modifier = Modifier.align(Alignment.Center).padding(16.dp),
+                )
             }
         }
     }

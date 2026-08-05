@@ -7,9 +7,11 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -27,6 +29,7 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.snapshots.SnapshotStateMap
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
@@ -41,6 +44,7 @@ import androidx.compose.ui.unit.dp
 import com.venbiasa.wailo.shared.resources.Res
 import com.venbiasa.wailo.shared.resources.ic_close
 import kotlin.math.roundToInt
+import org.jetbrains.compose.resources.DrawableResource
 import org.jetbrains.compose.resources.vectorResource
 
 /**
@@ -138,6 +142,67 @@ internal fun KeyValueRow(key: String, value: String) {
 @Composable
 internal fun MutedText(text: String, modifier: Modifier = Modifier) {
     Text(text, modifier, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+}
+
+// Every panel action icon is this tall, and so is the floor under a section band — a header carrying
+// actions is otherwise 1.dp taller than a plain one (title text measures 19.dp, not the 20.sp line box it
+// asks for), which reads as a hairline misalignment between two adjacent sections. Pinned by
+// SectionHeaderHeightTest.
+private val PanelIconButtonSize = 36.dp
+
+// The tinted band that splits a panel's scrolling body into groups (Settings, Devices), matching the one
+// the capture filter's lists use. [actions] takes the section's own icon buttons on the right. Only a
+// floor, not a fixed height, so the band still grows with the user's text scale.
+@Composable
+internal fun SectionHeader(title: String, actions: @Composable RowScope.() -> Unit = {}) {
+    Row(
+        Modifier.fillMaxWidth()
+            .background(MaterialTheme.colorScheme.surfaceVariant)
+            .heightIn(min = PanelIconButtonSize)
+            .padding(start = 16.dp, end = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            title,
+            Modifier.weight(1f).padding(vertical = 8.dp),
+            style = MaterialTheme.typography.titleSmall,
+            color = MaterialTheme.colorScheme.onSurface,
+        )
+        actions()
+    }
+    RowDivider()
+}
+
+// The empty line a section shows in place of its rows, indented to the section's own gutter so it reads as
+// that section's body rather than as loose panel copy.
+@Composable
+internal fun SectionEmptyText(text: String) {
+    MutedText(text, Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp))
+}
+
+// The panels' shared secondary action icon: same geometry as the top bars' buttons, named on hover
+// because these sit in dense header bands where a bare glyph carries no label.
+@Composable
+internal fun PanelIconButton(
+    icon: DrawableResource,
+    contentDescription: String,
+    onClick: () -> Unit,
+    enabled: Boolean = true,
+) {
+    HoverTooltip(contentDescription) {
+        IconButton(onClick = onClick, enabled = enabled, modifier = Modifier.size(PanelIconButtonSize)) {
+            Icon(
+                vectorResource(icon),
+                contentDescription = contentDescription,
+                tint = if (enabled) {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = DisabledFeatureAlpha)
+                },
+                modifier = Modifier.size(18.dp),
+            )
+        }
+    }
 }
 
 // The panels' shared close affordance: an icon button whose circular hover/press state matches the top
