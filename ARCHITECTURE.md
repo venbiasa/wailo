@@ -70,6 +70,11 @@ flowchart LR
 Each connection is a `Session` (device + app identity from `Hello`). The `engine` keeps sessions and
 per-session flows, plus a merged view. The desktop groups by session in a sidebar.
 
+Captured exchanges are held in memory only, so the engine keeps a bounded window of the most recent ones
+(10,000 by default) and drops the oldest past it. The cap is changeable at runtime from Settings and
+persists across restarts; lowering it trims what is already held, since the reason to lower it is memory
+that is already spent.
+
 ## Module layout
 
 See [AGENTS.md](AGENTS.md) for the module dependency rules. `sdk-*` is intentionally isolated from

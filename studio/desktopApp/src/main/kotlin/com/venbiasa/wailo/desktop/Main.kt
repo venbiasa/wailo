@@ -103,6 +103,7 @@ private fun runWailo() = application {
     val engine = remember {
         WailoEngine(
             port = PortStore.load(),
+            maxRetained = MaxRetainedStore.load(),
             pairings = if (KeychainPairingKeyStore.isSupported) {
                 PairingManager(KeychainPairingKeyStore())
             } else {
@@ -170,6 +171,22 @@ private fun runWailo() = application {
         } else {
             usbPortError =
                 "Port must be between ${WailoEngine.PORT_RANGE.first} and ${WailoEngine.PORT_RANGE.last}."
+        }
+    }
+
+    // How much captured traffic the engine holds. The engine is the authority (it trims to fit the moment
+    // the cap drops), so read it back from there rather than mirroring it here. Range is all there is to
+    // validate — unlike a port, no number here can be refused by anything outside the process.
+    val maxRetained by engine.maxRetained.collectAsState()
+    var maxRetainedError by remember { mutableStateOf<String?>(null) }
+    val applyMaxRetained: (Int) -> Unit = { next ->
+        if (next in WailoEngine.RETAINED_RANGE) {
+            maxRetainedError = null
+            engine.setMaxRetained(next)
+            MaxRetainedStore.save(next)
+        } else {
+            maxRetainedError = "Must be between ${WailoEngine.RETAINED_RANGE.first} and " +
+                "${WailoEngine.RETAINED_RANGE.last} requests."
         }
     }
 
@@ -513,6 +530,9 @@ private fun runWailo() = application {
             usbPort = usbPort,
             usbPortError = usbPortError,
             onApplyUsbPort = applyUsbPort,
+            maxRetained = maxRetained,
+            maxRetainedError = maxRetainedError,
+            onApplyMaxRetained = applyMaxRetained,
             pairing = pairingState,
             onPairingAction = onPairingAction,
             capturing = capturing,

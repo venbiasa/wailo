@@ -335,7 +335,7 @@ private fun TrafficRow(
                 },
             )
             // Which phase(s) to pause isn't observable from a captured row, so the seeded rule takes the
-            // editor's own default (request) and the user adjusts it there.
+            // same default as a hand-added one (response) and the user adjusts it in the editor.
             add(ContextMenuAction("Breakpoints\u2026") { onBreakpointFromUrl(url, ruleMethod) })
         }
     }

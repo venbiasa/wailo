@@ -37,7 +37,10 @@ import com.venbiasa.wailo.shared.ui.WailoViewer
  * guidance — and whether the USB port is offered at all — without leaking platform APIs into `shared`.
  * [usbPort] is the device-side port Studio dials over USB and [onApplyUsbPort] moves it (rejected values
  * come back through [usbPortError]); it has to be set to match the SDK by hand, since usbmux forwards to a
- * port without advertising one. [pairing] and [onPairingAction] drive the Wi-Fi trust surface (ADR-0039):
+ * port without advertising one. [maxRetained] is how many captured exchanges the engine holds before the
+ * oldest fall off, and [onApplyMaxRetained] moves that cap (out-of-range values come back through
+ * [maxRetainedError]); lowering it discards traffic, which is why it is applied on commit and not per
+ * keystroke. [pairing] and [onPairingAction] drive the Wi-Fi trust surface (ADR-0039):
  * the host owns the keys and the QR rendering, so this only shows what it is given. [capturing] reflects whether
  * traffic is being recorded, and [onToggleCapture]/[onClear] drive the top bar (the engine lives in the
  * host, not here). [bookmarks] are the persisted, host-owned bookmarked hosts; [onAddBookmark]/
@@ -80,6 +83,9 @@ fun WailoApp(
     usbPort: Int = 0,
     usbPortError: String? = null,
     onApplyUsbPort: (Int) -> Unit = {},
+    maxRetained: Int = 0,
+    maxRetainedError: String? = null,
+    onApplyMaxRetained: (Int) -> Unit = {},
     pairing: PairingState = PairingState(),
     onPairingAction: (PairingAction) -> Unit = {},
     capturing: Boolean = true,
@@ -125,6 +131,9 @@ fun WailoApp(
                 usbPort = usbPort,
                 usbPortError = usbPortError,
                 onApplyUsbPort = onApplyUsbPort,
+                maxRetained = maxRetained,
+                maxRetainedError = maxRetainedError,
+                onApplyMaxRetained = onApplyMaxRetained,
                 pairing = pairing,
                 onPairingAction = onPairingAction,
                 capturing = capturing,

@@ -102,6 +102,9 @@ internal fun WailoViewer(
     usbPort: Int,
     usbPortError: String?,
     onApplyUsbPort: (Int) -> Unit,
+    maxRetained: Int,
+    maxRetainedError: String?,
+    onApplyMaxRetained: (Int) -> Unit,
     pairing: PairingState,
     onPairingAction: (PairingAction) -> Unit,
     capturing: Boolean,
@@ -427,6 +430,12 @@ internal fun WailoViewer(
                                 usbPort = usbPort,
                                 usbPortError = usbPortError,
                                 onApplyUsbPort = onApplyUsbPort,
+                                maxRetained = maxRetained,
+                                // The whole capture, not the filtered view: the cap is about what the
+                                // engine is holding, which no display filter changes.
+                                retainedCount = entries.size,
+                                maxRetainedError = maxRetainedError,
+                                onApplyMaxRetained = onApplyMaxRetained,
                                 pairing = pairing,
                                 onPairingAction = onPairingAction,
                                 onClose = closePanel,

@@ -37,16 +37,18 @@ import androidx.compose.ui.unit.dp
 // number the host has to reject.
 private const val MaxPortDigits = 5
 
+// Six digits covers the host's retention ceiling — same idea as the port cap above.
+private const val MaxRetainedDigits = 6
+
 /**
- * The settings panel: the two ports a device can arrive on. Appearance (the theme and the keyboard-only
- * text scale) is a separate piece of work, which is why one lone section still carries a header — it's the
- * shape the next group drops into.
+ * The settings panel: the two ports a device can arrive on, how much captured traffic Studio keeps, and
+ * the local network trust surface.
  *
  * Stateless over its inputs, like the other tool panels (ADR-0013): the host owns the engine, the
- * persistence, and all validation. The port fields are the one exception — they hold in-progress text
- * locally and only report on Apply, since every keystroke can't rebind a server. The host decides whether
- * a port is usable (only it can try the bind) and reports back through [portError]/[usbPortError]; this
- * renders that verdict rather than second-guessing it.
+ * persistence, and all validation. The number fields are the one exception — they hold in-progress text
+ * locally and only report on Apply, since no keystroke should rebind a server or discard captured traffic.
+ * The host decides whether a value is usable (only it can try the bind) and reports back through
+ * [portError]/[usbPortError]/[maxRetainedError]; this renders that verdict rather than second-guessing it.
  *
  * The USB row only appears where Studio can actually reach a device that way ([usbSupported], macOS
  * today): elsewhere it would be a setting with nothing behind it.
@@ -62,6 +64,10 @@ internal fun SettingsManager(
     usbPort: Int,
     usbPortError: String?,
     onApplyUsbPort: (Int) -> Unit,
+    maxRetained: Int,
+    retainedCount: Int,
+    maxRetainedError: String?,
+    onApplyMaxRetained: (Int) -> Unit,
     pairing: PairingState = PairingState(),
     onPairingAction: (PairingAction) -> Unit = {},
     onClose: () -> Unit = {},
@@ -87,9 +93,11 @@ internal fun SettingsManager(
 
             Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
                 SectionHeader("Connection")
-                PortField(
+                NumberField(
                     label = "Capture server port",
-                    port = listenPort,
+                    value = listenPort,
+                    maxDigits = MaxPortDigits,
+                    placeholder = "8899",
                     error = portError,
                     // A port that failed to bind is worth retrying unchanged — whatever was squatting on
                     // it may be gone.
@@ -101,9 +109,11 @@ internal fun SettingsManager(
                 )
                 if (usbSupported) {
                     RowDivider()
-                    PortField(
+                    NumberField(
                         label = "USB device port",
-                        port = usbPort,
+                        value = usbPort,
+                        maxDigits = MaxPortDigits,
+                        placeholder = "8900",
                         error = usbPortError,
                         canReapplyUnchanged = false,
                         onApply = onApplyUsbPort,
@@ -112,6 +122,21 @@ internal fun SettingsManager(
                             "mismatch looks exactly like an app that isn't running.",
                     )
                 }
+
+                SectionHeader("Capture")
+                NumberField(
+                    label = "Requests kept in memory",
+                    value = maxRetained,
+                    maxDigits = MaxRetainedDigits,
+                    placeholder = "10000",
+                    error = maxRetainedError,
+                    canReapplyUnchanged = false,
+                    onApply = onApplyMaxRetained,
+                    status = "Holding $retainedCount of $maxRetained",
+                    help = "A bigger number keeps more history and costs more memory, since every kept " +
+                        "request holds its body. Lowering it drops the oldest right away — that traffic " +
+                        "is gone, not hidden.",
+                )
 
                 if (pairing.supported) {
                     SectionHeader("Local area network security")
@@ -209,27 +234,29 @@ private fun ToggleRow(
     }
 }
 
-// A port field and everything the user needs to judge a change: where devices should point, whether it
-// took, and what the change costs them. Committed on Apply or Enter — never per keystroke, which would
-// rebind on the way to typing "8899".
+// A number and everything the user needs to judge changing it: what it means right now, whether the last
+// change took, and what the change costs them. Committed on Apply or Enter — never per keystroke, since
+// every setting behind one of these acts immediately, and typing "8899" would rebind four times on the way.
 @Composable
-private fun PortField(
+private fun NumberField(
     label: String,
-    port: Int,
+    value: Int,
+    maxDigits: Int,
+    placeholder: String,
     error: String?,
     canReapplyUnchanged: Boolean,
     onApply: (Int) -> Unit,
     status: String,
     help: String,
 ) {
-    // Keyed on the applied port so a successful change (or a rollback to the previous port) re-seeds the
+    // Keyed on the applied value so a successful change (or a rollback to the previous one) re-seeds the
     // field, and the user is never left editing a number nothing is on.
-    var portText by remember(port) { mutableStateOf(port.toString()) }
-    // The host's verdict is about the port that was applied, so it goes stale the moment the user starts
+    var valueText by remember(value) { mutableStateOf(value.toString()) }
+    // The host's verdict is about the value that was applied, so it goes stale the moment the user starts
     // typing a different one. Reset by each new verdict, which is what re-arms the message.
     var editedSinceVerdict by remember(error) { mutableStateOf(false) }
     val shownError = error?.takeUnless { editedSinceVerdict }
-    val pending = portText.toIntOrNull()?.takeIf { it != port || canReapplyUnchanged }
+    val pending = valueText.toIntOrNull()?.takeIf { it != value || canReapplyUnchanged }
     val apply: () -> Unit = { pending?.let(onApply) }
 
     Column(
@@ -246,9 +273,9 @@ private fun PortField(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             CompactOutlinedTextField(
-                value = portText,
+                value = valueText,
                 onValueChange = { next ->
-                    portText = next.filter { it.isDigit() }.take(MaxPortDigits)
+                    valueText = next.filter { it.isDigit() }.take(maxDigits)
                     editedSinceVerdict = true
                 },
                 modifier = Modifier.widthIn(min = 96.dp)
@@ -260,7 +287,7 @@ private fun PortField(
                             false
                         }
                     },
-                placeholder = "8899",
+                placeholder = placeholder,
                 isError = shownError != null,
             )
             Button(onClick = apply, enabled = pending != null) { Text("Apply") }

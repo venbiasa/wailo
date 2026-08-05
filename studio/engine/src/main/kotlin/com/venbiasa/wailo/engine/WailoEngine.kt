@@ -110,7 +110,7 @@ fun interface MapLocalBodyProvider {
  */
 class WailoEngine(
     port: Int = DEFAULT_PORT,
-    private val maxRetained: Int = DEFAULT_MAX_RETAINED,
+    maxRetained: Int = DEFAULT_MAX_RETAINED,
     // How often to re-push to a device that hasn't acked the current epoch. Injectable so tests can
     // exercise the anti-entropy retry without waiting the production interval.
     private val ackRetryMs: Long = DEFAULT_ACK_RETRY_MS,
@@ -217,6 +217,15 @@ class WailoEngine(
 
     private val _exchanges = MutableStateFlow<List<CapturedExchange>>(emptyList())
     val exchanges: StateFlow<List<CapturedExchange>> = _exchanges.asStateFlow()
+
+    private val _maxRetained = MutableStateFlow(maxRetained.coerceIn(RETAINED_RANGE))
+
+    /**
+     * How many exchanges [exchanges] holds before the oldest fall off. Some cap has to exist — bodies are
+     * kept whole in memory and a capture has no natural end — but where it belongs is a judgement only the
+     * person watching the traffic can make, so it moves at runtime via [setMaxRetained].
+     */
+    val maxRetained: StateFlow<Int> = _maxRetained.asStateFlow()
 
     private val _capturing = MutableStateFlow(true)
 
@@ -551,6 +560,17 @@ class WailoEngine(
     }
 
     /**
+     * Move the retention cap, trimming what is already held to fit. Lowering it discards the oldest
+     * exchanges now rather than at the next request, because the reason to lower it is memory that is
+     * already spent. Clamped to [RETAINED_RANGE], so a caller can't leave the engine keeping nothing.
+     */
+    fun setMaxRetained(max: Int) {
+        val capped = max.coerceIn(RETAINED_RANGE)
+        _maxRetained.value = capped
+        _exchanges.update { it.takeLast(capped) }
+    }
+
+    /**
      * Replace the active Map Local rules (match-metadata only) and push the new snapshot to every device.
      * Stamps a fresh [RuleSet.epoch] so devices can ack it and the reconciler can detect a lost push. The
      * bodies are resolved later, per match, via [bodyProvider] — they are never in the snapshot (ADR-0019).
@@ -739,7 +759,7 @@ class WailoEngine(
             platform = hello?.platform ?: "unknown",
             exchange = exchange,
         )
-        _exchanges.update { (it + row).takeLast(maxRetained) }
+        _exchanges.update { (it + row).takeLast(_maxRetained.value) }
     }
 
     // Best-effort: JmDNS init can block ~1s and fails without a usable network interface; never wedge a bind.
@@ -797,7 +817,15 @@ class WailoEngine(
          */
         val PORT_RANGE: IntRange = 1..65535
 
-        private const val DEFAULT_MAX_RETAINED: Int = 10000
+        const val DEFAULT_MAX_RETAINED: Int = 10000
+
+        /**
+         * What [setMaxRetained] will accept. The floor keeps the list long enough to still be a record of
+         * a session rather than of the last few seconds; past the ceiling it is the heap, not this cap,
+         * that decides how long a capture survives, since every retained exchange holds its bodies whole.
+         */
+        val RETAINED_RANGE: IntRange = 100..100000
+
         private const val STOP_GRACE_MS: Long = 500L
         private const val STOP_TIMEOUT_MS: Long = 1000L
         private const val DEFAULT_ACK_RETRY_MS: Long = 2000L
