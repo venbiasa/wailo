@@ -3,22 +3,6 @@ package com.venbiasa.wailo.shared
 import kotlin.random.Random
 
 /**
- * One response header a Map Local rule serves back. A named type (not a raw pair) so the editor and
- * store read clearly; the host materializes these into the wire `Header`s at serve time.
- */
-data class MapLocalHeader(val name: String, val value: String)
-
-/**
- * A body file the host's file picker read from disk, handed back to the Map Local editor to author a
- * rule's response body: a JSON/text file loads into the code editor, an image into the preview.
- * [contentType] is inferred from the file's extension so the editor can set the rule's Content-Type,
- * which picks the body surface and keeps what's served in sync. Not a `data class`: a [ByteArray] has
- * identity equality, so the generated equals/hashCode would be misleading — this is a plain carrier the
- * editor reads once.
- */
-class PickedFile(val bytes: ByteArray, val contentType: String)
-
-/**
  * A Map Local rule as the desktop authors it: match a request, answer it with the contents of a
  * local file. This is the UI/host-facing definition — it holds the file *path*, not its bytes. The
  * host reads the file and compiles this into the protocol `MapLocalRule` (bytes inlined) before
@@ -46,7 +30,7 @@ data class MapLocalRuleDef(
     val method: String = "",
     val filePath: String = "",
     val statusCode: Int = 200,
-    val headers: List<MapLocalHeader> = emptyList(),
+    val headers: List<ResponseHeader> = emptyList(),
     val inline: Boolean = false,
 ) : LayoutRule<MapLocalRuleDef> {
     override fun withEnabled(enabled: Boolean): MapLocalRuleDef = copy(enabled = enabled)

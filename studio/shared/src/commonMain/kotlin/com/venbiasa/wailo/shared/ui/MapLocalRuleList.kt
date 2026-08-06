@@ -15,7 +15,8 @@ import com.venbiasa.wailo.shared.resources.ic_note_add
  * with Map Local's row content and copy (ADR-0026). `shared` stays stateless — structural changes are
  * handed to [onNodesChange]; the host persists them and recompiles the device match-set. Top-to-bottom
  * order is the match priority. [onAddRule]/[onEditRule] navigate to the editor (a rule isn't committed
- * until Save).
+ * until Save). [onSeedFromRule] backs the row's right-click "Seed…", which copies the rule into the Seed
+ * list so the same response can answer a breakpoint hold (ADR-0041).
  */
 @Composable
 internal fun RuleListPage(
@@ -25,6 +26,7 @@ internal fun RuleListPage(
     onAddRule: () -> Unit,
     onEditRule: (MapLocalRuleDef) -> Unit,
     onNodesChange: (List<MapLocalNode>) -> Unit,
+    onSeedFromRule: (MapLocalRuleDef) -> Unit,
     collapsedGroupIds: SnapshotStateList<String>,
     onClose: () -> Unit,
 ) {
@@ -42,6 +44,7 @@ internal fun RuleListPage(
         onEditRule = onEditRule,
         onNodesChange = onNodesChange,
         onClose = onClose,
+        rowActions = { rule -> listOf(ContextMenuAction("Seed\u2026") { onSeedFromRule(rule) }) },
     ) { rule -> MapLocalRuleContent(rule) }
 }
 

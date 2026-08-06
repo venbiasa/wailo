@@ -87,9 +87,10 @@ import org.jetbrains.compose.resources.vectorResource
 
 // Inset of a grouped rule's content. Sized so the rule's switch lands directly under the group header's
 // switch: the header puts a 28.dp collapse chevron before its switch where a rule row has only a 4.dp gap
-// (both share the same 24.dp drag handle), so the child starts 28 - 4 = 24.dp past the header's 4.dp start
-// → 28.dp. Also drives the drop indicator's in-group inset. This indent, with the header bar above the
-// rows, is the *only* cue that a rule belongs to a group — no rail/connector and no fill difference.
+// (both share the same leading drag handle, present or not), so the child starts 28 - 4 = 24.dp past the
+// header's 4.dp start → 28.dp. Also drives the drop indicator's in-group inset. This indent, with the
+// header bar above the rows, is the *only* cue that a rule belongs to a group — no rail/connector and no
+// fill difference.
 private val GroupChildIndent = 28.dp
 
 /**
@@ -99,14 +100,20 @@ private val GroupChildIndent = 28.dp
  * and handed to [onNodesChange]; the host persists it. Top-to-bottom order is the match priority.
  *
  * The header carries a title, then — heading the right-side actions — the feature master switch
- * ([featureEnabled]/[onFeatureEnabledChange]), an add-rule button ([addRuleIcon]/[addRuleTooltip] →
- * [onAddRule]), a new-group button, and Close; [description] is a one-line caption under it. The master
- * is the single feature on/off (ADR-0030):
+ * ([featureEnabled]/[onFeatureEnabledChange]), any feature-specific [headerActions], an add-rule button
+ * ([addRuleIcon]/[addRuleTooltip] → [onAddRule]), a new-group button, and Close; [description] is a
+ * one-line caption under it. The master is the single feature on/off (ADR-0030):
  * off dims the list and disables every rule/group switch (their remembered state kept), and the host
  * pushes no rules — so the whole feature goes inert without erasing what's configured, one level above
  * group-gating. [onEditRule] opens a rule (the caller navigates to its editor); a rule isn't committed
  * until that editor saves. [ruleContent] renders the middle of a rule row (the clickable label area) —
  * the only per-feature difference; the drag handle, enabled switch, and delete affordance are shared.
+ * [rowActions] optionally gives a rule row a right-click menu (Map Local's "Seed…", ADR-0041); returning
+ * an empty list — the default — leaves the row without one.
+ *
+ * [reorderable] drops the drag handles when a feature's order carries no meaning — every matching
+ * breakpoint rule fires, so ordering them is a control that does nothing (Map Local and Seed keep it,
+ * since for them top-to-bottom *is* the match priority). Groups still organize and gate rules either way.
  */
 @Composable
 internal fun <T : LayoutRule<T>> GroupedRuleListPage(
@@ -123,6 +130,9 @@ internal fun <T : LayoutRule<T>> GroupedRuleListPage(
     onEditRule: (T) -> Unit,
     onNodesChange: (List<LayoutNode<T>>) -> Unit,
     onClose: () -> Unit,
+    headerActions: @Composable () -> Unit = {},
+    rowActions: (T) -> List<ContextMenuAction> = { emptyList() },
+    reorderable: Boolean = true,
     ruleContent: @Composable (T) -> Unit,
 ) {
     // A group delete takes its rules with it (ADR-0026), so a non-empty group confirms first.
@@ -150,6 +160,7 @@ internal fun <T : LayoutRule<T>> GroupedRuleListPage(
                     CompactSwitch(checked = featureEnabled, onCheckedChange = onFeatureEnabledChange)
                 }
                 Spacer(Modifier.width(4.dp))
+                headerActions()
                 // Add actions are icon-only header buttons whose tooltips name them: an add-rule icon and
                 // a "folder" (new group). Creating a group opens it straight into inline rename.
                 HoverTooltip(addRuleTooltip) {
@@ -217,6 +228,8 @@ internal fun <T : LayoutRule<T>> GroupedRuleListPage(
                         if (hasRules) pendingDeleteGroup = g else onNodesChange(nodes.removeGroup(g.id))
                     },
                     onNodesChange = onNodesChange,
+                    rowActions = rowActions,
+                    reorderable = reorderable,
                     ruleContent = ruleContent,
                 )
             }
@@ -277,6 +290,8 @@ private fun <T : LayoutRule<T>> DraggableNodeList(
     onDeleteRule: (String) -> Unit,
     onDeleteGroup: (RuleGroup) -> Unit,
     onNodesChange: (List<LayoutNode<T>>) -> Unit,
+    rowActions: (T) -> List<ContextMenuAction>,
+    reorderable: Boolean,
     ruleContent: @Composable (T) -> Unit,
 ) {
     val listState = rememberLazyListState()
@@ -332,7 +347,11 @@ private fun <T : LayoutRule<T>> DraggableNodeList(
                         onToggle = { onToggleGroup(row.group) },
                         onRename = { onRenameGroup(row.group.id, it) },
                         onDelete = { onDeleteGroup(row.group) },
-                        handleModifier = dragHandle(reorder, listState, row.key, isGroup = true, onDrop = ::commitDrop),
+                        handleModifier = if (reorderable) {
+                            dragHandle(reorder, listState, row.key, isGroup = true, onDrop = ::commitDrop)
+                        } else {
+                            null
+                        },
                     )
                     is RuleDisp -> RuleRow(
                         rule = row.rule,
@@ -343,7 +362,12 @@ private fun <T : LayoutRule<T>> DraggableNodeList(
                         onEdit = { onEditRule(row.rule) },
                         onToggle = { onToggleRule(row.rule.id) },
                         onDelete = { onDeleteRule(row.rule.id) },
-                        handleModifier = dragHandle(reorder, listState, row.key, isGroup = false, onDrop = ::commitDrop),
+                        handleModifier = if (reorderable) {
+                            dragHandle(reorder, listState, row.key, isGroup = false, onDrop = ::commitDrop)
+                        } else {
+                            null
+                        },
+                        actions = rowActions(row.rule),
                         content = ruleContent,
                     )
                     is FooterDisp -> GroupFooter()
@@ -435,7 +459,7 @@ private fun GroupHeaderRow(
     onToggle: () -> Unit,
     onRename: (String) -> Unit,
     onDelete: () -> Unit,
-    handleModifier: Modifier,
+    handleModifier: Modifier?,
 ) {
     // Rename is click-to-edit: the name reads as a plain title until clicked (or, for a just-created
     // group, [autoEdit] opens it immediately). Keeping the idle state a label — not a permanent input
@@ -448,7 +472,7 @@ private fun GroupHeaderRow(
             .padding(start = 4.dp, end = 8.dp, top = 6.dp, bottom = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        DragHandleDots(handleModifier)
+        handleModifier?.let { DragHandleDots(it) }
         // The caret points down when open, right when collapsed; tapping it hides/shows the group's rules.
         val chevron by animateFloatAsState(if (collapsed) -90f else 0f, label = "groupChevron")
         IconButton(onClick = onToggleCollapsed, modifier = Modifier.size(28.dp)) {
@@ -593,35 +617,40 @@ private fun <T : LayoutRule<T>> RuleRow(
     onEdit: () -> Unit,
     onToggle: () -> Unit,
     onDelete: () -> Unit,
-    handleModifier: Modifier,
+    handleModifier: Modifier?,
+    actions: List<ContextMenuAction>,
     content: @Composable (T) -> Unit,
 ) {
-    Row(
-        Modifier.fillMaxWidth()
-            // Rules sit on the base surface whether loose or grouped; a grouped rule is set apart only by
-            // its indent (and the group header bar above it), never by a fill or connector.
-            .then(if (dragging) Modifier.background(MaterialTheme.colorScheme.surfaceVariant) else Modifier)
-            .padding(start = if (grouped) GroupChildIndent else 4.dp, end = 8.dp, top = 8.dp, bottom = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        DragHandleDots(handleModifier)
-        Spacer(Modifier.width(4.dp))
-        // A rule in an off group — or under an off feature master — reads disabled but keeps its own
-        // remembered state (ADR-0026/0030).
-        CompactSwitch(
-            checked = rule.enabled,
-            onCheckedChange = { onToggle() },
-            enabled = featureEnabled && (!grouped || groupEnabled),
-        )
-        Spacer(Modifier.width(12.dp))
-        Column(Modifier.weight(1f).clickable { onEdit() }) { content(rule) }
-        IconButton(onClick = onDelete, modifier = Modifier.size(36.dp)) {
-            Icon(
-                vectorResource(Res.drawable.ic_delete),
-                contentDescription = "Delete rule",
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.size(18.dp),
+    // Only the row itself gets the menu, not the divider below it, so the hit area matches what's
+    // highlighted. An empty [actions] passes straight through without a menu.
+    ContextMenuHost(actions) {
+        Row(
+            Modifier.fillMaxWidth()
+                // Rules sit on the base surface whether loose or grouped; a grouped rule is set apart only
+                // by its indent (and the group header bar above it), never by a fill or connector.
+                .then(if (dragging) Modifier.background(MaterialTheme.colorScheme.surfaceVariant) else Modifier)
+                .padding(start = if (grouped) GroupChildIndent else 4.dp, end = 8.dp, top = 8.dp, bottom = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            handleModifier?.let { DragHandleDots(it) }
+            Spacer(Modifier.width(4.dp))
+            // A rule in an off group — or under an off feature master — reads disabled but keeps its own
+            // remembered state (ADR-0026/0030).
+            CompactSwitch(
+                checked = rule.enabled,
+                onCheckedChange = { onToggle() },
+                enabled = featureEnabled && (!grouped || groupEnabled),
             )
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f).clickable { onEdit() }) { content(rule) }
+            IconButton(onClick = onDelete, modifier = Modifier.size(36.dp)) {
+                Icon(
+                    vectorResource(Res.drawable.ic_delete),
+                    contentDescription = "Delete rule",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(18.dp),
+                )
+            }
         }
     }
     RowDivider()

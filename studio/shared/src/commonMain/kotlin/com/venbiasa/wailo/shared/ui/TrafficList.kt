@@ -55,6 +55,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.venbiasa.wailo.protocol.Header
+import com.venbiasa.wailo.protocol.HttpResponse
 import com.venbiasa.wailo.shared.FlowEntry
 import com.venbiasa.wailo.shared.format.codeText
 import com.venbiasa.wailo.shared.format.formatBytes
@@ -87,6 +88,7 @@ internal fun TrafficList(
     onToggleAllowHost: (String) -> Unit,
     onToggleBlockHost: (String) -> Unit,
     onMapLocalFromUrl: (String, String, List<Header>, ByteArray?) -> Unit,
+    onSeedFromUrl: (String, String, Int, List<Header>, ByteArray?) -> Unit,
     onBreakpointFromUrl: (String, String) -> Unit,
 ) {
     val listState = rememberLazyListState()
@@ -182,6 +184,7 @@ internal fun TrafficList(
                             onToggleAllowHost = onToggleAllowHost,
                             onToggleBlockHost = onToggleBlockHost,
                             onMapLocalFromUrl = onMapLocalFromUrl,
+                            onSeedFromUrl = onSeedFromUrl,
                             onBreakpointFromUrl = onBreakpointFromUrl,
                         )
                         RowDivider()
@@ -286,6 +289,7 @@ private fun TrafficRow(
     onToggleAllowHost: (String) -> Unit,
     onToggleBlockHost: (String) -> Unit,
     onMapLocalFromUrl: (String, String, List<Header>, ByteArray?) -> Unit,
+    onSeedFromUrl: (String, String, Int, List<Header>, ByteArray?) -> Unit,
     onBreakpointFromUrl: (String, String) -> Unit,
 ) {
     val exchange = entry.exchange
@@ -298,11 +302,11 @@ private fun TrafficRow(
 
     // Right-click offers bookmarking this row's host (a tick once saved; the slot is reserved when not,
     // so the label never shifts as it toggles), adding/removing the host in the capture filter's allow or
-    // block list, and authoring a rule from its URL — a local mapping or a breakpoint. The
+    // block list, and authoring a rule from its URL — a local mapping, a seed, or a breakpoint. The
     // Allowlist/Blocklist ticks track *exact* membership (so a subdomain isn't shown as listed under a
     // `*.example.com` entry, and toggling removes only the exact host it added — a wildcard entry is never
     // silently dropped); arming each list stays a deliberate switch in the capture-filter panel. A row with
-    // no parseable host skips the bookmark/filter entries; one with no URL skips the rule-authoring pair —
+    // no parseable host skips the bookmark/filter entries; one with no URL skips the rule-authoring trio —
     // an all-empty list is a plain passthrough (no menu).
     val url = request?.url ?: ""
     val host = remember(url) { requestHost(url) }
@@ -322,16 +326,21 @@ private fun TrafficRow(
             add(ContextMenuAction("Blocklist", checked = blocked) { onToggleBlockHost(host) })
         }
         if (url.isNotEmpty()) {
-            // Both seed a new rule with this row's exact URL and method, so the panel opens on the values
-            // that were right-clicked rather than asking for them again. Map Local also carries this
-            // response's captured headers and its body's raw bytes (the editor decodes them as JSON text or
-            // previews them as an image per the Content-Type), so the rule opens ready to map-and-tweak;
-            // the bytes are copied on select, not per row.
+            // All three seed a new rule with this row's exact URL and method, so the panel opens on the
+            // values that were right-clicked rather than asking for them again. Map Local and Seed also
+            // carry this response's captured headers and its body's raw bytes (the editor decodes them as
+            // JSON text or previews them as an image per the Content-Type), so the rule opens ready to
+            // tweak; the bytes are copied on select, not per row.
             add(
                 ContextMenuAction("Map Local\u2026") {
-                    val body = response?.body
-                    val seed = body?.takeIf { it.size > 0 }?.toByteArray()
-                    onMapLocalFromUrl(url, ruleMethod, response?.headers ?: emptyList(), seed)
+                    onMapLocalFromUrl(url, ruleMethod, response?.headers ?: emptyList(), capturedBody(response))
+                },
+            )
+            // Seed carries the observed status code as well, where Map Local starts at 200: a seed exists
+            // to replay this exchange into a hold, so an observed 500 or 429 is usually the whole point.
+            add(
+                ContextMenuAction("Seed\u2026") {
+                    onSeedFromUrl(url, ruleMethod, code ?: 0, response?.headers ?: emptyList(), capturedBody(response))
                 },
             )
             // Which phase(s) to pause isn't observable from a captured row, so the seeded rule takes the
@@ -437,6 +446,11 @@ private fun JumpToLatest(modifier: Modifier, onClick: () -> Unit) {
         )
     }
 }
+
+// The captured response's raw bytes to open a seeded rule's body on, or null when there's nothing to
+// carry. Null, not an empty array: it's what tells the editor to load the rule's own stored body instead.
+private fun capturedBody(response: HttpResponse?): ByteArray? =
+    response?.body?.takeIf { it.size > 0 }?.toByteArray()
 
 // Scrolls just enough to reveal [index] when it sits past either viewport edge; a fully visible row
 // stays put so keyboard navigation doesn't jolt the list on every keystroke.

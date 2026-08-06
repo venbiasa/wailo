@@ -5,9 +5,12 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
@@ -19,7 +22,11 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -38,16 +45,23 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.venbiasa.wailo.protocol.BreakpointPhase
 import com.venbiasa.wailo.protocol.Header
 import com.venbiasa.wailo.protocol.HttpRequest
 import com.venbiasa.wailo.protocol.HttpResponse
 import com.venbiasa.wailo.shared.PausedFlow
+import com.venbiasa.wailo.shared.SeedRuleDef
 import com.venbiasa.wailo.shared.format.prettyPrintJson
 import com.venbiasa.wailo.shared.resources.Res
 import com.venbiasa.wailo.shared.resources.ic_arrow_drop_down
+import com.venbiasa.wailo.shared.resources.ic_delete
+import com.venbiasa.wailo.shared.resources.ic_sync_arrow_down
+import okio.ByteString
 import okio.ByteString.Companion.toByteString
 import org.jetbrains.compose.resources.vectorResource
 
@@ -57,69 +71,177 @@ import org.jetbrains.compose.resources.vectorResource
  * full-window modal — a hold no longer scrims the main viewer; it opens its own window so traffic stays
  * browsable alongside it.
  *
- * A queue panel on the left always lists the waiting holds (even a lone one, so the layout never jumps as
- * the count changes); the editor on the right edits whichever is selected, and the selected row is marked
- * with a leading accent bar. Holds resolve in **any** order — pick any row, then Resume or Abort it; the
- * rest keep waiting. Resolving the selected hold advances the selection to the next; the host closes the
- * window once none remain.
+ * The left column stacks two lists — the holds Waiting for a human, over the armed Seed queue (ADR-0041) —
+ * and the pane on the right shows whichever row is selected, marked with a leading accent bar: a hold as
+ * an editor, a seed as a read-only preview of the response it will hand back. Holds resolve in **any**
+ * order: pick any row, then Resume or Abort it; the rest keep waiting. Resolving the selected hold
+ * advances the selection to the next. The window is user-owned — it stays open with nothing waiting (that
+ * is how you arm seeds ahead of the traffic they answer) until the user closes it.
  *
- * The selected editor tab is remembered for the window's lifetime (it defaults to Headers, and a switch to
- * Body sticks as later holds arrive), but it is not persisted — reopening the window starts at Headers again.
+ * [seeds] is the armed queue, held by the host so it survives closing and reopening this window;
+ * [onFillSeeds]/[onClearSeeds] arm and empty it, and [onLoadSeedBody] reads a seed's stored body for the
+ * preview. A seed answers a matching response-phase hold before it ever reaches Waiting, so what's listed
+ * here is what is still available to spend.
+ *
+ * A hold arriving steals attention only when it has to: [onBringToFront] raises the window when it is
+ * buried, and the newcomer takes the pane unless the user is already looking at another hold.
+ *
+ * Both the left column's width and the split between its two lists are dragged, plain `remember` state:
+ * deliberately not persisted, unlike the main window's tool panel — this window is opened for a task and
+ * closed, so its proportions are a per-session convenience rather than a preference.
+ *
+ * The selected tab is remembered for the window's lifetime (it defaults to Headers, and a switch to Body
+ * sticks as later holds arrive), but it is not persisted — reopening the window starts at Headers again.
  */
 @Composable
 internal fun BreakpointInspector(
     flows: List<PausedFlow>,
+    seeds: List<SeedRuleDef>,
+    onFillSeeds: () -> Unit,
+    onClearSeeds: () -> Unit,
+    onLoadSeedBody: suspend (SeedRuleDef) -> ByteArray,
+    onBringToFront: () -> Unit,
     onResume: (correlationId: String, editedRequest: HttpRequest?, editedResponse: HttpResponse?) -> Unit,
     onAbort: (correlationId: String) -> Unit,
 ) {
-    // Which hold is loaded into the editor — transient window state. Keep it pointing at a live hold:
-    // when the selected one resolves (drops out of [flows]) or nothing is selected yet, snap to the
-    // first remaining so the editor never shows a stale/blank pane.
-    var selectedId by remember { mutableStateOf(flows.firstOrNull()?.correlationId) }
-    LaunchedEffect(flows) {
-        if (selectedId == null || flows.none { it.correlationId == selectedId }) {
-            selectedId = flows.firstOrNull()?.correlationId
-        }
-    }
-    val selected = flows.firstOrNull { it.correlationId == selectedId } ?: flows.firstOrNull()
+    // What the right pane shows — transient window state, and the user's place in the window, so an
+    // arriving hold is careful about overwriting it (see below).
+    var selection by remember { mutableStateOf<InspectorSelection?>(flows.firstOrNull()?.let(::holdSelection)) }
+    // Resolve it against what still exists before rendering: a hold that resolved and a seed that was
+    // spent both vanish under the user, and the pane falls back to the first hold still waiting (then to
+    // the empty state) rather than showing a stale one.
+    val shown: InspectorSelection? = when (val current = selection) {
+        is InspectorSelection.Hold -> current.takeIf { flows.any { it.correlationId == current.correlationId } }
+        is InspectorSelection.Seed -> current.takeIf { seeds.any { it.id == current.seedId } }
+        null -> null
+    } ?: flows.firstOrNull()?.let(::holdSelection)
 
-    // Window-session tab, hoisted above the per-hold editor so it survives switching holds and new holds
+    // Correlation ids already accounted for, seeded from what's held right now so reopening the window
+    // over a standing hold doesn't read as a fresh arrival.
+    val seenHolds = remember { flows.mapTo(mutableSetOf()) { it.correlationId } }
+    // Read the focus flag inside the effect, not in composition, so the whole inspector doesn't recompose
+    // every time the window gains or loses focus.
+    val windowInfo = LocalWindowInfo.current
+    LaunchedEffect(flows) {
+        val arrived = flows.firstOrNull { it.correlationId !in seenHolds }
+        seenHolds.clear()
+        flows.mapTo(seenHolds) { it.correlationId }
+        if (arrived == null) return@LaunchedEffect
+        // A hold the user can't see is worse than one they can ignore, so raise a buried window and point
+        // the pane at the newcomer. Once the window is already in front, only take the pane if it isn't
+        // holding another paused exchange — that one is mid-edit, and yanking it away would lose the work.
+        val focused = windowInfo.isWindowFocused
+        if (!focused) onBringToFront()
+        if (!focused || shown !is InspectorSelection.Hold) selection = holdSelection(arrived)
+    }
+
+    // Window-session tab, hoisted above the per-hold editor so it survives switching rows and new holds
     // arriving; it resets to Headers only when the window is next opened (not persisted).
     var tab by remember { mutableStateOf(PausedTab.Headers) }
 
-    Row(Modifier.fillMaxSize()) {
-        PausedFlowQueue(
-            flows = flows,
-            selectedId = selected?.correlationId,
-            onSelect = { selectedId = it },
-            modifier = Modifier.width(QueuePanelWidth).fillMaxHeight(),
-        )
-        ColumnDivider()
-        Box(Modifier.weight(1f).fillMaxHeight()) {
-            selected?.let { paused ->
-                // Re-key on the hold's id so switching rows rebuilds the editor's seeded fields from that
-                // message; [tab] lives above the key, so the chosen tab carries across the switch.
-                key(paused.correlationId) {
-                    PausedFlowEditor(
-                        paused = paused,
-                        tab = tab,
-                        onTabChange = { tab = it },
-                        onResume = onResume,
-                        onAbort = onAbort,
-                    )
+    val density = LocalDensity.current
+    var leftWidth by remember { mutableStateOf(QueuePanelWidth) }
+
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+        // Clamp against the live window size, not just at drag time: shrinking the window must not leave
+        // the left column wider than the editor's floor allows, or the editor would be squeezed to nothing.
+        val maxLeft = (maxWidth - MinEditorWidth).coerceAtLeast(QueuePanelWidth)
+        val left = leftWidth.coerceIn(QueuePanelWidth, maxLeft)
+        val listsHeight = maxHeight - ResizeHandleThickness
+        Row(Modifier.fillMaxSize()) {
+            Column(Modifier.width(left).fillMaxHeight()) {
+                // Both lists start at half the free height and are dragged from there. The split is held
+                // as the top list's height (not a ratio) so dragging it to a floor and resizing the window
+                // keeps the section you sized where you put it.
+                var waitingHeight by remember { mutableStateOf<Dp?>(null) }
+                val maxWaiting = (listsHeight - MinSectionHeight).coerceAtLeast(MinSectionHeight)
+                val waiting = (waitingHeight ?: (listsHeight / 2)).coerceIn(MinSectionHeight, maxWaiting)
+                PausedFlowQueue(
+                    flows = flows,
+                    selectedId = (shown as? InspectorSelection.Hold)?.correlationId,
+                    onSelect = { selection = InspectorSelection.Hold(it) },
+                    modifier = Modifier.fillMaxWidth().height(waiting),
+                )
+                DragHandle { deltaPx ->
+                    waitingHeight = (waiting + with(density) { deltaPx.toDp() })
+                        .coerceIn(MinSectionHeight, maxWaiting)
+                }
+                SeedQueue(
+                    seeds = seeds,
+                    selectedId = (shown as? InspectorSelection.Seed)?.seedId,
+                    onSelect = { selection = InspectorSelection.Seed(it) },
+                    onFill = onFillSeeds,
+                    onClear = onClearSeeds,
+                    modifier = Modifier.fillMaxWidth().weight(1f),
+                )
+            }
+            PanelResizeHandle { deltaPx ->
+                // Drag right (positive delta) to widen the left column.
+                leftWidth = (left + with(density) { deltaPx.toDp() }).coerceIn(QueuePanelWidth, maxLeft)
+            }
+            Box(Modifier.weight(1f).fillMaxHeight()) {
+                when (shown) {
+                    is InspectorSelection.Hold -> {
+                        val paused = flows.first { it.correlationId == shown.correlationId }
+                        // Re-key on the hold's id so switching rows rebuilds the editor's seeded fields
+                        // from that message; [tab] lives above the key, so the chosen tab carries across.
+                        key(paused.correlationId) {
+                            PausedFlowEditor(
+                                paused = paused,
+                                tab = tab,
+                                onTabChange = { tab = it },
+                                onResume = onResume,
+                                onAbort = onAbort,
+                            )
+                        }
+                    }
+                    is InspectorSelection.Seed -> {
+                        val index = seeds.indexOfFirst { it.id == shown.seedId }
+                        key(shown.seedId) {
+                            SeedDetail(
+                                seed = seeds[index],
+                                position = index + 1,
+                                tab = tab,
+                                onTabChange = { tab = it },
+                                onLoadBody = onLoadSeedBody,
+                            )
+                        }
+                    }
+                    null -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        // The window outlives its holds now, so the empty state has to say something: with
+                        // nothing waiting, this is the arm-the-seeds-and-wait view.
+                        MutedText("Nothing paused. Matching seeds answer holds automatically.")
+                    }
                 }
             }
         }
     }
 }
 
+// What the right pane is showing. Holds and seeds share the pane (and the same accent-bar selection in
+// their lists), but a hold is editable and resolvable while a seed is a preview of a canned answer.
+private sealed interface InspectorSelection {
+    data class Hold(val correlationId: String) : InspectorSelection
+
+    data class Seed(val seedId: String) : InspectorSelection
+}
+
+private fun holdSelection(flow: PausedFlow) = InspectorSelection.Hold(flow.correlationId)
+
+// The left column's floor — the width the queue was fixed at before it became draggable — and the room
+// the editor beside it needs to stay usable (its header row of fields is the binding constraint).
 private val QueuePanelWidth = 264.dp
+private val MinEditorWidth = 320.dp
+
+// A section dragged to its floor still shows its header plus a row or two, so the drag never collapses a
+// list into a bare title bar.
+private val MinSectionHeight = 120.dp
 
 /**
- * The left queue: every waiting hold, in the engine's order. A row names the phase, the method + URL, and
- * the originating device/app; the selected row carries a leading accent bar plus a fill. Selection is the
- * only row action — resolving (Resume/Abort) happens in the editor, so the destructive Abort is always an
- * explicit, deliberate click rather than a stray tap on a list.
+ * The Waiting list: every hold that needs a human, in the engine's order. A row names the phase, the
+ * method + URL, and the originating device/app; the selected row carries a leading accent bar plus a fill.
+ * Selection is the only row action — resolving (Resume/Abort) happens in the editor, so the destructive
+ * Abort is always an explicit, deliberate click rather than a stray tap on a list.
  */
 @Composable
 private fun PausedFlowQueue(
@@ -128,41 +250,168 @@ private fun PausedFlowQueue(
     onSelect: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    Column(modifier.background(MaterialTheme.colorScheme.surfaceContainer)) {
+    val listState = rememberLazyListState()
+    SectionColumn(modifier, title = "Waiting", count = flows.size) {
+        if (flows.isEmpty()) {
+            SectionEmptyText("Nothing paused.")
+        } else {
+            LazyColumn(Modifier.fillMaxSize(), state = listState) {
+                items(flows, key = { it.correlationId }) { flow ->
+                    PausedFlowRow(
+                        flow = flow,
+                        selected = flow.correlationId == selectedId,
+                        onSelect = { onSelect(flow.correlationId) },
+                    )
+                    RowDivider()
+                }
+            }
+            VerticalListScrollbar(listState, Modifier.align(Alignment.CenterEnd).fillMaxHeight())
+        }
+    }
+}
+
+/**
+ * The Seed list: the armed queue of canned responses, in the order they'll be spent (ADR-0041). Selecting
+ * a row previews it in the pane on the right; a seed is authored in the Seed panel, so the only actions
+ * here are arming the queue and emptying it. Fill replaces the queue with the enabled seeds, flattened out
+ * of their groups, so re-filling mid-session is how you reset a partly-spent sequence.
+ */
+@Composable
+private fun SeedQueue(
+    seeds: List<SeedRuleDef>,
+    selectedId: String?,
+    onSelect: (String) -> Unit,
+    onFill: () -> Unit,
+    onClear: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val listState = rememberLazyListState()
+    SectionColumn(
+        modifier,
+        title = "Seed",
+        count = seeds.size,
+        actions = {
+            PanelIconButton(Res.drawable.ic_sync_arrow_down, "Fill from seed rules", onFill)
+            PanelIconButton(Res.drawable.ic_delete, "Clear seed queue", onClear, enabled = seeds.isNotEmpty())
+        },
+    ) {
+        if (seeds.isEmpty()) {
+            SectionEmptyText("No seeds armed. Fill to load the enabled seed rules, in order.")
+        } else {
+            LazyColumn(Modifier.fillMaxSize(), state = listState) {
+                itemsIndexed(seeds, key = { _, seed -> seed.id }) { index, seed ->
+                    SeedRow(
+                        position = index + 1,
+                        seed = seed,
+                        selected = seed.id == selectedId,
+                        onSelect = { onSelect(seed.id) },
+                    )
+                    RowDivider()
+                }
+            }
+            VerticalListScrollbar(listState, Modifier.align(Alignment.CenterEnd).fillMaxHeight())
+        }
+    }
+}
+
+// One section of the left column: a top bar carrying the title, the count, and any actions, over a list
+// body on the base surface — the same white/near-black every other list in the studio sits on, so the
+// rows read as content rather than as chrome (ADR-0016).
+@Composable
+private fun SectionColumn(
+    modifier: Modifier,
+    title: String,
+    count: Int,
+    actions: @Composable RowScope.() -> Unit = {},
+    body: @Composable BoxScope.() -> Unit,
+) {
+    Column(modifier) {
         Row(
             Modifier.fillMaxWidth()
                 .height(TopBarHeight)
-                .padding(horizontal = 16.dp),
+                .background(MaterialTheme.colorScheme.surfaceContainer)
+                .padding(start = 16.dp, end = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
-                "Waiting",
+                title,
                 style = MaterialTheme.typography.titleSmall,
                 color = MaterialTheme.colorScheme.onSurface,
             )
-            Spacer(Modifier.weight(1f))
+            Spacer(Modifier.width(8.dp))
             Text(
-                flows.size.toString(),
+                count.toString(),
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+            Spacer(Modifier.weight(1f))
+            actions()
         }
         RowDivider()
-        LazyColumn(Modifier.fillMaxSize()) {
-            items(flows, key = { it.correlationId }) { flow ->
-                PausedFlowRow(
-                    flow = flow,
-                    selected = flow.correlationId == selectedId,
-                    onSelect = { onSelect(flow.correlationId) },
-                )
-                RowDivider()
-            }
+        Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background), content = body)
+    }
+}
+
+// An armed seed: its 1-based position (the order is the whole point — position 1 answers the next match
+// it fits), the URL it matches, and the method/status it answers with. Two lines like the Waiting rows
+// beside it: this column is narrow and draggable narrower, and one line left the URL no room to read.
+@Composable
+private fun SeedRow(position: Int, seed: SeedRuleDef, selected: Boolean, onSelect: () -> Unit) {
+    SelectableRow(selected = selected, onSelect = onSelect) {
+        Text(
+            position.toString(),
+            Modifier.widthIn(min = 16.dp),
+            style = monoLabel(),
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Column(Modifier.weight(1f)) {
+            Text(
+                seed.urlPattern.ifBlank { "(no pattern)" },
+                style = monoSmall(),
+                color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                "${seed.method.ifBlank { "ANY" }}  \u2192  ${seed.statusCode}",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
     }
 }
 
 @Composable
 private fun PausedFlowRow(flow: PausedFlow, selected: Boolean, onSelect: () -> Unit) {
+    SelectableRow(selected = selected, onSelect = onSelect) {
+        PhaseBadge(flow.phase == BreakpointPhase.BREAKPOINT_PHASE_REQUEST)
+        Column(Modifier.weight(1f)) {
+            Text(
+                "${flow.request?.method ?: ""} ${flow.request?.url ?: ""}".trim(),
+                style = monoSmall(),
+                color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                "${flow.deviceName} \u00b7 ${flow.appId}",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+    }
+}
+
+// The row scaffold both left-column lists use, so a hold and a seed read as the same kind of pick: a
+// leading accent bar — the primary at-a-glance selected marker, since the fill alone reads too subtly in
+// this monochrome theme — over a surfaceVariant fill. The bar is transparent when unselected so the row's
+// left edge stays flush.
+@Composable
+private fun SelectableRow(selected: Boolean, onSelect: () -> Unit, content: @Composable RowScope.() -> Unit) {
     Row(
         Modifier.fillMaxWidth()
             .height(IntrinsicSize.Min)
@@ -170,8 +419,6 @@ private fun PausedFlowRow(flow: PausedFlow, selected: Boolean, onSelect: () -> U
             .clickable(onClick = onSelect),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        // Leading accent bar: the primary at-a-glance "this is selected" marker (the fill alone reads too
-        // subtly in this monochrome theme). Transparent when unselected so the row's left edge is flush.
         Box(
             Modifier.width(3.dp)
                 .fillMaxHeight()
@@ -181,25 +428,8 @@ private fun PausedFlowRow(flow: PausedFlow, selected: Boolean, onSelect: () -> U
             Modifier.weight(1f).padding(horizontal = 12.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            PhaseBadge(flow.phase == BreakpointPhase.BREAKPOINT_PHASE_REQUEST)
-            Column(Modifier.weight(1f)) {
-                Text(
-                    "${flow.request?.method ?: ""} ${flow.request?.url ?: ""}".trim(),
-                    style = monoSmall(),
-                    color = MaterialTheme.colorScheme.onSurface,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                Text(
-                    "${flow.deviceName} \u00b7 ${flow.appId}",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
-        }
+            content = content,
+        )
     }
 }
 
@@ -386,6 +616,96 @@ private fun PausedFlowEditor(
             Spacer(Modifier.weight(1f))
             Button(onClick = resume) {
                 Text("Resume")
+            }
+        }
+    }
+}
+
+/**
+ * The read-only counterpart to [PausedFlowEditor], filling the same pane for a selected seed: the match it
+ * answers, the response it will hand back, and its stored body. It shares [tab] with the editor so
+ * stepping between a hold and a seed stays on Headers or Body rather than snapping back.
+ *
+ * Nothing here is editable and there are no actions — a seed is authored in the Seed panel, and it is
+ * spent by a matching hold arriving, not by anything the user does in this window. [position] is its place
+ * in the queue, which is what decides *which* seed answers when several match.
+ */
+@Composable
+private fun SeedDetail(
+    seed: SeedRuleDef,
+    position: Int,
+    tab: PausedTab,
+    onTabChange: (PausedTab) -> Unit,
+    onLoadBody: suspend (SeedRuleDef) -> ByteArray,
+) {
+    // The body lives in a host file, so it's read asynchronously; null is "not read yet", which shows as
+    // an empty pane for the frame or two the read takes rather than flashing a wrong "No body".
+    var body by remember(seed.id) { mutableStateOf<ByteString?>(null) }
+    LaunchedEffect(seed.id) { body = onLoadBody(seed).toByteString() }
+    val contentType = seed.headers.firstOrNull { it.name.equals("Content-Type", ignoreCase = true) }?.value
+
+    Column(Modifier.fillMaxSize()) {
+        Row(
+            Modifier.fillMaxWidth()
+                .height(TopBarHeight)
+                .background(MaterialTheme.colorScheme.surfaceContainer)
+                .padding(horizontal = 16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text("Seed", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurface)
+            Spacer(Modifier.weight(1f))
+            Text(
+                "#$position",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        RowDivider()
+
+        Column(
+            Modifier.fillMaxWidth().padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text(
+                seed.urlPattern.ifBlank { "(no pattern)" },
+                style = monoSmall(),
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+            MutedText("${seed.method.ifBlank { "ANY" }}  \u2192  ${seed.statusCode}")
+            // Says why the pane has no buttons, and names the one phase a seed can answer (ADR-0041).
+            MutedText("Answers the first response hold it matches, then leaves the queue. Edit it in the Seed panel.")
+        }
+
+        UnderlineTabs(
+            items = listOf(
+                TabItem(PausedTab.Headers, PausedTab.Headers.label),
+                TabItem(PausedTab.Body, PausedTab.Body.label),
+            ),
+            selected = tab,
+            onSelect = onTabChange,
+            modifier = Modifier.fillMaxWidth(),
+        )
+        Box(Modifier.weight(1f).fillMaxWidth()) {
+            when (tab) {
+                PausedTab.Headers -> Column(
+                    Modifier.fillMaxSize()
+                        .verticalScroll(rememberScrollState())
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                ) {
+                    if (seed.headers.isEmpty()) MutedText("No headers")
+                    else seed.headers.forEach { KeyValueRow(it.name, it.value) }
+                }
+                // Reuses the traffic previewer, so an image or binary seed body is shown as itself rather
+                // than as mojibake — a seed can serve any payload Map Local can.
+                PausedTab.Body -> body?.let { bytes ->
+                    BodyPreview(
+                        body = bytes,
+                        contentType = contentType,
+                        declaredSize = bytes.size.toLong(),
+                        truncated = false,
+                        modifier = Modifier.fillMaxSize().padding(vertical = 8.dp),
+                    )
+                }
             }
         }
     }

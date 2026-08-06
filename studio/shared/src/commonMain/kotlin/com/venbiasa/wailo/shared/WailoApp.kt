@@ -55,12 +55,20 @@ import com.venbiasa.wailo.shared.ui.WailoViewer
  * bytes (the host owns all file IO). [onPickMapLocalFile] opens the host's file picker for a body file
  * (JSON/text or image). [mapLocalEnabled]/[onMapLocalEnabledChange] are the Map Local feature master
  * (ADR-0030): off, the host pushes no rules and the panel disables its switches, state kept.
+ * [onSeedFromMapLocalRule] is a Map Local row's right-click "Seed…", which copies that rule into the Seed
+ * list — the host's job, since it owns both layouts and the body files (ADR-0041).
  * [breakpointNodes] are the host-owned, persisted breakpoints layout (groups +
  * rules, in priority order) the same tool panel renders (ADR-0026/0027); [onBreakpointLayoutChange] hands
  * back a new layout for any structural change, and [breakpointsEnabled]/[onBreakpointsEnabledChange] are
  * that feature's master (ADR-0030, same semantics). The requests/responses devices are holding at a
- * breakpoint are edited in a separate window ([WailoBreakpointWindowContent], ADR-0034), not here. The
+ * breakpoint are edited in a separate window ([WailoBreakpointWindowContent], ADR-0034), which
+ * [onOpenBreakpointWindow] raises from the panel with nothing paused. The
  * panel's open state and any row-seeded draft are the viewer's own transient state.
+ * [seedNodes] are the host-owned, persisted Seed layout — the canned responses that answer paused
+ * exchanges (ADR-0041) — rendered by their own panel; [onSeedLayoutChange] hands back a new layout,
+ * [onLoadSeedBody]/[onSaveSeedBody] read/persist a seed's body bytes, and [seedsEnabled]/
+ * [onSeedsEnabledChange] are that feature's master. [openSeedPanelSignal] is a counter the host bumps
+ * after importing a Map Local rule, to reveal the import by opening the Seed panel.
  * [toolPanelWidthRatio] is the host-owned, persisted width of that docked panel expressed as a
  * fraction of the window (so it scales with the window rather than pinning to a fixed dp);
  * [onToolPanelWidthRatioChange] hands back a new fraction as the user drags the panel's resize handle.
@@ -103,10 +111,19 @@ fun WailoApp(
     onPickMapLocalFile: suspend () -> PickedFile? = { null },
     mapLocalEnabled: Boolean = true,
     onMapLocalEnabledChange: (Boolean) -> Unit = {},
+    onSeedFromMapLocalRule: (MapLocalRuleDef) -> Unit = {},
     breakpointNodes: List<BreakpointNode> = emptyList(),
     onBreakpointLayoutChange: (List<BreakpointNode>) -> Unit = {},
     breakpointsEnabled: Boolean = true,
     onBreakpointsEnabledChange: (Boolean) -> Unit = {},
+    onOpenBreakpointWindow: () -> Unit = {},
+    seedNodes: List<SeedNode> = emptyList(),
+    onSeedLayoutChange: (List<SeedNode>) -> Unit = {},
+    onLoadSeedBody: suspend (SeedRuleDef) -> ByteArray = { ByteArray(0) },
+    onSaveSeedBody: suspend (SeedRuleDef, ByteArray) -> Unit = { _, _ -> },
+    seedsEnabled: Boolean = true,
+    onSeedsEnabledChange: (Boolean) -> Unit = {},
+    openSeedPanelSignal: Int = 0,
     toolPanelWidthRatio: Float = ToolPanelLayout.DefaultWidthRatio,
     onToolPanelWidthRatioChange: (Float) -> Unit = {},
 ) {
@@ -151,10 +168,19 @@ fun WailoApp(
                 onPickMapLocalFile = onPickMapLocalFile,
                 mapLocalEnabled = mapLocalEnabled,
                 onMapLocalEnabledChange = onMapLocalEnabledChange,
+                onSeedFromMapLocalRule = onSeedFromMapLocalRule,
                 breakpointNodes = breakpointNodes,
                 onBreakpointLayoutChange = onBreakpointLayoutChange,
                 breakpointsEnabled = breakpointsEnabled,
                 onBreakpointsEnabledChange = onBreakpointsEnabledChange,
+                onOpenBreakpointWindow = onOpenBreakpointWindow,
+                seedNodes = seedNodes,
+                onSeedLayoutChange = onSeedLayoutChange,
+                onLoadSeedBody = onLoadSeedBody,
+                onSaveSeedBody = onSaveSeedBody,
+                seedsEnabled = seedsEnabled,
+                onSeedsEnabledChange = onSeedsEnabledChange,
+                openSeedPanelSignal = openSeedPanelSignal,
                 toolPanelWidthRatio = toolPanelWidthRatio,
                 onToolPanelWidthRatioChange = onToolPanelWidthRatioChange,
             )
@@ -164,19 +190,33 @@ fun WailoApp(
 
 /**
  * The contents of the standalone breakpoint window (ADR-0034): the paused-traffic inspector on its own
- * top-level window rather than a modal over [WailoApp]. The host shows this window while any device is
- * holding a request/response at a breakpoint and closes it once none remain, so it is only ever composed
- * with [pausedFlows] non-empty.
+ * top-level window rather than a modal over [WailoApp]. The window is user-owned (ADR-0041) — the host
+ * opens it from the Breakpoints panel or when a hold needs a human, and only the user closes it — so it
+ * is routinely composed with [pausedFlows] empty, which is how seeds are armed before their traffic
+ * arrives.
  *
  * It carries its own theme so it matches the main window's appearance: [darkTheme] mirrors the host's
  * choice and [textScale] rides on `fontScale` exactly as in [WailoApp], so Cmd +/- resizes this window's
  * text too. [onResumeBreakpoint]/[onAbortBreakpoint] resolve a hold by correlation id (Resume applies the
  * edits or proceeds unchanged; Abort fails the app's call). Concurrent holds are shown as a queue the
  * user resolves in any order.
+ *
+ * [seeds] is the host-owned armed queue of canned responses, which is why it survives this window closing
+ * and reopening; [onFillSeeds] arms it from the enabled seed rules, [onClearSeeds] empties it, and
+ * [onLoadSeedBody] reads a seed's stored body for its preview. The host spends a seed the moment a
+ * matching hold arrives, so a hold answered that way never reaches this window.
+ *
+ * [onBringToFront] raises this window: the host owns the OS window, so the inspector asks for it when a
+ * hold arrives while the window is buried behind another.
  */
 @Composable
 fun WailoBreakpointWindowContent(
     pausedFlows: List<PausedFlow>,
+    seeds: List<SeedRuleDef> = emptyList(),
+    onFillSeeds: () -> Unit = {},
+    onClearSeeds: () -> Unit = {},
+    onLoadSeedBody: suspend (SeedRuleDef) -> ByteArray = { ByteArray(0) },
+    onBringToFront: () -> Unit = {},
     darkTheme: Boolean = isSystemInDarkTheme(),
     textScale: Float = TextScale.Default,
     onResumeBreakpoint: (String, HttpRequest?, HttpResponse?) -> Unit = { _, _, _ -> },
@@ -190,6 +230,11 @@ fun WailoBreakpointWindowContent(
             Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
                 BreakpointInspector(
                     flows = pausedFlows,
+                    seeds = seeds,
+                    onFillSeeds = onFillSeeds,
+                    onClearSeeds = onClearSeeds,
+                    onLoadSeedBody = onLoadSeedBody,
+                    onBringToFront = onBringToFront,
                     onResume = onResumeBreakpoint,
                     onAbort = onAbortBreakpoint,
                 )

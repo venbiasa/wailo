@@ -75,6 +75,44 @@ Captured exchanges are held in memory only, so the engine keeps a bounded window
 persists across restarts; lowering it trims what is already held, since the reason to lower it is memory
 that is already spent.
 
+## Studio surfaces
+
+The desktop is one main window — a live traffic list over a detail panel — plus a single docked tool
+panel on the right, chosen from an icon rail. At most one panel is open at a time, and they all share one
+persisted width (ADR-0021). The panels are:
+
+| Panel | What it does | Where its state lives |
+|---|---|---|
+| Capture Filter | Allow/block hosts, gated at the device (ADR-0029) | pushed to devices |
+| Map Local | Answer matching requests with an authored response (ADR-0019) | pushed as match metadata; bodies read on the desktop, per request |
+| Breakpoints | Pause matching requests/responses for live editing (ADR-0027) | pushed to devices |
+| Seed | Canned responses that answer paused exchanges, in order (ADR-0041) | desktop only — never pushed |
+| Devices | Connected devices, USB/LAN, and Wi-Fi trust (ADR-0039/0040) | host |
+| Settings | Ports, retention, theme, text scale | host, persisted |
+
+Held exchanges are edited in a second top-level window, not a modal, so traffic stays browsable beside
+it (ADR-0034). That window is user-owned: it opens from the Breakpoints panel or when a hold needs a
+human, and closes only when the user closes it (ADR-0041). Its left column lists the holds waiting over
+the armed seeds, and one pane on the right shows whichever is selected — a hold to edit, a seed to read.
+An arriving hold raises the window only when it is buried, and takes the pane only when the user isn't
+already working on another hold (ADR-0043).
+
+Every panel is stateless over its inputs. `shared` renders a layout and hands back a whole new one for
+any change; `desktopApp` owns all persistence, all file IO, and all engine calls — which is what keeps
+`shared` portable and free of `java.*` (ADR-0013). Map Local, Breakpoints, and Seed share one grouped rule
+list (ADR-0026/0028), and each has an independent feature master that makes it inert without erasing what's
+configured (ADR-0030). Only Map Local and Seed are drag-orderable, because only they resolve by first
+match; every matching breakpoint rule fires, so ordering them would decide nothing (ADR-0042).
+
+All three rule panels are also reachable from a captured row's right-click, which opens the panel on an
+editor pre-filled from that exchange rather than asking for the URL again. Map Local and Seed both carry
+the observed headers and body bytes; only Seed also carries the observed status code, because a seed
+replays the exchange while a mapping authors a new one (ADR-0045).
+
+Matching normally runs on the device — the desktop only ever pushes patterns. Seed is the exception: it
+resolves holds locally, so it carries a desktop-side copy of the device's wildcard scheme, kept
+byte-identical on purpose (ADR-0041).
+
 ## Module layout
 
 See [AGENTS.md](AGENTS.md) for the module dependency rules. `sdk-*` is intentionally isolated from

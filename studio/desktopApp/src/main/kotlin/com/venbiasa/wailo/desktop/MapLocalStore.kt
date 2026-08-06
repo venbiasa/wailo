@@ -1,7 +1,6 @@
 package com.venbiasa.wailo.desktop
 
 import com.venbiasa.wailo.engine.ServedBody
-import com.venbiasa.wailo.protocol.Header
 import com.venbiasa.wailo.protocol.MapLocalRule
 import com.venbiasa.wailo.shared.MapLocalLayoutCodec
 import com.venbiasa.wailo.shared.MapLocalNode
@@ -70,60 +69,36 @@ object MapLocalStore {
     fun deleteInlineBody(id: String) {
         runCatching { managedBodyFiles(id).forEach { it.delete() } }
     }
+
+    /**
+     * The bytes this rule actually serves, from whichever source it uses — the same resolution [serveBody]
+     * does. Used when copying a rule elsewhere (the Seed import, ADR-0041), where reading only the managed
+     * file would silently copy nothing for a legacy rule that still points at a user-chosen path.
+     */
+    fun loadServedBody(rule: MapLocalRuleDef): ByteArray {
+        val file = servedBodyFile(rule) ?: return ByteArray(0)
+        return runCatching { file.readBytes() }.getOrDefault(ByteArray(0))
+    }
 }
 
-// Inline bodies live under the OS's per-user app-data dir (not in prefs, which is for small values),
-// one file per rule id. The extension follows the rule's Content-Type so the stored body is
-// self-describing (a .png holds an image, .json holds JSON) and drives the served Content-Type when
-// the rule sets none.
+// Inline bodies live under the OS's per-user app-data dir (see [appDataDir]), one file per rule id, its
+// extension following the rule's Content-Type.
 private fun managedBodyFileFor(rule: MapLocalRuleDef): File =
     File(mapLocalBodiesDir(), "${rule.id}.${extensionForContentType(rule.contentType())}")
 
-// Every managed body file for a rule id (there should be at most one). A glob rather than a fixed name
-// so it finds the body whatever its extension, sweeps a stale file left by an interrupted type switch,
-// and still finds the legacy fixed-name ".json" body written before bodies were typed. The trailing dot
-// makes "$id." delimit the id, so sibling ids that share a prefix never match.
-private fun managedBodyFiles(id: String): List<File> =
-    mapLocalBodiesDir().listFiles { file -> file.name.startsWith("$id.") }?.toList() ?: emptyList()
+private fun managedBodyFiles(id: String): List<File> = managedBodyFiles(mapLocalBodiesDir(), id)
 
 private fun existingManagedBodyFile(id: String): File? = managedBodyFiles(id).firstOrNull()
+
+// Where a rule's served bytes come from: its app-managed file (every rule authored since bodies became
+// app-managed) or the user-chosen path a legacy file-source rule still points at.
+private fun servedBodyFile(rule: MapLocalRuleDef): File? =
+    if (rule.inline) existingManagedBodyFile(rule.id) else File(rule.filePath)
 
 private fun MapLocalRuleDef.contentType(): String? =
     headers.firstOrNull { it.name.equals("Content-Type", ignoreCase = true) }?.value
 
-// The file extension to store a body under, from its Content-Type — the inverse of [guessContentType],
-// used to name the managed body file. Unknown/absent types fall back to a neutral ".bin".
-private fun extensionForContentType(contentType: String?): String =
-    when (contentType?.substringBefore(';')?.trim()?.lowercase()) {
-        "application/json" -> "json"
-        "text/html" -> "html"
-        "application/xml", "text/xml" -> "xml"
-        "text/plain" -> "txt"
-        "application/javascript", "text/javascript" -> "js"
-        "text/css" -> "css"
-        "text/csv" -> "csv"
-        "image/png" -> "png"
-        "image/jpeg" -> "jpg"
-        "image/gif" -> "gif"
-        "image/svg+xml" -> "svg"
-        "image/webp" -> "webp"
-        else -> "bin"
-    }
-
 private fun mapLocalBodiesDir(): File = File(appDataDir(), "maplocal-bodies").apply { mkdirs() }
-
-private fun appDataDir(): File {
-    val os = System.getProperty("os.name").orEmpty().lowercase()
-    val home = System.getProperty("user.home")
-    return when {
-        os.contains("win") -> (System.getenv("APPDATA")?.takeIf { it.isNotBlank() }?.let { File(it) } ?: File(home)).let { File(it, "Wailo") }
-        os.contains("mac") -> File(home, "Library/Application Support/Wailo")
-        else -> {
-            val base = System.getenv("XDG_DATA_HOME")?.takeIf { it.isNotBlank() }?.let { File(it) } ?: File(home, ".local/share")
-            File(base, "Wailo")
-        }
-    }
-}
 
 /**
  * Compiles the authored layout into the match-metadata the engine pushes to devices (ADR-0019): the
@@ -154,39 +129,7 @@ fun compileRules(nodes: List<MapLocalNode>): List<MapLocalRule> =
 fun serveBody(ruleId: String, nodes: List<MapLocalNode>): ServedBody? {
     if (!nodes.isRuleActive(ruleId)) return null
     val def = nodes.findRule(ruleId) ?: return null
-    val file = if (def.inline) (existingManagedBodyFile(def.id) ?: return null) else File(def.filePath)
+    val file = servedBodyFile(def) ?: return null
     val bytes = runCatching { file.readBytes() }.getOrNull() ?: return null
-    val authored = def.headers.filter { it.name.isNotBlank() }
-    val hasContentType = authored.any { it.name.equals("Content-Type", ignoreCase = true) }
-    val headers = buildList {
-        // User headers pass through, minus Content-Length: the host recomputes it so it can't drift from
-        // the served bytes (a stale length would truncate or hang the response).
-        authored.forEach { header ->
-            if (!header.name.equals("Content-Length", ignoreCase = true)) {
-                add(Header(name = header.name, value_ = header.value))
-            }
-        }
-        if (!hasContentType) {
-            val guessed = guessContentType(file.name)
-            if (guessed.isNotBlank()) add(Header(name = "Content-Type", value_ = guessed))
-        }
-        add(Header(name = "Content-Length", value_ = bytes.size.toString()))
-    }
-    return ServedBody(code = def.statusCode, headers = headers, body = bytes)
-}
-
-internal fun guessContentType(path: String): String = when (path.substringAfterLast('.', "").lowercase()) {
-    "json" -> "application/json"
-    "html", "htm" -> "text/html"
-    "xml" -> "application/xml"
-    "txt" -> "text/plain"
-    "js" -> "application/javascript"
-    "css" -> "text/css"
-    "csv" -> "text/csv"
-    "png" -> "image/png"
-    "jpg", "jpeg" -> "image/jpeg"
-    "gif" -> "image/gif"
-    "svg" -> "image/svg+xml"
-    "webp" -> "image/webp"
-    else -> "application/octet-stream"
+    return ServedBody(code = def.statusCode, headers = servedHeaders(def.headers, file, bytes), body = bytes)
 }

@@ -8,6 +8,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.graphics.painter.BitmapPainter
@@ -33,6 +34,7 @@ import com.venbiasa.wailo.engine.pairing.InMemoryPairingKeyStore
 import com.venbiasa.wailo.engine.pairing.PairingCode
 import com.venbiasa.wailo.engine.pairing.PairingManager
 import com.venbiasa.wailo.engine.resolveLanAddress
+import com.venbiasa.wailo.protocol.BreakpointPhase
 import com.venbiasa.wailo.shared.BreakpointNode
 import com.venbiasa.wailo.shared.CaptureFilterState
 import com.venbiasa.wailo.shared.DeviceConnectionStatus
@@ -48,8 +50,14 @@ import com.venbiasa.wailo.shared.PairingRefusal
 import com.venbiasa.wailo.shared.PairingState
 import com.venbiasa.wailo.shared.PausedFlow
 import com.venbiasa.wailo.shared.PickedFile
+import com.venbiasa.wailo.shared.RuleNode
+import com.venbiasa.wailo.shared.SeedNode
+import com.venbiasa.wailo.shared.SeedRuleDef
 import com.venbiasa.wailo.shared.WailoApp
 import com.venbiasa.wailo.shared.WailoBreakpointWindowContent
+import com.venbiasa.wailo.shared.consume
+import com.venbiasa.wailo.shared.firstMatch
+import com.venbiasa.wailo.shared.rulesForMatch
 import com.venbiasa.wailo.shared.theme.TextScale
 import com.venbiasa.wailo.desktop.pairing.KeychainPairingKeyStore
 import com.venbiasa.wailo.desktop.pairing.PairingQr
@@ -395,6 +403,53 @@ private fun runWailo() = application {
         )
     }
 
+    // Seed layout: host-owned and persisted like the two above. Seeds never reach a device — they are
+    // spent here, on the desktop, to answer a hold — so unlike Map Local and breakpoints there is nothing
+    // to compile or push (ADR-0041).
+    var seedNodes by remember { mutableStateOf(SeedStore.load()) }
+    val onSeedLayoutChange = { next: List<SeedNode> ->
+        val prev = seedNodes
+        seedNodes = next
+        SeedStore.reconcileRemovedBodies(prev, next)
+        SeedStore.save(next)
+    }
+    var seedsEnabled by remember { mutableStateOf(SeedStore.loadEnabled()) }
+    val onSeedsEnabledChange = { next: Boolean ->
+        seedsEnabled = next
+        SeedStore.saveEnabled(next)
+    }
+
+    // The armed seed queue: what Fill loaded, minus whatever has been spent. Session state on purpose —
+    // it outlives closing and reopening the breakpoint window (so a queue armed for a flow isn't lost to a
+    // stray close) but not a restart, since a half-spent queue is a snapshot of a run in progress, not a
+    // preference (ADR-0041).
+    var seedQueue by remember { mutableStateOf<List<SeedRuleDef>>(emptyList()) }
+    // Bumped after an import so the viewer reveals it by opening the Seed panel.
+    var openSeedPanelRequests by remember { mutableStateOf(0) }
+    // Copies a Map Local rule into the Seed list (its row's right-click "Seed…"). It lands here rather
+    // than in `shared` because it spans both layouts and copies a body file — all host-owned. The seed is
+    // appended, so it takes the lowest priority and an existing armed queue's order is undisturbed.
+    val onSeedFromMapLocalRule = { rule: MapLocalRuleDef ->
+        val seed = SeedRuleDef(
+            id = SeedRuleDef.newId(),
+            urlPattern = rule.urlPattern,
+            method = rule.method,
+            statusCode = rule.statusCode,
+            headers = rule.headers,
+        )
+        scope.launch {
+            // Copying the body is a file read + write of an arbitrarily large payload, so it goes off the
+            // UI thread; the layout is committed after, so the seed is never listed without its body.
+            withContext(Dispatchers.IO) {
+                val contentType = seed.headers.firstOrNull { it.name.equals("Content-Type", ignoreCase = true) }?.value
+                SeedStore.importBody(seed.id, contentType, MapLocalStore.loadServedBody(rule))
+            }
+            onSeedLayoutChange(seedNodes + RuleNode(seed))
+            openSeedPanelRequests += 1
+        }
+        Unit
+    }
+
     // Exchanges currently held at a breakpoint. Bridged from the engine row to the viewer's model at
     // this boundary (like [entries] above), since `shared` must not depend on `engine`.
     val paused by engine.pausedExchanges.collectAsState()
@@ -410,6 +465,54 @@ private fun runWailo() = application {
                 response = it.response,
             )
         }
+    }
+
+    // The breakpoint window is user-owned (ADR-0041): opened from the Breakpoints panel or by a hold that
+    // needs a human, closed only by the user. It used to exist exactly while something was held, which
+    // can't work now that a seed-answered hold must not flash a window open, and that arming seeds
+    // requires the window before any traffic arrives.
+    var breakpointWindowOpen by remember { mutableStateOf(false) }
+    // Bumped whenever the window should be raised. Opening an already-open window is a no-op on the flag
+    // above, so "open it" from the panel would look broken once it's buried; the inspector bumps this too
+    // when a hold arrives behind another window.
+    var raiseBreakpointWindow by remember { mutableStateOf(0) }
+
+    // Triage each hold once, on arrival: a response-phase hold that a queued seed matches is answered
+    // here and the seed spent; everything else — a request-phase hold, or a response with no matching
+    // seed — needs a human, so the window opens. Only *automatic* matching is arrival-only; Fill sweeps
+    // what's already waiting, because that one is an explicit ask (ADR-0044).
+    val triaged = remember { mutableSetOf<String>() }
+    // Keyed on Unit and fed through a State, rather than keyed on `pausedFlows`: a hold is marked seen
+    // before its body read, so a re-key mid-decision (which a *second* hold arriving would cause) would
+    // cancel the first hold's triage after it had been marked — leaving a device blocked on a hold that
+    // is never resolved and never surfaced. `collect`, not `collectLatest`, for the same reason.
+    val currentPausedFlows = rememberUpdatedState(pausedFlows)
+    LaunchedEffect(Unit) {
+        snapshotFlow { currentPausedFlows.value }.collect { holds ->
+            holds.forEach { hold ->
+                if (!triaged.add(hold.correlationId)) return@forEach
+                val spent = if (seedsEnabled) spendSeedOn(engine, seedQueue, hold) else null
+                if (spent != null) seedQueue = spent else breakpointWindowOpen = true
+            }
+            // Forget resolved holds so the set can't grow unbounded across a long session.
+            triaged.retainAll(holds.mapTo(mutableSetOf()) { it.correlationId })
+        }
+    }
+
+    // Fill arms the queue from the enabled seeds — flattened out of their groups, in layout order, "don't
+    // bring the group, keep the order" — and then spends it against whatever is already waiting. Arming
+    // late is the normal case: you notice a hold sitting there and only then load the seeds for it, and a
+    // queue that arrives a moment too late to be useful is a queue you'd have to re-trigger the traffic
+    // for (ADR-0044). Re-filling replaces the queue, which is how a partly-spent sequence is reset mid-run.
+    val onFillSeeds = {
+        val waiting = pausedFlows
+        scope.launch {
+            seedQueue = if (seedsEnabled) seedNodes.rulesForMatch() else emptyList()
+            // Read the queue back each time rather than folding a local copy: the sweep suspends on each
+            // seed's body read, and a hold arriving in that gap is triaged against the same queue.
+            waiting.forEach { hold -> spendSeedOn(engine, seedQueue, hold)?.let { seedQueue = it } }
+        }
+        Unit
     }
 
     // Docked tool-panel width, host-owned and persisted like the theme/scale above, but stored as a
@@ -551,29 +654,41 @@ private fun runWailo() = application {
             onPickMapLocalFile = { chooseMapLocalFile(window) },
             mapLocalEnabled = mapLocalEnabled,
             onMapLocalEnabledChange = onMapLocalEnabledChange,
+            onSeedFromMapLocalRule = onSeedFromMapLocalRule,
             breakpointNodes = breakpointNodes,
             onBreakpointLayoutChange = onBreakpointLayoutChange,
             breakpointsEnabled = breakpointsEnabled,
             onBreakpointsEnabledChange = onBreakpointsEnabledChange,
+            onOpenBreakpointWindow = {
+                breakpointWindowOpen = true
+                raiseBreakpointWindow += 1
+            },
+            seedNodes = seedNodes,
+            onSeedLayoutChange = onSeedLayoutChange,
+            onLoadSeedBody = { seed -> withContext(Dispatchers.IO) { SeedStore.loadBody(seed) } },
+            onSaveSeedBody = { seed, bytes -> withContext(Dispatchers.IO) { SeedStore.saveBody(seed, bytes) } },
+            seedsEnabled = seedsEnabled,
+            onSeedsEnabledChange = onSeedsEnabledChange,
+            openSeedPanelSignal = openSeedPanelRequests,
             toolPanelWidthRatio = toolPanelWidthRatio,
             onToolPanelWidthRatioChange = { toolPanelWidthRatio = it },
         )
     }
 
     // The paused-traffic inspector is its own OS window (ADR-0034), not a modal over the main window, so
-    // captured traffic stays browsable while a hold is open. Its existence is derived from the engine's
-    // holds: it opens on the first hit and closes once the last hold is resolved. Concurrent holds show
-    // as a queue the user resolves in any order.
-    if (pausedFlows.isNotEmpty()) {
+    // captured traffic stays browsable while a hold is open. It is user-owned (ADR-0041): opened from the
+    // Breakpoints panel or by a hold needing attention, and closed only by the user — resolving the last
+    // hold leaves it open on the seed list, ready for the next run. Concurrent holds show as a queue the
+    // user resolves in any order.
+    if (breakpointWindowOpen) {
         // Seeded from — and persisted back to — its own geometry keys, so it reopens at the size/position
         // the user last left it (across app restarts), exactly like the main window.
         val breakpointWindowState = rememberWindowState(
             size = WindowStateStore.Breakpoint.loadSize(DefaultBreakpointWindowSize),
             position = WindowStateStore.Breakpoint.loadPosition(),
         )
-        // Persist continuously (crash/force-quit safe) and once more on dispose — the window vanishes both
-        // when its close button clears the holds and when the last hold is resolved from the editor, and
-        // onDispose covers either path so the final geometry is never lost inside the debounce window.
+        // Persist continuously (crash/force-quit safe) and once more on dispose, so the final geometry is
+        // never lost inside the debounce window when the user closes it.
         LaunchedEffect(breakpointWindowState) {
             snapshotFlow { Triple(breakpointWindowState.size, breakpointWindowState.position, breakpointWindowState.placement) }
                 .filter { (_, _, placement) -> placement == WindowPlacement.Floating }
@@ -588,11 +703,12 @@ private fun runWailo() = application {
             }
         }
         Window(
-            // The window's presence is derived from `pausedFlows`, so the only way its close button can
-            // take effect is to clear the holds. Do it the safe way — proceed each with its original bytes,
-            // the same fail-open as a desktop disconnect (ADR-0027) — rather than aborting the app's calls.
+            // Closing the window abandons any hold still open in it, so release them the safe way —
+            // proceed each with its original bytes, the same fail-open as a desktop disconnect
+            // (ADR-0027) — rather than aborting the app's calls or leaving devices hanging.
             onCloseRequest = {
                 pausedFlows.forEach { engine.resumeBreakpoint(it.correlationId, null, null) }
+                breakpointWindowOpen = false
             },
             state = breakpointWindowState,
             title = if (pausedFlows.size > 1) "Breakpoints (${pausedFlows.size})" else "Breakpoint",
@@ -605,8 +721,19 @@ private fun runWailo() = application {
                     MinBreakpointWindowSize.height.value.toInt(),
                 )
             }
+            // Raise on every request, including the first composition — a window opened on demand should
+            // land in front of whatever the user was looking at.
+            LaunchedEffect(raiseBreakpointWindow) {
+                window.toFront()
+                window.requestFocus()
+            }
             WailoBreakpointWindowContent(
                 pausedFlows = pausedFlows,
+                seeds = seedQueue,
+                onFillSeeds = onFillSeeds,
+                onClearSeeds = { seedQueue = emptyList() },
+                onLoadSeedBody = { seed -> withContext(Dispatchers.IO) { SeedStore.loadBody(seed) } },
+                onBringToFront = { raiseBreakpointWindow += 1 },
                 darkTheme = darkTheme,
                 textScale = textScale,
                 onResumeBreakpoint = { correlationId, editedRequest, editedResponse ->
@@ -616,6 +743,29 @@ private fun runWailo() = application {
             )
         }
     }
+}
+
+/**
+ * Answers [hold] with the first seed in [queue] that matches it and returns the queue minus the seed it
+ * spent, or null when nothing answered — which leaves both the hold and the queue exactly as they were.
+ * Shared by the arrival triage and Fill's sweep so the two can't drift on what a seed is allowed to answer
+ * (ADR-0041/0044).
+ *
+ * Three ways to answer nothing, all of them a hold the user has to take: a request-phase hold, since the
+ * wire honours an edited response only on a RESPONSE-phase hit; no seed matching the URL/method; or a seed
+ * whose body file has gone missing, where resolving the hold with an empty body would be a silent, wrong
+ * success.
+ */
+private suspend fun spendSeedOn(
+    engine: WailoEngine,
+    queue: List<SeedRuleDef>,
+    hold: PausedFlow,
+): List<SeedRuleDef>? {
+    if (hold.phase != BreakpointPhase.BREAKPOINT_PHASE_RESPONSE) return null
+    val seed = queue.firstMatch(hold.request?.url.orEmpty(), hold.request?.method.orEmpty()) ?: return null
+    val response = withContext(Dispatchers.IO) { SeedStore.seedResponse(seed) } ?: return null
+    engine.resumeBreakpoint(hold.correlationId, null, response)
+    return queue.consume(seed)
 }
 
 private fun mergeDevices(

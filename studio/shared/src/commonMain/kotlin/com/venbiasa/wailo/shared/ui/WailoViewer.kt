@@ -3,9 +3,6 @@ package com.venbiasa.wailo.shared.ui
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
-import androidx.compose.foundation.gestures.Orientation
-import androidx.compose.foundation.gestures.draggable
-import androidx.compose.foundation.gestures.rememberDraggableState
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -50,15 +47,18 @@ import com.venbiasa.wailo.shared.PairingAction
 import com.venbiasa.wailo.shared.PairingState
 import com.venbiasa.wailo.shared.FilterKey
 import com.venbiasa.wailo.shared.FlowEntry
-import com.venbiasa.wailo.shared.MapLocalHeader
 import com.venbiasa.wailo.shared.MapLocalNode
 import com.venbiasa.wailo.shared.MapLocalRuleDef
 import com.venbiasa.wailo.shared.PickedFile
+import com.venbiasa.wailo.shared.ResponseHeader
+import com.venbiasa.wailo.shared.SeedNode
+import com.venbiasa.wailo.shared.SeedRuleDef
 import com.venbiasa.wailo.shared.TrafficFilter
 import com.venbiasa.wailo.shared.format.requestHost
 import com.venbiasa.wailo.shared.matches
 import com.venbiasa.wailo.shared.resources.Res
 import com.venbiasa.wailo.shared.resources.ic_breakpoint
+import com.venbiasa.wailo.shared.resources.ic_content_paste_go
 import com.venbiasa.wailo.shared.resources.ic_dark_mode
 import com.venbiasa.wailo.shared.resources.ic_delete
 import com.venbiasa.wailo.shared.resources.ic_devices
@@ -77,7 +77,7 @@ import org.jetbrains.compose.resources.vectorResource
  * to reason about two side panels, and each opens at the one host-owned [WailoViewer] width ratio. Modeled
  * as one value rather than a flag per panel so "two panels open at once" isn't a state that can be reached.
  */
-private enum class ToolPanel { CaptureFilter, MapLocal, Breakpoints, Devices, Settings }
+private enum class ToolPanel { CaptureFilter, MapLocal, Breakpoints, Seed, Devices, Settings }
 
 // Common HTTP verbs lead the filter's Method menu (in this order); anything else follows alphabetically.
 private val MethodOrder = listOf("GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS")
@@ -122,10 +122,19 @@ internal fun WailoViewer(
     onPickMapLocalFile: suspend () -> PickedFile?,
     mapLocalEnabled: Boolean,
     onMapLocalEnabledChange: (Boolean) -> Unit,
+    onSeedFromMapLocalRule: (MapLocalRuleDef) -> Unit,
     breakpointNodes: List<BreakpointNode>,
     onBreakpointLayoutChange: (List<BreakpointNode>) -> Unit,
     breakpointsEnabled: Boolean,
     onBreakpointsEnabledChange: (Boolean) -> Unit,
+    onOpenBreakpointWindow: () -> Unit,
+    seedNodes: List<SeedNode>,
+    onSeedLayoutChange: (List<SeedNode>) -> Unit,
+    onLoadSeedBody: suspend (SeedRuleDef) -> ByteArray,
+    onSaveSeedBody: suspend (SeedRuleDef, ByteArray) -> Unit,
+    seedsEnabled: Boolean,
+    onSeedsEnabledChange: (Boolean) -> Unit,
+    openSeedPanelSignal: Int,
     toolPanelWidthRatio: Float,
     onToolPanelWidthRatioChange: (Float) -> Unit,
 ) {
@@ -196,16 +205,32 @@ internal fun WailoViewer(
         }
     }
 
-    // Which tool panel is docked, plus the rule drafts a traffic row can seed (Map Local's, with its body,
-    // and a breakpoint's): transient view state (like the selection/filter above). The host owns every
-    // panel's contents and their persistence — the panels only render them (ADR-0013/0021). Every panel
-    // shares the one host-owned [toolPanelWidthRatio], so a width dragged for any of them is the width the
-    // next one opens at, and it persists across restarts. It's a fraction of the window, not a fixed dp, so
-    // the panel scales with the window (clamped to keep both panel and content usable, see ToolPanelLayout).
+    // Which tool panel is docked, plus the rule drafts a traffic row can seed (Map Local's and Seed's, both
+    // with a body, and a breakpoint's): transient view state (like the selection/filter above). The host
+    // owns every panel's contents and their persistence — the panels only render them (ADR-0013/0021).
+    // Every panel shares the one host-owned [toolPanelWidthRatio], so a width dragged for any of them is
+    // the width the next one opens at, and it persists across restarts. It's a fraction of the window, not
+    // a fixed dp, so the panel scales with the window (clamped to keep both panel and content usable, see
+    // ToolPanelLayout).
     var openPanel by remember { mutableStateOf<ToolPanel?>(null) }
     var mapLocalDraft by remember { mutableStateOf<MapLocalRuleDef?>(null) }
     var mapLocalBodySeed by remember { mutableStateOf<ByteArray?>(null) }
+    var seedDraft by remember { mutableStateOf<SeedRuleDef?>(null) }
+    var seedBodySeed by remember { mutableStateOf<ByteArray?>(null) }
     var breakpointDraft by remember { mutableStateOf<BreakpointRuleDef?>(null) }
+    // Importing a Map Local rule as a seed is the host's job (it owns both layouts and the body files),
+    // so it reports back with a bumped counter rather than a value — the import is already persisted by
+    // then, and this only reveals it. Skipped at 0 so the initial composition doesn't open the panel
+    // unasked, the same handshake the filter bar's Cmd+F signal uses.
+    LaunchedEffect(openSeedPanelSignal) {
+        if (openSeedPanelSignal > 0) {
+            // The import is a finished seed, so this lands on the list to show it there — clear any draft
+            // a traffic row left behind, or the panel would open on that stale editor instead.
+            seedDraft = null
+            seedBodySeed = null
+            openPanel = ToolPanel.Seed
+        }
+    }
     val density = LocalDensity.current
     // Somewhere for the caret to land when the filter bar closes, so the keystrokes after it don't fall
     // into the field that just disappeared. Focusable rather than a bare Box because only a focus target
@@ -307,6 +332,20 @@ internal fun WailoViewer(
                                     mapLocalBodySeed = seed
                                     openPanel = ToolPanel.MapLocal
                                 },
+                                // Same seam for Seed, plus the observed status code — a seed replays this
+                                // exchange back into a hold, so the code it came back with is part of what
+                                // is being replayed, where a Map Local rule starts at 200.
+                                onSeedFromUrl = { url, method, code, responseHeaders, seed ->
+                                    seedDraft = SeedRuleDef(
+                                        id = SeedRuleDef.newId(),
+                                        urlPattern = url,
+                                        method = method,
+                                        statusCode = code.takeIf { it > 0 } ?: 200,
+                                        headers = seededHeaders(responseHeaders),
+                                    )
+                                    seedBodySeed = seed
+                                    openPanel = ToolPanel.Seed
+                                },
                                 // Same seam for breakpoints: the row's exact URL + method become a draft
                                 // rule and the panel opens on its editor. Nothing about a captured row says
                                 // which phase to pause, so the draft keeps the model's default (response).
@@ -398,6 +437,21 @@ internal fun WailoViewer(
                                 onLoadBody = onLoadMapLocalBody,
                                 onSaveBody = onSaveMapLocalBody,
                                 onPickFile = onPickMapLocalFile,
+                                onSeedFromRule = onSeedFromMapLocalRule,
+                            )
+                            ToolPanel.Seed -> SeedManager(
+                                nodes = seedNodes,
+                                onLayoutChange = onSeedLayoutChange,
+                                initialDraft = seedDraft,
+                                initialBodySeed = seedBodySeed,
+                                enabled = seedsEnabled,
+                                onEnabledChange = onSeedsEnabledChange,
+                                onClose = closePanel,
+                                onLoadBody = onLoadSeedBody,
+                                onSaveBody = onSaveSeedBody,
+                                // The picker is feature-agnostic — it just reads a file — so both
+                                // response-authoring panels share the host's one implementation.
+                                onPickFile = onPickMapLocalFile,
                             )
                             ToolPanel.CaptureFilter -> CaptureFilterManager(
                                 filter = captureFilter,
@@ -410,6 +464,7 @@ internal fun WailoViewer(
                                 initialDraft = breakpointDraft,
                                 enabled = breakpointsEnabled,
                                 onEnabledChange = onBreakpointsEnabledChange,
+                                onOpenWindow = onOpenBreakpointWindow,
                                 onClose = closePanel,
                             )
                             ToolPanel.Devices -> DevicesManager(
@@ -452,10 +507,14 @@ internal fun WailoViewer(
                         // Rail buttons are toggles: picking the open panel closes it.
                         openPanel = if (openPanel == panel) null else panel
                         // Reaching a rule panel from the rail lands on its rule list; only a row's
-                        // "Map Local…"/"Breakpoints…" opens one on a seeded draft.
+                        // "Map Local…"/"Seed…"/"Breakpoints…" opens one on a seeded draft.
                         if (panel == ToolPanel.MapLocal) {
                             mapLocalDraft = null
                             mapLocalBodySeed = null
+                        }
+                        if (panel == ToolPanel.Seed) {
+                            seedDraft = null
+                            seedBodySeed = null
                         }
                         if (panel == ToolPanel.Breakpoints) breakpointDraft = null
                     },
@@ -478,17 +537,18 @@ private val NonSeededHeaderNames = setOf(
     "connection",
 )
 
-// Builds a seeded rule's headers from the captured response: keep the real headers so the mock starts
-// close to what was observed, drop the transfer-only ones, and guarantee a Content-Type (Map Local is
-// JSON-focused, ADR-0021) when the response carried none.
-private fun seededHeaders(responseHeaders: List<Header>): List<MapLocalHeader> {
+// Builds a seeded rule's headers from the captured response — shared by Map Local and Seed, which author
+// the same response shape: keep the real headers so the mock starts close to what was observed, drop the
+// transfer-only ones, and guarantee a Content-Type (the editor is JSON-focused, ADR-0021) when the
+// response carried none.
+private fun seededHeaders(responseHeaders: List<Header>): List<ResponseHeader> {
     val kept = responseHeaders
         .filterNot { it.name.lowercase() in NonSeededHeaderNames }
-        .map { MapLocalHeader(it.name, it.value_) }
+        .map { ResponseHeader(it.name, it.value_) }
     return if (kept.any { it.name.equals("Content-Type", ignoreCase = true) }) {
         kept
     } else {
-        kept + MapLocalHeader("Content-Type", "application/json")
+        kept + ResponseHeader("Content-Type", "application/json")
     }
 }
 
@@ -542,6 +602,14 @@ private fun ToolRail(
             contentDescription = "Breakpoints",
             selected = openPanel == ToolPanel.Breakpoints,
             onClick = { onSelectPanel(ToolPanel.Breakpoints) },
+        )
+        // Seed follows Breakpoints because it only exists to answer them (ADR-0041); the paste-go glyph
+        // is the feature — a prepared response handed to a hold.
+        ToolRailButton(
+            icon = Res.drawable.ic_content_paste_go,
+            contentDescription = "Seed",
+            selected = openPanel == ToolPanel.Seed,
+            onClick = { onSelectPanel(ToolPanel.Seed) },
         )
         ToolRailButton(
             icon = Res.drawable.ic_devices,
@@ -599,25 +667,6 @@ private fun ToolRailButton(
     }
 }
 
-// The seam between the content and the docked tool panel: a visible grip with a wide invisible grab
-// strip and a horizontal resize cursor on hover, mirroring the detail panel's vertical [DragHandle].
-@Composable
-private fun PanelResizeHandle(onDragDelta: (Float) -> Unit) {
-    Box(
-        Modifier.fillMaxHeight()
-            .width(9.dp)
-            .background(MaterialTheme.colorScheme.surfaceVariant)
-            .draggable(
-                orientation = Orientation.Horizontal,
-                state = rememberDraggableState { onDragDelta(it) },
-            )
-            .resizeCursor(ResizeAxis.Horizontal),
-        contentAlignment = Alignment.Center,
-    ) {
-        Box(Modifier.width(3.dp).height(36.dp).background(MaterialTheme.colorScheme.outline))
-    }
-}
-
 @Composable
 private fun TopBar(
     listenAddress: String,
@@ -672,22 +721,5 @@ private fun TopBar(
             style = MaterialTheme.typography.labelMedium,
             color = if (listening) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error,
         )
-    }
-}
-
-@Composable
-private fun DragHandle(onDragDelta: (Float) -> Unit) {
-    Box(
-        Modifier.fillMaxWidth()
-            .height(9.dp)
-            .background(MaterialTheme.colorScheme.surfaceVariant)
-            .draggable(
-                orientation = Orientation.Vertical,
-                state = rememberDraggableState { onDragDelta(it) },
-            )
-            .resizeCursor(ResizeAxis.Vertical),
-        contentAlignment = Alignment.Center,
-    ) {
-        Box(Modifier.width(36.dp).height(3.dp).background(MaterialTheme.colorScheme.outline))
     }
 }

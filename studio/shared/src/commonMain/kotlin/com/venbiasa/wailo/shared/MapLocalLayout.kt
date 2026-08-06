@@ -122,18 +122,18 @@ object MapLocalLayoutCodec {
         )
     }
 
-    private fun encodeHeaders(headers: List<MapLocalHeader>): String =
+    private fun encodeHeaders(headers: List<ResponseHeader>): String =
         headers.filter { it.name.isNotBlank() }
             .joinToString(HEADER_SEP) { enc(it.name) + HEADER_KV + enc(it.value) }
 
     // A legacy line's field[6] once held a lone Base64 Content-Type; a Base64 token has no ":" separator,
     // so its absence marks that legacy shape — migrate it to a Content-Type header. Blank = no headers.
-    private fun decodeHeaders(field: String): List<MapLocalHeader> {
+    private fun decodeHeaders(field: String): List<ResponseHeader> {
         if (field.isBlank()) return emptyList()
-        if (!field.contains(HEADER_KV)) return listOf(MapLocalHeader("Content-Type", dec(field)))
+        if (!field.contains(HEADER_KV)) return listOf(ResponseHeader("Content-Type", dec(field)))
         return field.split(HEADER_SEP).mapNotNull { part ->
             val kv = part.split(HEADER_KV)
-            if (kv.size != 2) null else MapLocalHeader(dec(kv[0]), dec(kv[1]))
+            if (kv.size != 2) null else ResponseHeader(dec(kv[0]), dec(kv[1]))
         }
     }
 

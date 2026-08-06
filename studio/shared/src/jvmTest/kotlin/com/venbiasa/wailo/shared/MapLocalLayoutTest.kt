@@ -115,7 +115,7 @@ class MapLocalLayoutTest {
             GroupNode(
                 group("g1", name = "Auth", enabled = false),
                 listOf(
-                    rule("r2", name = "Login").copy(method = "POST", statusCode = 201, headers = listOf(MapLocalHeader("Content-Type", "application/json"))),
+                    rule("r2", name = "Login").copy(method = "POST", statusCode = 201, headers = listOf(ResponseHeader("Content-Type", "application/json"))),
                     rule("r3", name = "Me"),
                 ),
             ),

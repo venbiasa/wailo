@@ -49,18 +49,22 @@ import com.venbiasa.wailo.shared.resources.Res
 import com.venbiasa.wailo.shared.resources.ic_arrow_back
 import com.venbiasa.wailo.shared.resources.ic_arrow_drop_down
 import com.venbiasa.wailo.shared.resources.ic_note_add
+import com.venbiasa.wailo.shared.resources.ic_open_in_new
 import com.venbiasa.wailo.shared.setRuleEnabled
 import com.venbiasa.wailo.shared.upsertRule
 import org.jetbrains.compose.resources.vectorResource
 
 /**
  * The breakpoints panel: the rules that pause matching traffic so it can be edited live in the paused
- * editor (ADR-0027). A grouped, drag-orderable rule list (the shared [GroupedRuleListPage], same as Map
- * Local, ADR-0026) that falls through to a rule editor. Stateless over its inputs — the host owns [nodes]
- * (the ordered layout) and its persistence, and pushes the active rules to devices; this renders them and
- * hands back a new layout via [onLayoutChange] for any structural change. A rule matches on a URL wildcard
- * (`*`) + optional method and can break on the request (before it's sent), the response (before the app
- * sees it), or both. It fills whatever surface it's given (the studio's right tool panel).
+ * editor (ADR-0027). A grouped rule list (the shared [GroupedRuleListPage], same as Map Local, ADR-0026)
+ * that falls through to a rule editor. Stateless over its inputs — the host owns [nodes] and its
+ * persistence, and pushes the active rules to devices; this renders them and hands back a new layout via
+ * [onLayoutChange] for any structural change. A rule matches on a URL wildcard (`*`) + optional method and
+ * can break on the request (before it's sent), the response (before the app sees it), or both. It fills
+ * whatever surface it's given (the studio's right tool panel).
+ *
+ * Unlike Map Local and Seed, the list isn't drag-orderable: every matching rule pauses the exchange, so
+ * there is no first-match to prioritize and ordering would be a control that changes nothing.
  *
  * [enabled] is the feature master (ADR-0030): off dims the list and disables every rule/group switch (and
  * the editor's), their remembered state kept, while the host pushes no rules — so breakpoints go inert
@@ -68,6 +72,10 @@ import org.jetbrains.compose.resources.vectorResource
  *
  * [initialDraft] seeds the editor: non-null opens straight into the form (used when launched from a traffic
  * row so the URL/method are pre-filled, mirroring Map Local), null shows the list.
+ *
+ * [onOpenWindow] raises the paused-exchange window from the list header. The window used to exist only
+ * while something was held; it's now user-owned (ADR-0041), and this is where you open it with nothing
+ * paused — to arm the seed queue before the traffic you want it to answer arrives.
  */
 @Composable
 internal fun BreakpointManager(
@@ -76,6 +84,7 @@ internal fun BreakpointManager(
     initialDraft: BreakpointRuleDef? = null,
     enabled: Boolean = true,
     onEnabledChange: (Boolean) -> Unit = {},
+    onOpenWindow: () -> Unit = {},
     onClose: () -> Unit = {},
 ) {
     // Which groups are collapsed — transient view state, hoisted so it survives entering the editor and
@@ -107,6 +116,14 @@ internal fun BreakpointManager(
             onEditRule = { editing = it },
             onNodesChange = onLayoutChange,
             onClose = onClose,
+            headerActions = {
+                PanelIconButton(
+                    icon = Res.drawable.ic_open_in_new,
+                    contentDescription = "Open breakpoint window",
+                    onClick = onOpenWindow,
+                )
+            },
+            reorderable = false,
         ) { rule -> BreakpointRuleContent(rule) }
     } else {
         // The enabled toggle is shared with the list row, so for a persisted rule it commits immediately

@@ -1,6 +1,9 @@
 package com.venbiasa.wailo.shared.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.foundation.gestures.draggable
+import androidx.compose.foundation.gestures.rememberDraggableState
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -99,6 +102,48 @@ internal fun RowDivider(color: Color = MaterialTheme.colorScheme.outlineVariant)
 internal fun ColumnDivider(color: Color = MaterialTheme.colorScheme.outlineVariant) {
     Box(Modifier.fillMaxHeight().width(1.dp).background(color))
 }
+
+// The two resize seams, one per axis: a visible grip in a wider invisible grab strip, with the matching
+// resize cursor on hover. Shared rather than per-screen so every draggable split in the studio — the
+// docked tool panel, the traffic detail pane, the breakpoint window's panels — grips and looks identical.
+// The caller owns the size being dragged and its clamping; these only report the delta in pixels.
+@Composable
+internal fun PanelResizeHandle(onDragDelta: (Float) -> Unit) {
+    Box(
+        Modifier.fillMaxHeight()
+            .width(ResizeHandleThickness)
+            .background(MaterialTheme.colorScheme.surfaceVariant)
+            .draggable(
+                orientation = Orientation.Horizontal,
+                state = rememberDraggableState { onDragDelta(it) },
+            )
+            .resizeCursor(ResizeAxis.Horizontal),
+        contentAlignment = Alignment.Center,
+    ) {
+        Box(Modifier.width(3.dp).height(36.dp).background(MaterialTheme.colorScheme.outline))
+    }
+}
+
+@Composable
+internal fun DragHandle(onDragDelta: (Float) -> Unit) {
+    Box(
+        Modifier.fillMaxWidth()
+            .height(ResizeHandleThickness)
+            .background(MaterialTheme.colorScheme.surfaceVariant)
+            .draggable(
+                orientation = Orientation.Vertical,
+                state = rememberDraggableState { onDragDelta(it) },
+            )
+            .resizeCursor(ResizeAxis.Vertical),
+        contentAlignment = Alignment.Center,
+    ) {
+        Box(Modifier.width(36.dp).height(3.dp).background(MaterialTheme.colorScheme.outline))
+    }
+}
+
+// A layout that splits its space around a handle has to subtract the handle's own thickness to keep the
+// two sides adding up, so the value is named rather than repeated as a literal at each site.
+internal val ResizeHandleThickness = 9.dp
 
 // Monospace styles keep the numeric columns and payloads tabular; chrome/text stays Noto Sans.
 @Composable
