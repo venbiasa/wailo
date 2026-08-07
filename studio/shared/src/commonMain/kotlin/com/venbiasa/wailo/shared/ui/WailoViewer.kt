@@ -29,6 +29,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -66,9 +67,11 @@ import com.venbiasa.wailo.shared.resources.ic_light_mode
 import com.venbiasa.wailo.shared.resources.ic_lock
 import com.venbiasa.wailo.shared.resources.ic_pause
 import com.venbiasa.wailo.shared.resources.ic_play_arrow
+import com.venbiasa.wailo.shared.resources.ic_refresh
 import com.venbiasa.wailo.shared.resources.ic_rule
 import com.venbiasa.wailo.shared.resources.ic_settings
 import com.venbiasa.wailo.shared.theme.LocalWailoColors
+import kotlinx.coroutines.launch
 import org.jetbrains.compose.resources.DrawableResource
 import org.jetbrains.compose.resources.vectorResource
 
@@ -95,6 +98,7 @@ internal fun WailoViewer(
     listenAddress: String,
     listenPort: Int,
     listening: Boolean,
+    onRetryListen: suspend () -> Unit,
     portError: String?,
     onApplyPort: (Int) -> Unit,
     devices: List<DeviceInfo>,
@@ -254,6 +258,7 @@ internal fun WailoViewer(
                         TopBar(
                             listenAddress = listenAddress,
                             listening = listening,
+                            onRetryListen = onRetryListen,
                             capturing = capturing,
                             onToggleCapture = onToggleCapture,
                             onClear = onClear,
@@ -671,10 +676,13 @@ private fun ToolRailButton(
 private fun TopBar(
     listenAddress: String,
     listening: Boolean,
+    onRetryListen: suspend () -> Unit,
     capturing: Boolean,
     onToggleCapture: () -> Unit,
     onClear: () -> Unit,
 ) {
+    val scope = rememberCoroutineScope()
+    var retrying by remember { mutableStateOf(false) }
     Row(
         Modifier.fillMaxWidth()
             .height(TopBarHeight)
@@ -721,5 +729,31 @@ private fun TopBar(
             style = MaterialTheme.typography.labelMedium,
             color = if (listening) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error,
         )
+        // The engine retakes a port it lost on its own, but not one it never got — something else was
+        // holding it, and only the user knows when that's over. Offered here rather than only in Settings
+        // because this is where the failure is visible, and it's a retry, not a setting to change.
+        if (!listening) {
+            IconButton(
+                onClick = {
+                    scope.launch {
+                        retrying = true
+                        try {
+                            onRetryListen()
+                        } finally {
+                            retrying = false
+                        }
+                    }
+                },
+                enabled = !retrying,
+                modifier = Modifier.size(28.dp),
+            ) {
+                Icon(
+                    imageVector = vectorResource(Res.drawable.ic_refresh),
+                    contentDescription = "Retry binding the capture port",
+                    tint = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.size(16.dp),
+                )
+            }
+        }
     }
 }

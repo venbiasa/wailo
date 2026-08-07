@@ -96,6 +96,13 @@ final class LoopbackWebSocketServer {
         connections = []
     }
 
+    /// Hangs up on the client but keeps accepting, which is what a device losing the link — iOS tearing
+    /// an app's sockets down as it suspends — looks like from this side.
+    func dropConnections() {
+        connections.forEach { $0.cancel() }
+        connections = []
+    }
+
     func push(_ data: Data) {
         guard let connection = connections.last else { return }
         let metadata = NWProtocolWebSocket.Metadata(opcode: .binary)

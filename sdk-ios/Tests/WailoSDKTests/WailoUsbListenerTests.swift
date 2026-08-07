@@ -63,6 +63,38 @@ final class WailoUsbListenerTests: XCTestCase {
         wait(for: [hello], timeout: 10)
     }
 
+    /// USB has to come up on its own once whatever blocked the bind goes away.
+    ///
+    /// The reported symptom is plugging the cable in after a launch where discovery found nothing and
+    /// getting nothing until the app is killed. Studio reaches the device by dialling this port, so a
+    /// bind that failed at launch and was never retried is indistinguishable, from the outside, from a
+    /// broken cable. A held port stands in here for the real blockers — an unanswered Local Network
+    /// prompt, a stack that is not up yet on a cold launch — because all this needs to be is a bind
+    /// that fails and then stops failing.
+    func testListenerRebindsItselfOnceTheBlockedPortIsFree() throws {
+        let squatter = PortSquatter()
+        try squatter.hold(WailoUsb.port)
+
+        let hello = Hello(device_name: "usb-heal", app_id: "com.test.usb.heal", platform: "ios")
+        let listener = WailoUsbListener(hello: hello)
+        listener.start()
+        defer { listener.stopAndWait() }
+
+        Thread.sleep(forTimeInterval: 1)
+        XCTAssertFalse(listener.debugIsListening, "a held port cannot be bound — otherwise this proves nothing")
+
+        squatter.release()
+
+        waitUntil(timeout: 30) { listener.debugIsListening }
+        let client = try connectUsbStudio()
+        defer { client.close() }
+        let helloReceived = expectation(description: "hello after the port came free")
+        client.onEnvelope = { envelope in
+            if case .hello = envelope.message { helloReceived.fulfill() }
+        }
+        wait(for: [helloReceived], timeout: 10)
+    }
+
     func testListenerSendsHelloThenExchange() throws {
         let listener = startUsbListener()
         defer { listener.stopAndWait() }
@@ -253,6 +285,46 @@ private func startUsbListener() -> WailoUsbListener {
     listener.startAndWait()
     XCTAssertTrue(listener.debugIsListening, "USB listener must bind port \(WailoUsb.port)")
     return listener
+}
+
+/// Holds a port so a bind of it fails. A raw socket rather than another `NWListener` because the
+/// listener asks for endpoint reuse, and two sockets that both allow it can share the port quite
+/// happily — which would make the test pass without the retry it exists to check.
+private final class PortSquatter {
+
+    private var descriptor: Int32 = -1
+
+    func hold(_ port: UInt16) throws {
+        descriptor = socket(AF_INET, SOCK_STREAM, 0)
+        guard descriptor >= 0 else { throw NSError(domain: "PortSquatter", code: Int(errno)) }
+        // Only to bind over a previous run's socket still in TIME_WAIT. It does not let a second live
+        // listener share the port, which is the part the test depends on: that needs SO_REUSEPORT on
+        // both sockets, and this one deliberately does not set it.
+        var reuse: Int32 = 1
+        setsockopt(descriptor, SOL_SOCKET, SO_REUSEADDR, &reuse, socklen_t(MemoryLayout<Int32>.size))
+        var address = sockaddr_in()
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_port = port.bigEndian
+        address.sin_addr.s_addr = INADDR_ANY
+        let bound = withUnsafePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                bind(descriptor, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        guard bound == 0, listen(descriptor, 1) == 0 else {
+            let code = errno
+            release()
+            throw NSError(domain: "PortSquatter", code: Int(code))
+        }
+    }
+
+    func release() {
+        guard descriptor >= 0 else { return }
+        close(descriptor)
+        descriptor = -1
+    }
+
+    deinit { release() }
 }
 
 private func waitUntil(timeout: TimeInterval = 10, _ predicate: @escaping () -> Bool) {

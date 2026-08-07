@@ -33,6 +33,12 @@ final class WailoCoordinator: @unchecked Sendable {
     static let shared = WailoCoordinator()
     #if DEBUG
     static var usbEnabledForTesting = false
+    /// Treats a loopback address as WiFi, so the guarded path can be driven from a test.
+    ///
+    /// The only peer a unit test can dial is this machine, and loopback is precisely the case the
+    /// handshake is skipped for — so without this the whole of ADR-0039/0040's device half is left to
+    /// manual smoke, which is how a reconnect after a first contact could break unnoticed.
+    static var forcesWifiHandshakeForTesting = false
     #endif
 
     struct Session {
@@ -72,8 +78,44 @@ final class WailoCoordinator: @unchecked Sendable {
         case blocked
     }
 
+    /// The trust one client's *next* handshake will use.
+    ///
+    /// A box because trust is not fixed for a client's lifetime the way its address is. `WailoClient`
+    /// reconnects on its own without going back through `apply`, and a first contact that succeeds
+    /// changes what the peer will accept: Studio now holds a key for this device and demands proof of
+    /// it from the very next connection. Handing the factory a captured value meant every reconnect
+    /// after a trust-on-first-use pairing re-introduced the device as a stranger, computed the auth key
+    /// without the key it had just stored, and failed the mac check — silently, forever, until Studio
+    /// forgot the device and became lenient again.
+    ///
+    /// Owned by the client it was built for rather than by the coordinator, so a late callback from a
+    /// client that has already been replaced cannot upgrade the live one.
+    private final class TrustBox: @unchecked Sendable {
+
+        private let lock = NSLock()
+        private var trust: WailoHandshake.Trust
+
+        init(_ trust: WailoHandshake.Trust) {
+            self.trust = trust
+        }
+
+        var current: WailoHandshake.Trust {
+            lock.lock()
+            defer { lock.unlock() }
+            return trust
+        }
+
+        func replace(with trust: WailoHandshake.Trust) {
+            lock.lock()
+            defer { lock.unlock() }
+            self.trust = trust
+        }
+    }
+
     private let lock = NSLock()
-    private let pairingStore = WailoPairingStore.shared
+    /// Read through rather than captured: this coordinator is a process-lifetime singleton, so a stored
+    /// reference would outlive any replacement of the shared store.
+    private var pairingStore: WailoPairingStore { WailoPairingStore.shared }
     private var session: Session?
     private var client: WailoClient?
     private var endpoint: Endpoint?
@@ -181,6 +223,7 @@ final class WailoCoordinator: @unchecked Sendable {
 
     func forget(studioId: String) {
         lock.lock()
+        unpinAddress(of: pairingStore.pairing(studioId: studioId).map { [$0] } ?? [])
         pairingStore.forget(studioId: studioId)
         if pendingInvite?.studioId == studioId { pendingInvite = nil }
         refusal = nil
@@ -191,12 +234,26 @@ final class WailoCoordinator: @unchecked Sendable {
 
     func forgetAllPairings() {
         lock.lock()
+        unpinAddress(of: pairingStore.all)
         pairingStore.forgetAll()
         pendingInvite = nil
         refusal = nil
         apply()
         lock.unlock()
         post(Wailo.connectionDidChangeNotification)
+    }
+
+    /// Forgetting a desktop has to let go of its address too.
+    ///
+    /// A pinned address outranks everything else in `apply`, and a first contact at an address the user
+    /// named is taken at its word (ADR-0040) — so dropping only the key would re-trust the same desktop
+    /// on the next dial two seconds later, and Forget would read as a button that does nothing. Handing
+    /// the address back to discovery is also what Forget is *for*: discovery only reconnects to
+    /// identities this device still holds a key for, so the desktop stops being reached automatically
+    /// by either route.
+    private func unpinAddress(of pairings: [WailoPairing]) {
+        guard let pinned = WailoHostStore.host else { return }
+        if pairings.contains(where: { $0.lastHost == pinned }) { WailoHostStore.host = nil }
     }
 
     /// Clears the "this Studio does not know you" latch so the device tries once more. Deliberately a
@@ -447,20 +504,24 @@ final class WailoCoordinator: @unchecked Sendable {
     }
 
     private static func isLoopback(_ host: String) -> Bool {
-        ["localhost", "127.0.0.1", "::1", "[::1]"].contains(host.lowercased())
+        #if DEBUG
+        if forcesWifiHandshakeForTesting { return false }
+        #endif
+        return ["localhost", "127.0.0.1", "::1", "[::1]"].contains(host.lowercased())
     }
 
     private func rebuildClient(session: Session, target: Endpoint, trust: Trust) {
         client?.stop()
 
         let hello = Hello(device_name: session.deviceName, app_id: session.appId, platform: Wailo.platform)
-        let webSocket = WailoClient(hello: hello, url: target.url, security: security(for: trust, host: target.host))
+        let trustBox = Self.trustBox(for: trust)
+        let webSocket = WailoClient(hello: hello, url: target.url, security: security(for: trustBox, host: target.host))
         webSocket.onConnectionChange = { [weak self, weak webSocket] isConnected in
             guard let self, let webSocket else { return }
             self.lanConnectionChanged(isConnected, from: webSocket)
         }
         webSocket.onHandshakeEstablished = { [weak self] pairing in
-            self?.handshakeEstablished(pairing)
+            self?.handshakeEstablished(pairing, upgrading: trustBox)
         }
         webSocket.onHandshakeRefused = { [weak self] reason in
             self?.handshakeRefused(reason)
@@ -479,23 +540,26 @@ final class WailoCoordinator: @unchecked Sendable {
         }
     }
 
-    private func security(for trust: Trust, host: String) -> WailoSessionSecurity {
-        switch trust {
-        case .loopback, .blocked:
-            return .open
-        case let .wifi(handshakeTrust):
-            let deviceId = pairingStore.deviceId
-            let store = pairingStore
-            // Built per connection: each handshake needs its own nonce and ephemeral key, and the
-            // session counter has to be read fresh because the previous connection advanced it.
-            return .guarded {
-                WailoHandshake(trust: Self.refreshed(handshakeTrust, in: store), deviceId: deviceId, host: host)
-            }
+    /// Nil for the transports that prove nothing, which is also what makes `security` fall to `.open`.
+    private static func trustBox(for trust: Trust) -> TrustBox? {
+        guard case let .wifi(handshakeTrust) = trust else { return nil }
+        return TrustBox(handshakeTrust)
+    }
+
+    private func security(for box: TrustBox?, host: String) -> WailoSessionSecurity {
+        guard let box else { return .open }
+        let deviceId = pairingStore.deviceId
+        let store = pairingStore
+        // Built per connection: each handshake needs its own nonce and ephemeral key, the trust may
+        // have been upgraded by the connection before it, and the session counter has to be read fresh
+        // because that connection advanced it.
+        return .guarded {
+            WailoHandshake(trust: Self.refreshed(box.current, in: store), deviceId: deviceId, host: host)
         }
     }
 
-    /// The counter advances on every handshake, and `apply` may have resolved this trust several
-    /// reconnects ago. Everything else in it is fixed for the life of the pairing.
+    /// The counter advances on every handshake, and the trust in the box was written one handshake
+    /// ago at best. Everything else in it is fixed for the life of the pairing.
     private static func refreshed(
         _ trust: WailoHandshake.Trust,
         in store: WailoPairingStore
@@ -509,7 +573,7 @@ final class WailoCoordinator: @unchecked Sendable {
         )
     }
 
-    private func handshakeEstablished(_ pairing: WailoPairing) {
+    private func handshakeEstablished(_ pairing: WailoPairing, upgrading trust: TrustBox?) {
         lock.lock()
         // A previous entry for this address is stale the moment a different identity is accepted
         // there; leaving it would keep resolving the host back to a Studio that has moved on.
@@ -520,6 +584,15 @@ final class WailoCoordinator: @unchecked Sendable {
             }
         }
         pairingStore.save(pairing)
+        // Whatever this connection was — a first contact, an invite — the device now holds a key and
+        // Studio will ask it to prove it next time. Reconnects do not re-enter `apply`, so this is the
+        // only place that can move the client on from the trust it was built with.
+        trust?.replace(with: .paired(
+            studioId: pairing.studioId,
+            deviceKey: SymmetricKey(data: pairing.deviceKey),
+            publicKey: pairing.publicKey,
+            sessionCounter: pairing.sessionCounter
+        ))
         if pendingInvite?.studioId == pairing.studioId { pendingInvite = nil }
         refusal = nil
         if identityChange?.host == pairing.lastHost { identityChange = nil }

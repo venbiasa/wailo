@@ -34,6 +34,7 @@ import io.ktor.websocket.Frame
 import io.ktor.websocket.readBytes
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
@@ -114,6 +115,9 @@ class WailoEngine(
     // How often to re-push to a device that hasn't acked the current epoch. Injectable so tests can
     // exercise the anti-entropy retry without waiting the production interval.
     private val ackRetryMs: Long = DEFAULT_ACK_RETRY_MS,
+    // How often [watchHost] re-checks the LAN address and the bound socket. Injectable for the same
+    // reason as [ackRetryMs].
+    private val hostWatchIntervalMs: Long = DEFAULT_HOST_WATCH_INTERVAL_MS,
     /**
      * Who this Studio is and which devices it trusts (ADR-0039). Defaults to an in-memory store so a
      * test gets a throwaway identity; the desktop passes one backed by the macOS Keychain, because a
@@ -302,12 +306,27 @@ class WailoEngine(
     @Volatile
     private var server: EmbeddedServer<*, *>? = null
 
+    private val _listening = MutableStateFlow(false)
+
     /**
      * Whether the capture server is bound and accepting devices. False after a failed [start] or [rebind]
      * — the distinction a caller needs to tell "your new port was refused, the old one is still serving"
      * from "nothing is listening at all", which a boolean return from those calls can't express.
+     *
+     * A flow rather than a getter because the answer changes with nobody asking: [watchHost] clears it when
+     * the socket goes out from under a server this still holds, which is what a host that slept through a
+     * network change looks like. Sampled once, it would keep promising an endpoint nothing can reach.
      */
-    val listening: Boolean get() = server != null
+    val listening: StateFlow<Boolean> = _listening.asStateFlow()
+
+    private val _lanAddress = MutableStateFlow(resolveLanAddress())
+
+    /**
+     * The address a device on the same network dials, re-resolved on every [watchHost] tick. Wake a laptop
+     * on a different network and the one resolved at launch is simply wrong — in the top bar, and baked
+     * into any pairing QR rendered from it — with nothing about it that reads as stale.
+     */
+    val lanAddress: StateFlow<String> = _lanAddress.asStateFlow()
 
     // Bumped by every bind and every teardown. Each bind launches one Bonjour registration, which blocks
     // ~1s inside JmDNS.create; comparing generations on the way out is how a registration that straddled a
@@ -322,6 +341,15 @@ class WailoEngine(
     // the registration coroutine and the caller's thread.
     private val bonjourLock = Any()
     private var jmdns: JmDNS? = null
+
+    // Serializes every bind and teardown. Without it [watchHost]'s recovery and a user's [rebind] can
+    // interleave and disagree about which server the field above holds — one of them tearing down the
+    // other's freshly bound socket. Held across stop-then-listen pairs, never across a suspension.
+    private val bindLock = Any()
+
+    // The health/address watcher, armed by [start] and disarmed by [stop] so a discarded engine leaves
+    // nothing ticking. Guarded by [bindLock].
+    private var watcher: Job? = null
 
     /** Per-connection sync state: the highest snapshot epoch this device has acknowledged applying. */
     private class SessionState(
@@ -361,7 +389,31 @@ class WailoEngine(
      * that was free when it was chosen may be taken by the time it's used again, and that must be something
      * the caller can report, not something that takes the app down at launch.
      */
-    fun start(): Boolean = listen()
+    fun start(): Boolean {
+        val bound = listen()
+        // Armed here rather than in an initializer so a bare `WailoEngine(...)` — what every unit test
+        // builds — never spins a background probe the test has to know to shut down. It runs even when the
+        // bind above failed: the address it tracks is displayed either way.
+        synchronized(bindLock) {
+            if (watcher?.isActive != true) watcher = scope.launch(Dispatchers.IO) { watchHost() }
+        }
+        return bound
+    }
+
+    /**
+     * Bind the capture server again on the current port, whether or not it is currently up. This is the
+     * recovery path for the one state the engine can't fix by itself — the port was taken when [start] ran,
+     * and by the time anyone notices, whatever took it may be long gone.
+     *
+     * Suspending for the same reason as [rebind]: the teardown blocks for up to [STOP_TIMEOUT_MS].
+     */
+    suspend fun restart(): Boolean = withContext(Dispatchers.IO) {
+        refreshLanAddress()
+        synchronized(bindLock) {
+            stopServer(closeAttachedConnections = false)
+            listen()
+        }
+    }
 
     /**
      * Serve a device connection opened by another reachability layer, currently macOS usbmuxd. The
@@ -387,14 +439,16 @@ class WailoEngine(
         if (newPort !in PORT_RANGE) return false
         if (newPort == port && server != null) return true
         return withContext(Dispatchers.IO) {
-            val previous = port
-            stopServer(closeAttachedConnections = false)
-            port = newPort
-            if (listen()) return@withContext true
-            // Never leave the app with nothing listening — go back to the port that was working.
-            port = previous
-            listen()
-            false
+            synchronized(bindLock) {
+                val previous = port
+                stopServer(closeAttachedConnections = false)
+                port = newPort
+                if (listen()) return@synchronized true
+                // Never leave the app with nothing listening — go back to the port that was working.
+                port = previous
+                listen()
+                false
+            }
         }
     }
 
@@ -402,14 +456,16 @@ class WailoEngine(
     // failed bind doesn't reliably surface out of start(wait = false) — it would leave `server` set with
     // nothing actually listening. Trial-binding first turns "that port is taken" into an answer a caller
     // can show the user; runCatching covers the rest, including the narrow race between probe and bind.
-    private fun listen(): Boolean {
-        if (server != null) return true
-        if (!isBindable(port)) return false
-        val bound = runCatching { buildServer().also { it.start(wait = false) } }.getOrNull() ?: return false
+    private fun listen(): Boolean = synchronized(bindLock) {
+        if (server != null) return@synchronized true
+        if (!isBindable(port)) return@synchronized false
+        val bound = runCatching { buildServer().also { it.start(wait = false) } }.getOrNull()
+            ?: return@synchronized false
         server = bound
+        _listening.value = true
         val generation = bindGeneration.incrementAndGet()
         scope.launch(Dispatchers.IO) { registerBonjourService(generation) }
-        return true
+        true
     }
 
     // Trial-bind with the same address reuse a server sets, so a port our own previous bind left in
@@ -515,22 +571,74 @@ class WailoEngine(
         }
     }
 
+    /**
+     * Release everything this engine holds: the bound port, the Bonjour record, the watcher, and every
+     * device session. Call it when the engine is being discarded, not just at exit — a replaced instance
+     * that is never stopped keeps its socket, and the port it strands is the one its replacement is about
+     * to ask for. [start] can arm the same engine again afterwards.
+     */
     fun stop() {
+        synchronized(bindLock) {
+            watcher?.cancel()
+            watcher = null
+        }
         stopServer(closeAttachedConnections = true)
     }
 
-    private fun stopServer(closeAttachedConnections: Boolean) {
+    private fun stopServer(closeAttachedConnections: Boolean) = synchronized(bindLock) {
         // Invalidate any in-flight registration before anything else, so one that is still inside
         // JmDNS.create abandons its instance instead of publishing a port that is about to disappear.
         bindGeneration.incrementAndGet()
         if (closeAttachedConnections) sessions.keys.forEach(DeviceConnection::close)
         server?.stop(STOP_GRACE_MS, STOP_TIMEOUT_MS)
         server = null
+        _listening.value = false
         val advertiser = synchronized(bonjourLock) { jmdns.also { jmdns = null } }
         runCatching {
             advertiser?.unregisterAllServices()
             advertiser?.close()
         }
+    }
+
+    /**
+     * Keeps the two things a sleeping host quietly invalidates honest: the address devices are told to
+     * dial, and whether the socket behind [listening] is still there.
+     *
+     * The liveness test is the trial bind [isBindable] already does, read the other way round — a live
+     * listener makes its own port unbindable, so a bind that *succeeds* while a server is still held means
+     * the socket underneath it is gone. That costs two syscalls and, unlike dialling the port, can't be
+     * confused by a full accept backlog. Ktor binds asynchronously though, so a bind that has not landed
+     * yet reads exactly like one that died; requiring [LOSSES_BEFORE_REBIND] consecutive misses puts that
+     * window (milliseconds) far out of reach of the interval.
+     */
+    private suspend fun watchHost() {
+        var losses = 0
+        while (true) {
+            delay(hostWatchIntervalMs)
+            if (refreshLanAddress()) readvertise()
+            if (server == null || !isBindable(port)) {
+                losses = 0
+                continue
+            }
+            losses += 1
+            if (losses < LOSSES_BEFORE_REBIND) continue
+            losses = 0
+            // Drop the dead server before rebinding so its Bonjour record goes with it. A rebind that
+            // can't take the port back leaves [listening] false, which is the caller's cue to offer a retry.
+            synchronized(bindLock) {
+                stopServer(closeAttachedConnections = false)
+                listen()
+            }
+        }
+    }
+
+    // True when the address moved, which is the only time it is worth republishing Bonjour: JmDNS is
+    // pinned to the interface it was created on, so an address change leaves it advertising a dead one.
+    private fun refreshLanAddress(): Boolean {
+        val current = resolveLanAddress()
+        if (current == _lanAddress.value) return false
+        _lanAddress.value = current
+        return true
     }
 
     // Republish the Bonjour record. The TXT carries the studio fingerprint, so a rotated identity has to
@@ -828,6 +936,11 @@ class WailoEngine(
 
         private const val STOP_GRACE_MS: Long = 500L
         private const val STOP_TIMEOUT_MS: Long = 1000L
+
+        // How often [watchHost] re-checks the address and the socket. Two syscalls a tick, so the interval
+        // is set by how long a stale address or a dead port may go unnoticed after a wake, not by cost.
+        private const val DEFAULT_HOST_WATCH_INTERVAL_MS: Long = 5_000L
+        private const val LOSSES_BEFORE_REBIND: Int = 2
         private const val DEFAULT_ACK_RETRY_MS: Long = 2000L
         private const val BONJOUR_SERVICE_TYPE = "_wailo._tcp.local."
         private const val BONJOUR_FALLBACK_NAME = "Wailo"

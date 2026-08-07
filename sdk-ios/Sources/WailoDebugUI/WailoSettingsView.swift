@@ -22,9 +22,8 @@ struct WailoSettingsView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: WailoTokens.Spacing.x5) {
                     section("Status") { statusCard }
+                    section("Connect") { connectCard }
                     section("Wi-Fi pairing") { pairingCard }
-                    section("Found on this network") { discoveryCard }
-                    section("Manual address") { manualCard }
                     section("USB") { usbCard }
                 }
                 .padding(WailoTokens.Spacing.x4)
@@ -97,38 +96,13 @@ struct WailoSettingsView: View {
         return model.isConnected ? WailoTokens.success : WailoTokens.warning
     }
 
-    /// Wi-Fi is the one transport whose peer is whoever answered an mDNS advertisement, so it is the
-    /// one that has to be paired (ADR-0039). This card sits directly under Status because an unpaired
-    /// device on Wi-Fi looks exactly like a device that cannot find the desktop, and this is the
-    /// answer to both.
+    /// Pairing proper, now that the desktops themselves live under Connect: the stronger way in, where
+    /// the desktop proves itself before the first byte instead of being taken at its word. It sits
+    /// *under* Connect because it is the answer to a connection that was refused, not the first thing
+    /// to try (ADR-0040 made the ceremony the exception).
     private var pairingCard: some View {
         Card {
             VStack(alignment: .leading, spacing: WailoTokens.Spacing.x3) {
-                if let refusal = model.refusal {
-                    Notice(text: refusal, tone: .warning) {
-                        ActionButton(title: "Try again", style: .ghost, enabled: true, action: model.retryAfterRefusal)
-                    }
-                }
-
-                if let change = model.identityChange {
-                    IdentityChangeNotice(
-                        change: change,
-                        onAccept: model.acceptIdentityChange,
-                        onReject: model.rejectIdentityChange
-                    )
-                }
-
-                if model.pairings.isEmpty {
-                    Text("No desktop trusted yet. Connect to one by address below and it is remembered, or scan the QR from Studio's Devices panel to prove it up front.")
-                        .font(WailoTokens.Typography.bodySmall)
-                        .foregroundColor(WailoTokens.onSurfaceVariant)
-                        .fixedSize(horizontal: false, vertical: true)
-                } else {
-                    ForEach(model.pairings, id: \.studioId) { pairing in
-                        PairedRow(pairing: pairing) { model.forget(pairing) }
-                    }
-                }
-
                 pairingForm
 
                 if let message = model.pairingError {
@@ -138,7 +112,7 @@ struct WailoSettingsView: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
 
-                Text("Only Wi-Fi needs this. USB and the Simulator reach Studio through this machine, so they connect without pairing.")
+                Text("Only Wi-Fi needs this, and only when Studio is set to accept paired devices. USB and the Simulator reach Studio through this machine, so they connect without pairing.")
                     .font(WailoTokens.Typography.bodySmall)
                     .foregroundColor(WailoTokens.onSurfaceVariant)
                     .fixedSize(horizontal: false, vertical: true)
@@ -147,9 +121,8 @@ struct WailoSettingsView: View {
         }
     }
 
-    /// Pairing proper — the stronger path, where the desktop proves itself before the first byte
-    /// instead of being taken at its word. Split out of `pairingCard` to keep either body inside what
-    /// the SwiftUI type-checker will chew through in reasonable time.
+    /// Split out of `pairingCard` to keep either body inside what the SwiftUI type-checker will chew
+    /// through in reasonable time.
     @ViewBuilder
     private var pairingForm: some View {
         ActionButton(title: "Scan pairing QR", enabled: true, action: model.startScanning)
@@ -188,45 +161,113 @@ struct WailoSettingsView: View {
         }
     }
 
-    private var discoveryCard: some View {
+    /// Everything about reaching a desktop over Wi-Fi, in the order it is used: the address being
+    /// dialled, the button that dials it, then the desktops worth putting in that field.
+    ///
+    /// The suggestions were a section of their own above this one, which read as a second, competing
+    /// way to connect — when all a row does is fill the field. Underneath the button, they are what
+    /// they are: input to the control directly above them (requested by the user).
+    private var connectCard: some View {
         Card {
-            if model.discovered.isEmpty {
+            VStack(alignment: .leading, spacing: 0) {
+                connectForm
+                Hairline()
+                desktopList
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var connectForm: some View {
+        VStack(alignment: .leading, spacing: WailoTokens.Spacing.x3) {
+            // The two things that stop a connection outright, kept beside the button they explain: a
+            // refusal or an identity change is the answer to "I pressed Connect and nothing happened".
+            if let refusal = model.refusal {
+                Notice(text: refusal, tone: .warning) {
+                    ActionButton(title: "Try again", style: .ghost, enabled: true, action: model.retryAfterRefusal)
+                }
+            }
+            if let change = model.identityChange {
+                IdentityChangeNotice(
+                    change: change,
+                    onAccept: model.acceptIdentityChange,
+                    onReject: model.rejectIdentityChange
+                )
+            }
+            addressFields
+            if let message = model.hostError ?? model.portError {
+                Text(message)
+                    .font(WailoTokens.Typography.bodySmall)
+                    .foregroundColor(WailoTokens.error)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            HStack(spacing: WailoTokens.Spacing.x2) {
+                ActionButton(title: "Connect", enabled: model.canApply, action: model.apply)
+                ActionButton(
+                    title: "Use discovery",
+                    style: .ghost,
+                    enabled: !model.isUsingDiscovery,
+                    action: model.useDiscovery
+                )
+            }
+            attemptFeedback
+            Text("Pinning an address turns Bonjour off. Clear it to hand discovery back control.")
+                .font(WailoTokens.Typography.bodySmall)
+                .foregroundColor(WailoTokens.onSurfaceVariant)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(WailoTokens.Spacing.x4)
+    }
+
+    private var addressFields: some View {
+        HStack(alignment: .top, spacing: WailoTokens.Spacing.x3) {
+            LabeledField(
+                label: "Desktop IP",
+                placeholder: "192.168.1.20",
+                text: $model.host,
+                keyboard: .numbersAndPunctuation,
+                isInvalid: model.hostError != nil
+            )
+            LabeledField(
+                label: "Port",
+                placeholder: String(Wailo.defaultPort),
+                text: $model.port,
+                keyboard: .numberPad,
+                isInvalid: model.portError != nil
+            )
+            .frame(width: 84)
+        }
+    }
+
+    @ViewBuilder
+    private var desktopList: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("DESKTOPS")
+                .font(WailoTokens.Typography.labelSmall)
+                .foregroundColor(WailoTokens.onSurfaceVariant)
+                .padding(.horizontal, WailoTokens.Spacing.x4)
+                .padding(.top, WailoTokens.Spacing.x4)
+            if model.desktops.isEmpty {
                 Text("Nothing yet. Wailo Studio has to be running on the same Wi-Fi, and this app needs Local Network permission.")
                     .font(WailoTokens.Typography.bodySmall)
                     .foregroundColor(WailoTokens.onSurfaceVariant)
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(WailoTokens.Spacing.x4)
             } else {
-                VStack(alignment: .leading, spacing: 0) {
-                    ForEach(model.discovered) { service in
-                        if service.id != model.discovered.first?.id { Hairline() }
-                        Button(action: { model.fill(from: service) }) {
-                            HStack {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(service.name)
-                                        .font(WailoTokens.Typography.bodyMedium)
-                                        .foregroundColor(WailoTokens.onSurface)
-                                    Text(service.address)
-                                        .font(WailoTokens.Typography.monoMedium)
-                                        .foregroundColor(WailoTokens.onSurfaceVariant)
-                                }
-                                Spacer()
-                                Text("Fill")
-                                    .font(WailoTokens.Typography.labelSmall)
-                                    .foregroundColor(WailoTokens.accent)
-                            }
-                            .padding(WailoTokens.Spacing.x4)
-                            .contentShape(Rectangle())
-                        }
-                        .buttonStyle(PlainButtonStyle())
-                    }
-                    Hairline()
-                    Text("Tapping fills the address below — connecting is still up to you.")
-                        .font(WailoTokens.Typography.bodySmall)
-                        .foregroundColor(WailoTokens.onSurfaceVariant)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .padding(WailoTokens.Spacing.x4)
+                ForEach(model.desktops) { desktop in
+                    if desktop.id != model.desktops.first?.id { Hairline() }
+                    DesktopRow(
+                        desktop: desktop,
+                        onFill: { model.fill(from: desktop) },
+                        onForget: { model.forget(desktop) }
+                    )
                 }
+                Hairline()
+                Text("Tapping one fills the address above — connecting is still up to you. Forget throws the key away, which is also what stops Bonjour reconnecting to it on its own.")
+                    .font(WailoTokens.Typography.bodySmall)
+                    .foregroundColor(WailoTokens.onSurfaceVariant)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(WailoTokens.Spacing.x4)
             }
         }
     }
@@ -252,51 +293,6 @@ struct WailoSettingsView: View {
                 .font(WailoTokens.Typography.bodySmall)
                 .foregroundColor(described.1)
                 .fixedSize(horizontal: false, vertical: true)
-        }
-    }
-
-    private var manualCard: some View {
-        Card {
-            VStack(alignment: .leading, spacing: WailoTokens.Spacing.x3) {
-                HStack(alignment: .top, spacing: WailoTokens.Spacing.x3) {
-                    LabeledField(
-                        label: "Desktop IP",
-                        placeholder: "192.168.1.20",
-                        text: $model.host,
-                        keyboard: .numbersAndPunctuation,
-                        isInvalid: model.hostError != nil
-                    )
-                    LabeledField(
-                        label: "Port",
-                        placeholder: String(Wailo.defaultPort),
-                        text: $model.port,
-                        keyboard: .numberPad,
-                        isInvalid: model.portError != nil
-                    )
-                    .frame(width: 84)
-                }
-                if let message = model.hostError ?? model.portError {
-                    Text(message)
-                        .font(WailoTokens.Typography.bodySmall)
-                        .foregroundColor(WailoTokens.error)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                HStack(spacing: WailoTokens.Spacing.x2) {
-                    ActionButton(title: "Connect", enabled: model.canApply, action: model.apply)
-                    ActionButton(
-                        title: "Use discovery",
-                        style: .ghost,
-                        enabled: !model.isUsingDiscovery,
-                        action: model.useDiscovery
-                    )
-                }
-                attemptFeedback
-                Text("Pinning an address turns Bonjour off. Clear it to hand discovery back control.")
-                    .font(WailoTokens.Typography.bodySmall)
-                    .foregroundColor(WailoTokens.onSurfaceVariant)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            .padding(WailoTokens.Spacing.x4)
         }
     }
 
@@ -386,41 +382,75 @@ private struct CodeTargetRow: View {
     }
 }
 
-private struct PairedRow: View {
+/// One desktop under Connect: found on this network, remembered from a previous connection, or both.
+///
+/// Fill and Forget are siblings rather than a button inside a tappable row — SwiftUI does not reliably
+/// route a tap to a nested `Button`, and getting Forget when you meant Fill is the one mistake here that
+/// costs something. Fill takes the whole remaining width so it is still the easy target of the two.
+private struct DesktopRow: View {
 
-    let pairing: WailoPairing
+    let desktop: WailoDebugModel.Desktop
+    let onFill: () -> Void
     let onForget: () -> Void
 
     var body: some View {
         HStack(alignment: .top, spacing: WailoTokens.Spacing.x3) {
+            Button(action: onFill) { summary }
+                .buttonStyle(PlainButtonStyle())
+                .disabled(!desktop.canFill)
+            if desktop.isRemembered {
+                Button(action: onForget) {
+                    Text("Forget")
+                        .font(WailoTokens.Typography.labelSmall)
+                        .foregroundColor(WailoTokens.error)
+                }
+                .buttonStyle(PlainButtonStyle())
+            }
+        }
+        .padding(WailoTokens.Spacing.x4)
+    }
+
+    private var summary: some View {
+        HStack(alignment: .top, spacing: WailoTokens.Spacing.x2) {
             VStack(alignment: .leading, spacing: 2) {
-                Text(pairing.lastHost.isEmpty ? "Paired desktop" : pairing.lastHost)
+                Text(desktop.name)
                     .font(WailoTokens.Typography.bodyMedium)
-                    .foregroundColor(WailoTokens.onSurface)
-                // The fingerprint is what actually identifies the Studio, and it is the only thing the
-                // user can compare against what Studio shows when two desktops look alike.
-                Text(pairing.studioId)
-                    .font(WailoTokens.Typography.monoMedium)
-                    .foregroundColor(WailoTokens.onSurfaceVariant)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                Text(pairing.trustedOnFirstUse ? "Trusted on first contact" : "Paired")
-                    .font(WailoTokens.Typography.labelSmall)
-                    .foregroundColor(WailoTokens.onSurfaceVariant)
-                if pairing.refused {
-                    Text("This desktop no longer recognises this device.")
+                    // Dimmed rather than hidden when it is not on the network: still identifiable,
+                    // visibly not something Connect can reach right now.
+                    .foregroundColor(desktop.online ? WailoTokens.onSurface : WailoTokens.onSurfaceVariant)
+                if let subtitle = desktop.subtitle {
+                    Text(subtitle)
+                        .font(WailoTokens.Typography.monoMedium)
+                        .foregroundColor(WailoTokens.onSurfaceVariant)
+                }
+                if let fingerprint = desktop.fingerprint {
+                    Text(fingerprint)
+                        .font(WailoTokens.Typography.monoMedium)
+                        .foregroundColor(WailoTokens.onSurfaceVariant)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                if let trust = desktop.trustLabel {
+                    Text(trust)
+                        .font(WailoTokens.Typography.labelSmall)
+                        .foregroundColor(WailoTokens.onSurfaceVariant)
+                }
+                if let warning = desktop.warning {
+                    Text(warning)
                         .font(WailoTokens.Typography.labelSmall)
                         .foregroundColor(WailoTokens.warning)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
-            Spacer()
-            Button(action: onForget) {
-                Text("Forget")
+            Spacer(minLength: WailoTokens.Spacing.x2)
+            if desktop.canFill {
+                Text("Fill")
                     .font(WailoTokens.Typography.labelSmall)
                     .foregroundColor(WailoTokens.accent)
             }
-            .buttonStyle(PlainButtonStyle())
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
     }
 }
 

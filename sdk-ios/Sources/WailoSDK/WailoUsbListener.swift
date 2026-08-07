@@ -46,6 +46,15 @@ final class WailoUsbListener: @unchecked Sendable {
     /// Identifies the bind a state callback belongs to, so a late `.cancelled` from a listener we already
     /// replaced (or stopped) cannot resurrect one.
     private var bindGeneration = 0
+    /// Whether a listener is still wanted, so a retry scheduled before `stop` does not rebind after it.
+    private var wanted = false
+    private var retryDelay = WailoUsbListener.minRetryDelay
+
+    /// Backoff for a bind that keeps failing. It starts short because the commonest transient — the port
+    /// still held by the bind being replaced — clears in milliseconds, and grows because the next
+    /// commonest cause is an unanswered Local Network prompt, which no amount of retrying can hurry.
+    private static let minRetryDelay: TimeInterval = 0.25
+    private static let maxRetryDelay: TimeInterval = 15.0
 
     init(hello: Hello, port: UInt16 = WailoUsb.port) {
         self.hello = hello
@@ -60,16 +69,24 @@ final class WailoUsbListener: @unchecked Sendable {
 
     func start() {
         queue.async {
+            self.wanted = true
             self.observeForeground()
             guard self.listener == nil else { return }
+            self.retryDelay = Self.minRetryDelay
             self.startLocked()
         }
     }
 
     #if DEBUG
+    /// Binds before returning so a test can assert on a listener rather than poll for one. Retries
+    /// inline because the scheduled backoff `start` relies on would land after the assertion.
     func startAndWait() {
         guard listener == nil else { return }
-        startLocked()
+        wanted = true
+        for attempt in 0..<20 {
+            if (try? bindListener()) != nil { return }
+            if attempt < 19 { Thread.sleep(forTimeInterval: 0.1) }
+        }
     }
 
     func stopAndWait() {
@@ -86,6 +103,7 @@ final class WailoUsbListener: @unchecked Sendable {
 
     func stop() {
         queue.async {
+            self.wanted = false
             if let observer = self.foregroundObserver {
                 NotificationCenter.default.removeObserver(observer)
                 self.foregroundObserver = nil
@@ -132,18 +150,29 @@ final class WailoUsbListener: @unchecked Sendable {
         }
     }
 
+    /// Keeps trying for as long as a listener is wanted.
+    ///
+    /// Giving up left USB dead until the process was relaunched, because the only other re-arm is a
+    /// foreground the user has no reason to trigger. That is the whole of the bug where plugging the
+    /// cable in after a failed launch does nothing until the app is killed: the causes of a failed bind
+    /// — an unanswered Local Network prompt, the stack not up yet on a cold launch — are all things that
+    /// clear on their own a little later, by which time nothing was left to notice.
+    ///
+    /// One attempt per pass, rescheduled rather than slept through. `bindListener` waits up to two
+    /// seconds for the listener to settle and `accept` runs on this same queue, so a burst of retries is
+    /// also a burst of seconds in which an inbound Studio connection cannot be answered.
     private func startLocked() {
-        var lastError: Error?
-        for _ in 0..<30 {
-            do {
-                try bindListener()
-                return
-            } catch {
-                lastError = error
-                Thread.sleep(forTimeInterval: 0.1)
+        guard wanted, listener == nil else { return }
+        do {
+            try bindListener()
+            retryDelay = Self.minRetryDelay
+        } catch {
+            let delay = retryDelay
+            retryDelay = min(delay * 2, Self.maxRetryDelay)
+            queue.asyncAfter(deadline: .now() + delay) { [weak self] in
+                self?.startLocked()
             }
         }
-        _ = lastError
     }
 
     private func bindListener() throws {

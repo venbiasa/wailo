@@ -159,12 +159,92 @@ final class WailoDebugModel: ObservableObject {
         refresh()
     }
 
-    /// Fills the address field rather than dialling. A row in a discovery list is a suggestion — the
-    /// user still has to say "that one", because a first contact over Wi-Fi pins whatever answers and
-    /// that should never happen from a stray tap (ADR-0040).
-    func fill(from service: WailoService) {
-        host = service.host
-        port = String(service.port)
+    /// A desktop worth offering under the address field: one on this network now, one this device has
+    /// reached before, or — the ordinary case — both at once.
+    ///
+    /// Merged rather than listed twice. Discovery and the pairing store answer different questions
+    /// ("who is advertising" and "who do we hold a key for"), but for the person choosing an address
+    /// they describe the same machine, and showing it in two places made "which of these is mine" a
+    /// question the panel itself invented.
+    struct Desktop: Identifiable {
+
+        let id: String
+        /// The Bonjour instance name while it is advertising, else the address it was last reached at.
+        let name: String
+        /// What Fill puts in the address field. A remembered desktop that is not advertising has no
+        /// port to offer, which leaves the field empty and the default in force.
+        let host: String
+        let port: Int?
+        let pairing: WailoPairing?
+        let online: Bool
+
+        var address: String { port.map { "\(host):\($0)" } ?? host }
+
+        /// Dropped when it would only repeat the title, which is every remembered desktop that is
+        /// currently offline — there its name *is* its last address.
+        var subtitle: String? { name == address ? nil : address }
+
+        /// Held only for a desktop this device has a key for: it is the one thing that can be compared
+        /// against what Studio prints in its own Settings when two machines look alike (ADR-0040).
+        var fingerprint: String? { pairing?.studioId }
+
+        var trustLabel: String? {
+            guard let pairing else { return nil }
+            let how = pairing.trustedOnFirstUse ? "Trusted on first contact" : "Paired"
+            return online ? how : "\(how) — not on this network"
+        }
+
+        var warning: String? {
+            pairing?.refused == true ? "This desktop no longer recognises this device." : nil
+        }
+
+        /// Forgetting is only meaningful for a desktop there is something stored about.
+        var isRemembered: Bool { pairing != nil }
+
+        var canFill: Bool { !host.isEmpty }
+    }
+
+    var desktops: [Desktop] {
+        let remembered = Dictionary(pairings.map { ($0.studioId, $0) }, uniquingKeysWith: { first, _ in first })
+        var matched: Set<String> = []
+        let advertising = discovered.map { service -> Desktop in
+            let pairing = service.studioId.isEmpty ? nil : remembered[service.studioId]
+            if let pairing { matched.insert(pairing.studioId) }
+            return Desktop(
+                id: pairing?.studioId ?? service.id,
+                name: service.name,
+                host: service.host,
+                port: service.port,
+                pairing: pairing,
+                online: true
+            )
+        }
+        // Kept in the list even though nothing can be dialled right now: this is the only place a
+        // desktop that has moved networks — or one the user is done with — can be forgotten, and
+        // hiding it would mean Bonjour silently reconnecting to something with no way to say no.
+        let offline = pairings
+            .filter { !matched.contains($0.studioId) }
+            .map { pairing in
+                Desktop(
+                    id: pairing.studioId,
+                    name: pairing.lastHost.isEmpty ? "Paired desktop" : pairing.lastHost,
+                    host: pairing.lastHost,
+                    port: nil,
+                    pairing: pairing,
+                    online: false
+                )
+            }
+            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        return advertising + offline
+    }
+
+    /// Fills the address field rather than dialling. A row in this list is a suggestion — the user
+    /// still has to say "that one", because a first contact over Wi-Fi pins whatever answers and that
+    /// should never happen from a stray tap (ADR-0040).
+    func fill(from desktop: Desktop) {
+        guard desktop.canFill else { return }
+        host = desktop.host
+        port = desktop.port.map(String.init) ?? ""
         attempt = .idle
         clearManualErrors()
     }
@@ -250,7 +330,8 @@ final class WailoDebugModel: ObservableObject {
         refresh()
     }
 
-    func forget(_ pairing: WailoPairing) {
+    func forget(_ desktop: Desktop) {
+        guard let pairing = desktop.pairing else { return }
         Wailo.forgetPairing(studioId: pairing.studioId)
         refresh()
     }

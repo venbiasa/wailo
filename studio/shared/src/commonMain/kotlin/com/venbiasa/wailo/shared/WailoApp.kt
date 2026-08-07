@@ -32,7 +32,10 @@ import com.venbiasa.wailo.shared.ui.WailoViewer
  * within it, editable in the settings panel; [listening] says whether the server actually bound (false
  * greys nothing out but marks the address as dead, since no traffic can arrive), and [onApplyPort] asks
  * the host to move the server — only the host can try the bind, so it reports the verdict back through
- * [portError] rather than this guessing which ports are usable. [devices] combines Hello-identified LAN
+ * [portError] rather than this guessing which ports are usable. [onRetryListen] rebinds it where it is,
+ * offered next to the address while [listening] is false: the engine retakes a port it lost on its own,
+ * but one it never got is held by something only the user knows the end of. It suspends so the retry can
+ * show as in-flight rather than as a button that appears to do nothing for a second. [devices] combines Hello-identified LAN
  * sessions with host-discovered USB devices for the Devices panel; [usbSupported] controls its platform
  * guidance — and whether the USB port is offered at all — without leaking platform APIs into `shared`.
  * [usbPort] is the device-side port Studio dials over USB and [onApplyUsbPort] moves it (rejected values
@@ -84,6 +87,7 @@ fun WailoApp(
     listenAddress: String = "",
     listenPort: Int = 0,
     listening: Boolean = true,
+    onRetryListen: suspend () -> Unit = {},
     portError: String? = null,
     onApplyPort: (Int) -> Unit = {},
     devices: List<DeviceInfo> = emptyList(),
@@ -141,6 +145,7 @@ fun WailoApp(
                 listenAddress = listenAddress,
                 listenPort = listenPort,
                 listening = listening,
+                onRetryListen = onRetryListen,
                 portError = portError,
                 onApplyPort = onApplyPort,
                 devices = devices,

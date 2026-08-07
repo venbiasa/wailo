@@ -33,7 +33,6 @@ import com.venbiasa.wailo.engine.WailoEngine
 import com.venbiasa.wailo.engine.pairing.InMemoryPairingKeyStore
 import com.venbiasa.wailo.engine.pairing.PairingCode
 import com.venbiasa.wailo.engine.pairing.PairingManager
-import com.venbiasa.wailo.engine.resolveLanAddress
 import com.venbiasa.wailo.protocol.BreakpointPhase
 import com.venbiasa.wailo.shared.BreakpointNode
 import com.venbiasa.wailo.shared.CaptureFilterState
@@ -133,16 +132,27 @@ private fun runWailo() = application {
         mergeDevices(connectedDevices, usbDevices)
     }
 
+    // An engine that is replaced without being stopped keeps its socket, and the port it strands is the
+    // one its replacement then fails to bind — the app coming up "not listening" against itself. That is
+    // routine under hot reload, where this composition is rebuilt and the `remember` above re-runs.
+    DisposableEffect(engine) {
+        onDispose { engine.stop() }
+    }
+
     // Where the server actually is, versus where it was asked to be. A bind can fail at launch as well as
     // on a change — the saved port may have been taken since it was chosen — and a server that silently
     // isn't listening is the one failure a user can't diagnose from the UI, so it's surfaced in both the
     // settings panel ([portError]) and the top bar ([listening]).
     var listenPort by remember { mutableStateOf(engine.port) }
-    var listening by remember { mutableStateOf(false) }
+    val listening by engine.listening.collectAsState()
     var portError by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(Unit) {
         if (!engine.start()) portError = portUnavailable(engine.port)
-        listening = engine.listening
+    }
+    // Retaking the port after whatever was squatting on it is gone. The engine recovers a socket that died
+    // under it by itself, so this only exists for the case it can't fix: a port it never got.
+    val retryListen: suspend () -> Unit = {
+        portError = if (engine.restart()) null else portUnavailable(engine.port)
     }
 
     // Only the host can try a bind, so it — not `shared` — decides whether a port is usable and hands the
@@ -161,9 +171,8 @@ private fun runWailo() = application {
                 else -> portUnavailable(next)
             }
             // The engine is the authority on where it ended up: a rejected port rolls back to the last one
-            // that worked, so read both back rather than assuming the change took.
+            // that worked, so read it back rather than assuming the change took.
             listenPort = engine.port
-            listening = engine.listening
         }
     }
 
@@ -199,9 +208,10 @@ private fun runWailo() = application {
     }
 
     // The address devices should dial. The server binds every interface; we surface the host's LAN
-    // IPv4 (not the wildcard) so a physical device knows where to point, falling back to localhost. Only
-    // the host part is fixed — the port follows the setting.
-    val lanAddress = remember { resolveLanAddress() }
+    // IPv4 (not the wildcard) so a physical device knows where to point, falling back to localhost. The
+    // engine re-resolves it as the host moves between networks, so a laptop woken somewhere else shows
+    // where it actually is rather than where it was — including in the pairing QR below.
+    val lanAddress by engine.lanAddress.collectAsState()
     val listenAddress = "$lanAddress:$listenPort"
 
     // --- Wi-Fi pairing (ADR-0039) ---------------------------------------------------------------
@@ -227,7 +237,7 @@ private fun runWailo() = application {
         engine.pairings.cancelPairing()
     }
     val identity by engine.pairings.identity.collectAsState()
-    val offerQr = remember(pairingOffer, identity, listenPort) {
+    val offerQr = remember(pairingOffer, identity, lanAddress, listenPort) {
         pairingOffer?.let {
             PairingQr.render(it.qrPayload(identity.studioId, identity.publicKey, lanAddress, listenPort))
         }
@@ -626,6 +636,7 @@ private fun runWailo() = application {
             listenAddress = listenAddress,
             listenPort = listenPort,
             listening = listening,
+            onRetryListen = retryListen,
             portError = portError,
             onApplyPort = applyPort,
             devices = devices,

@@ -40,7 +40,16 @@ protocol WailoSecretStorage: AnyObject {
 
 final class WailoPairingStore {
 
-    static let shared = WailoPairingStore(storage: WailoKeychain(service: "com.venbiasa.wailo.pairing"))
+    private static let service = "com.venbiasa.wailo.pairing"
+
+    #if DEBUG
+    /// Swappable in debug builds only, because otherwise the WiFi handshake has no test coverage at
+    /// all: the Keychain refuses generic-password items to an unsigned macOS test host, which is the
+    /// same constraint [WailoSecretStorage] exists for. The shipping SDK keeps one place for its keys.
+    static var shared = WailoPairingStore(storage: WailoKeychain(service: service))
+    #else
+    static let shared = WailoPairingStore(storage: WailoKeychain(service: service))
+    #endif
 
     private let storage: WailoSecretStorage
     private let lock = NSLock()

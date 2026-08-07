@@ -46,7 +46,7 @@ class WailoEnginePortTest {
 
         assertTrue(engine.rebind(secondPort))
         assertEquals(secondPort, engine.port)
-        assertTrue(engine.listening)
+        assertTrue(engine.listening.value)
 
         // The whole reason the engine rebinds in place rather than being rebuilt on the new port.
         assertEquals(1, engine.exchanges.value.size)
@@ -63,7 +63,7 @@ class WailoEnginePortTest {
             assertFalse(engine.rebind(secondPort))
         }
         assertEquals(firstPort, engine.port)
-        assertTrue(engine.listening, "a refused port must leave the previous one serving")
+        assertTrue(engine.listening.value, "a refused port must leave the previous one serving")
 
         // Not just nominally up — still reachable where devices were already pointed.
         stream(port = firstPort)
@@ -78,14 +78,77 @@ class WailoEnginePortTest {
         assertFalse(engine.rebind(0))
         assertFalse(engine.rebind(70_000))
         assertEquals(firstPort, engine.port)
-        assertTrue(engine.listening)
+        assertTrue(engine.listening.value)
     }
 
     @Test
     fun startOnAnOccupiedPortReportsFailureInsteadOfThrowing() {
         ServerSocket(firstPort).use {
             assertFalse(engine.start())
-            assertFalse(engine.listening)
+            assertFalse(engine.listening.value)
+        }
+    }
+
+    @Test
+    fun restartTakesThePortBackOnceWhateverHeldItIsGone() = runBlocking {
+        // The state the retry exists for: nothing to fix at launch, because the port was never ours.
+        ServerSocket(firstPort).use {
+            assertFalse(engine.start())
+            assertFalse(engine.listening.value)
+            assertFalse(engine.restart(), "the squatter is still there")
+        }
+
+        assertTrue(engine.restart())
+        assertTrue(engine.listening.value)
+        stream(port = firstPort)
+        assertEquals(1, awaitRows(1).size)
+    }
+
+    /**
+     * The health probe reads a *successful* trial bind as "our socket is gone", which only holds if a
+     * live listener really does make its own port unbindable — including against a probe that sets
+     * SO_REUSEADDR, from inside the process that owns the listener. If that ever stopped being true the
+     * watcher would bounce a perfectly healthy server every few seconds, so assert it directly rather
+     * than reason about socket-option semantics.
+     */
+    @Test
+    fun theHealthProbeLeavesAHealthyServerAlone() = runBlocking {
+        val watched = WailoEngine(port = secondPort, hostWatchIntervalMs = 50)
+        try {
+            assertTrue(watched.start())
+            // Comfortably more ticks than the consecutive-miss threshold needs to act on a false reading.
+            delay(600)
+            assertTrue(watched.listening.value, "the watcher tore down a server that was fine")
+
+            client.webSocket(host = "localhost", port = secondPort, path = "/") {
+                send(Frame.Binary(true, Envelope(hello = HELLO).encode()))
+                send(Frame.Binary(true, Envelope(exchange = EXCHANGE).encode()))
+                delay(500)
+            }
+            val deadline = System.currentTimeMillis() + 5_000
+            while (watched.exchanges.value.isEmpty() && System.currentTimeMillis() < deadline) {
+                delay(50)
+            }
+            assertEquals(1, watched.exchanges.value.size, "still bound, but no longer accepting")
+        } finally {
+            watched.stop()
+        }
+    }
+
+    @Test
+    fun stopReleasesThePortForTheNextEngine() = runBlocking {
+        assertTrue(engine.start())
+
+        // A replaced engine — what a hot reload leaves behind — must not strand the port its replacement
+        // is about to ask for.
+        engine.stop()
+        assertFalse(engine.listening.value)
+
+        val replacement = WailoEngine(port = firstPort)
+        try {
+            assertTrue(replacement.start(), "the discarded engine kept the port")
+        } finally {
+            replacement.stop()
         }
     }
 
