@@ -58,6 +58,9 @@ import com.venbiasa.wailo.shared.consume
 import com.venbiasa.wailo.shared.firstMatch
 import com.venbiasa.wailo.shared.rulesForMatch
 import com.venbiasa.wailo.shared.theme.TextScale
+import com.venbiasa.wailo.desktop.adb.AdbDeviceManager
+import com.venbiasa.wailo.desktop.adb.AdbDeviceState
+import com.venbiasa.wailo.desktop.adb.AdbStatus
 import com.venbiasa.wailo.desktop.pairing.KeychainPairingKeyStore
 import com.venbiasa.wailo.desktop.pairing.PairingQr
 import com.venbiasa.wailo.desktop.usb.UsbConnectionStatus
@@ -128,8 +131,15 @@ private fun runWailo() = application {
     DisposableEffect(usbManager) {
         onDispose { usbManager.close() }
     }
-    val devices = remember(connectedDevices, usbDevices) {
-        mergeDevices(connectedDevices, usbDevices)
+    // Android's counterpart to usbmux, and much thinner: it only installs the `adb reverse` route the
+    // README used to ask people to type, after which the device connects on its own like any other.
+    val adbManager = remember(engine) { AdbDeviceManager(engine.port) }
+    val adbDevices by adbManager.devices.collectAsState()
+    DisposableEffect(adbManager) {
+        onDispose { adbManager.close() }
+    }
+    val devices = remember(connectedDevices, usbDevices, adbDevices) {
+        mergeDevices(connectedDevices, usbDevices, adbDevices)
     }
 
     // An engine that is replaced without being stopped keeps its socket, and the port it strands is the
@@ -173,6 +183,10 @@ private fun runWailo() = application {
             // The engine is the authority on where it ended up: a rejected port rolls back to the last one
             // that worked, so read it back rather than assuming the change took.
             listenPort = engine.port
+            // Every reverse mapping points at the old port and would otherwise route the device to a
+            // socket nobody is listening on — the case the settings help text used to tell people to fix
+            // by hand.
+            adbManager.setHostPort(engine.port)
         }
     }
 
@@ -644,6 +658,7 @@ private fun runWailo() = application {
             usbPort = usbPort,
             usbPortError = usbPortError,
             onApplyUsbPort = applyUsbPort,
+            adbSupported = adbManager.supported,
             maxRetained = maxRetained,
             maxRetainedError = maxRetainedError,
             onApplyMaxRetained = applyMaxRetained,
@@ -782,6 +797,7 @@ private suspend fun spendSeedOn(
 private fun mergeDevices(
     connected: List<ConnectedDevice>,
     attachedUsb: List<UsbDeviceState>,
+    attachedAdb: List<AdbDeviceState>,
 ): List<DeviceInfo> {
     val connectedById = connected.associateBy(ConnectedDevice::connectionId)
     val usbRows = attachedUsb.map { usb ->
@@ -797,9 +813,32 @@ private fun mergeDevices(
             error = usb.error,
         )
     }
+
+    // An `adb reverse` session arrives on the ordinary capture server as an anonymous loopback peer:
+    // nothing on the wire ties it back to a serial, and nothing can. So a session is claimed by an adb
+    // row only when there is exactly one of each — the one-developer-one-phone case, where "connected"
+    // on the row is certain. With more of either, the tunnel rows and the session rows stand apart:
+    // saying less is better than pairing the wrong phone with the wrong app.
+    val tunnelled = connected.filter { it.loopback && it.platform.equals("android", ignoreCase = true) }
+    val claimed = tunnelled.singleOrNull()?.takeIf { attachedAdb.size == 1 }
+    val adbRows = attachedAdb.map { adb ->
+        val session = claimed.takeIf { adb.status == AdbStatus.WAITING_FOR_APP || adb.status == AdbStatus.FORWARDING }
+        DeviceInfo(
+            id = "adb:${adb.serial}",
+            name = session?.deviceName ?: adb.name,
+            appId = session?.appId,
+            platform = "android",
+            transport = DeviceTransportKind.ADB,
+            status = if (session != null) DeviceConnectionStatus.CONNECTED else adb.status.toSharedStatus(),
+            detail = adb.serial,
+            error = adb.error,
+        )
+    }
+
     val attachedIds = attachedUsb.mapTo(mutableSetOf()) { "usb:${it.udid}" }
     val connectedRows = connected
         .filter { it.transport == DeviceTransport.LAN || it.connectionId !in attachedIds }
+        .filterNot { it.connectionId == claimed?.connectionId }
         .map { session ->
             DeviceInfo(
                 id = session.connectionId,
@@ -815,8 +854,8 @@ private fun mergeDevices(
                 detail = session.connectionId.removePrefix("usb:").takeIf { session.transport == DeviceTransport.USB },
             )
         }
-    return (usbRows + connectedRows).sortedWith(
-        compareBy<DeviceInfo> { it.transport != DeviceTransportKind.USB }.thenBy { it.name.lowercase() },
+    return (usbRows + adbRows + connectedRows).sortedWith(
+        compareBy<DeviceInfo> { it.transport == DeviceTransportKind.LAN }.thenBy { it.name.lowercase() },
     )
 }
 
@@ -826,6 +865,14 @@ private fun UsbConnectionStatus.toSharedStatus(): DeviceConnectionStatus = when 
     UsbConnectionStatus.WAITING_FOR_APP -> DeviceConnectionStatus.WAITING_FOR_APP
     UsbConnectionStatus.CONNECTED -> DeviceConnectionStatus.CONNECTED
     UsbConnectionStatus.ERROR -> DeviceConnectionStatus.ERROR
+}
+
+private fun AdbStatus.toSharedStatus(): DeviceConnectionStatus = when (this) {
+    AdbStatus.UNAUTHORIZED -> DeviceConnectionStatus.UNAUTHORIZED
+    AdbStatus.FORWARDING -> DeviceConnectionStatus.CONNECTING
+    AdbStatus.WAITING_FOR_APP -> DeviceConnectionStatus.WAITING_FOR_APP
+    AdbStatus.CONNECTED -> DeviceConnectionStatus.CONNECTED
+    AdbStatus.ERROR -> DeviceConnectionStatus.ERROR
 }
 
 private fun abbreviatedUdid(udid: String): String =

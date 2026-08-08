@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- semantic.dark.background. Keeps the pre-Compose window frame in step with the scheme the panel
+         itself resolves through isSystemInDarkTheme(). -->
+    <color name="wailo_panel_window">#FF000000</color>
+</resources>

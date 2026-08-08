@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!--
+      Merged into the host app. Only ever into a debug one: this artifact is meant to be wired as
+      debugImplementation, which is the Android counterpart of iOS's separate WailoSDKDebug product —
+      a camera permission and a second launcher icon are not a footprint a network interceptor gets to
+      have in a release build.
+    -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature
+        android:name="android.hardware.camera"
+        android:required="false" />
+
+    <application>
+        <!--
+          A launcher entry of its own, so the panel is reachable in an app that never wired a trigger.
+          Its own taskAffinity keeps it out of the host's back stack: entering through the Wailo icon
+          and pressing back should leave, not drop the user into someone else's app mid-flow. Same
+          process though — the panel drives the SDK's process-global state.
+        -->
+        <activity
+            android:name=".WailoPanelActivity"
+            android:exported="true"
+            android:icon="@mipmap/ic_wailo_panel"
+            android:label="Wailo"
+            android:launchMode="singleTask"
+            android:taskAffinity=".wailo.panel"
+            android:theme="@style/Theme.WailoPanel"
+            android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- Adds the panel to the long-press menu on the host's launcher icon. The ${applicationId}
+             authority stays unique per consuming app. -->
+        <provider
+            android:name=".WailoPanelShortcutProvider"
+            android:authorities="${applicationId}.wailo.panel.shortcut"
+            android:exported="false" />
+    </application>
+</manifest>

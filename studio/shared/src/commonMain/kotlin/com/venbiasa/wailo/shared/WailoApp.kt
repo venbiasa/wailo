@@ -40,7 +40,10 @@ import com.venbiasa.wailo.shared.ui.WailoViewer
  * guidance — and whether the USB port is offered at all — without leaking platform APIs into `shared`.
  * [usbPort] is the device-side port Studio dials over USB and [onApplyUsbPort] moves it (rejected values
  * come back through [usbPortError]); it has to be set to match the SDK by hand, since usbmux forwards to a
- * port without advertising one. [maxRetained] is how many captured exchanges the engine holds before the
+ * port without advertising one. [adbSupported] says whether the host found the Android platform-tools, and
+ * so whether an attached phone is forwarded for the user or has to be reached over the network; it needs no
+ * port of its own, because a reverse mapping puts the device on [listenPort] at both ends.
+ * [maxRetained] is how many captured exchanges the engine holds before the
  * oldest fall off, and [onApplyMaxRetained] moves that cap (out-of-range values come back through
  * [maxRetainedError]); lowering it discards traffic, which is why it is applied on commit and not per
  * keystroke. [pairing] and [onPairingAction] drive the Wi-Fi trust surface (ADR-0039):
@@ -95,6 +98,7 @@ fun WailoApp(
     usbPort: Int = 0,
     usbPortError: String? = null,
     onApplyUsbPort: (Int) -> Unit = {},
+    adbSupported: Boolean = false,
     maxRetained: Int = 0,
     maxRetainedError: String? = null,
     onApplyMaxRetained: (Int) -> Unit = {},
@@ -152,6 +156,7 @@ fun WailoApp(
                 usbSupported = usbSupported,
                 usbPort = usbPort,
                 usbPortError = usbPortError,
+                adbSupported = adbSupported,
                 onApplyUsbPort = onApplyUsbPort,
                 maxRetained = maxRetained,
                 maxRetainedError = maxRetainedError,

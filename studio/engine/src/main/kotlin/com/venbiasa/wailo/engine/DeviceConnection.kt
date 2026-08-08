@@ -16,6 +16,14 @@ data class ConnectedDevice(
     val appId: String,
     val platform: String,
     val transport: DeviceTransport,
+    /**
+     * The peer reached this process through the kernel rather than the network: the Simulator, an
+     * emulator, or an `adb reverse` tunnel.
+     *
+     * Carried because nothing in `Hello` can say it, and the desktop needs it to tell an Android device
+     * on the cable from one on WiFi — they arrive on the same server, over the same [DeviceTransport.LAN].
+     */
+    val loopback: Boolean,
 )
 
 /**

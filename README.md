@@ -35,6 +35,7 @@ and consumes `protocol` as the published `wailo-protocol` artifact (ADR-0015).
 | --------------- | ----------------------------------------------------------------- |
 | `protocol`      | KMP library; protobuf schema + Wire-generated types               |
 | `sdk-android`   | Android library; `WailoInterceptor` (OkHttp) + capture sinks + WS client - the injected SDK |
+| `sdk-android-panel` | Android library; the on-device Compose panel + QR pairing — `debugImplementation` only |
 | `wailo-gradle-plugin` | Build-time only; ASM plugin that auto-instruments OkHttp |
 | `sdk-ios`       | Swift package; `WailoURLProtocol` (URLSession) - the injected iOS SDK |
 | `engine`        | JVM library; WebSocket server + multi-session store + query API — **studio build** |
@@ -101,18 +102,26 @@ val client = OkHttpClient.Builder()
 
 ```bash
 (cd studio && ./gradlew :desktopApp:run)      # start the desktop inspector (live list + detail)
-adb reverse tcp:8899 tcp:8899                 # route device localhost:8899 -> desktop
 ./gradlew :sample-android:installDebug
 adb shell am start -n com.venbiasa.wailo.sample/.MainActivity
 ```
 
 Captured requests appear live in the desktop window. The sample already wires this up, so
-running the four commands above is enough to see traffic stream across.
+running the three commands above is enough to see traffic stream across.
+
+Studio installs the `adb reverse` route itself: it watches the adb server for attached devices and
+forwards each one onto the capture port, so an Android phone shows up in the **Devices** panel as soon as
+it is plugged in (ADR-0050, ADR-0052). Nothing to type. If it says no adb was found, put the Android SDK's
+`platform-tools` on `PATH` or set `ANDROID_HOME` — a desktop app launched from Finder does not see your
+shell's `PATH`.
 
 If `:8899` is taken, change it in the desktop's **Settings** panel (the gear at the foot of the right
 tool rail) — the server rebinds without losing what it has already captured, and the choice sticks across
-restarts (ADR-0036). Re-run `adb reverse` on the new port; an iOS device using Bonjour re-finds it by
-itself. The macOS USB path is independent, with its own device port (8900 by default) in the same panel.
+restarts (ADR-0036). Attached Android devices are re-forwarded onto the new port and an iOS device using
+Bonjour re-finds it, so neither needs anything done to it. The macOS USB path is independent, with its own
+device port (8900 by default) in the same panel.
+
+Off the cable, a device reaches Studio over Wi-Fi instead — see [Connecting over Wi-Fi](#connecting-over-wi-fi).
 
 ## Auto-instrumentation
 
@@ -218,28 +227,6 @@ The Wi-Fi path needs three things the Simulator doesn't; see `sample-ios/project
 The first connection is refused while the Local Network prompt is still on screen; the client retries
 every 2s, so it connects on its own a moment after you tap Allow.
 
-**Connecting over Wi-Fi.** A Wi-Fi peer is whoever answered an mDNS advertisement, so reaching a *new*
-desktop is always something you do on purpose: type its address in the on-device panel and press
-**Connect**, or scan the QR from Studio's Devices panel. Tapping a row in the discovered list only fills
-the address field. Discovery on its own will reconnect to a desktop this device already knows, and to
-nothing else — that is what stops a colleague's Studio on the same network from catching your traffic.
-
-The first connection to an address you typed is taken at its word and remembered, along with the
-desktop's fingerprint; every later connection to that address must present the same one. If a different
-desktop answers there, the panel stops and shows both fingerprints so you can decide (ADR-0040). Either
-way the session is encrypted end to end.
-
-Turn on **Only paired devices over Wi-Fi** in Studio's Settings for a shared or untrusted network: a
-device then has to scan the QR or type the code before it is let in. Devices you already trust stay
-connected when you switch it on.
-
-Loopback is exempt throughout — the Simulator, `adb reverse` and the USB tunnel all reach a machine the
-kernel guarantees is this one, so they connect with no key at all.
-
-The handshake is implemented in `sdk-ios` only so far. `sdk-android` speaks the pre-ADR-0039 wire and is
-admitted over loopback (its `adb reverse` default) but refused over Wi-Fi, so an Android host app must
-not be pointed at a LAN address until the Kotlin half lands.
-
 The Swift protobuf types are generated from the shared schema — regenerate after editing `protocol`:
 
 ```bash
@@ -262,6 +249,53 @@ is how it's smoke-tested end-to-end against the desktop:
 (cd studio && ./gradlew :desktopApp:run) # start the desktop receiver
 cd sample-ios/cli && swift run wailo-sample-ios-cli
 ```
+
+## Connecting over Wi-Fi
+
+Everything above reaches Studio over loopback — the Simulator, an emulator, `adb reverse`, the USB
+tunnel — and loopback is exempt from all of this, since the kernel already guarantees the peer is this
+machine. Wi-Fi is what the rest of this section is for. Both SDKs implement the same handshake against
+the same test vectors, each keeping its long-term key where the platform keeps secrets (the Keychain,
+the Android Keystore) and finding desktops with the platform's own mDNS client (`NWBrowser`,
+`NsdManager`).
+
+A Wi-Fi peer is whoever answered an mDNS advertisement, so reaching a *new* desktop is always something
+you do on purpose: type its address in the on-device panel and press **Connect**, or scan the QR from
+Studio's Devices panel. Tapping a row in the discovered list only fills the address field. Discovery on
+its own will reconnect to a desktop this device already knows, and to nothing else — that is what stops
+a colleague's Studio on the same network from catching your traffic.
+
+The first connection to an address you typed is taken at its word and remembered, along with the
+desktop's fingerprint; every later connection to that address must present the same one. If a different
+desktop answers there, the panel stops and shows both fingerprints so you can decide (ADR-0040). Either
+way the session is encrypted end to end.
+
+Turn on **Only paired devices over Wi-Fi** in Studio's Settings for a shared or untrusted network: a
+device then has to scan the QR or type the code before it is let in. Devices you already trust stay
+connected when you switch it on.
+
+Which desktop gets dialled is decided the same way on both platforms, highest first: an explicit host,
+then a saved override, then discovery, then `localhost`. On Android the explicit host is the `host`
+argument of `Wailo.webSocketSink` and the override is `Wailo.setHost("192.168.1.42")` (`null` clears it
+and hands control back to discovery); the iOS equivalents are listed above. Nothing here needs a rebuild
+to change.
+
+**The on-device panel** is where a device is pointed at a desktop, and on both platforms it ships as a
+debug-only artifact so that its UI framework, QR scanner and camera permission stay out of release
+builds. iOS links `WailoSDKDebug` instead of `WailoSDK` (above); Android adds one dependency, and that
+is the entire setup:
+
+```kotlin
+// host app build.gradle.kts
+debugImplementation("com.venbiasa.wailo:wailo-android-panel:0.1.0-SNAPSHOT")
+```
+
+That gives you two ways in, both with no host code, because opening either starts the app and the SDK
+arms itself (ADR-0017): a second launcher icon labelled **Wailo**, and a **Wailo** entry in the
+long-press menu on your app's own icon. A host that would rather
+put it behind its own affordance calls `WailoPanel.show(context)`, or embeds the `WailoPanelScreen`
+composable in a screen of its own. Both panels follow the same design tokens as Studio, in light and
+dark (ADR-0038/0049).
 
 ## Kotlin Multiplatform (`sample-kmp`)
 

@@ -104,8 +104,9 @@ internal fun SettingsManager(
                     canReapplyUnchanged = !listening,
                     onApply = onApplyPort,
                     status = "Devices dial $listenAddress",
-                    help = "Changing it restarts the server, so connected devices drop. Android needs " +
-                        "adb reverse re-run on the new port; iOS finds it over Bonjour.",
+                    help = "Changing it restarts the server, so connected devices drop. They come back " +
+                        "on their own: an attached Android device is re-forwarded with adb, and iOS " +
+                        "finds the new port over Bonjour.",
                 )
                 if (usbSupported) {
                     RowDivider()

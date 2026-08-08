@@ -536,7 +536,9 @@ class WailoEngine(
                 val envelope = Envelope.ADAPTER.decode(bytes)
                 envelope.hello?.let {
                     hello = it
-                    identify(connection, it)
+                    // Read off the pre-admission connection: for a LAN peer `isTrusted` is exactly
+                    // "arrived on loopback", which is the one thing the sealed wrapper no longer says.
+                    identify(connection, it, loopback = unadmitted.isTrusted && unadmitted.transport == DeviceTransport.LAN)
                     // The paired list is keyed by an opaque device id; Hello is the first and only
                     // place a human-readable name for it appears.
                     pairings.known(admitted.deviceId)?.let { paired ->
@@ -848,13 +850,14 @@ class WailoEngine(
         _pausedExchanges.update { list -> list.filterNot { it.correlationId in orphaned } }
     }
 
-    private fun identify(connection: DeviceConnection, hello: Hello) {
+    private fun identify(connection: DeviceConnection, hello: Hello, loopback: Boolean) {
         val device = ConnectedDevice(
             connectionId = connection.id,
             deviceName = hello.device_name,
             appId = hello.app_id,
             platform = hello.platform,
             transport = connection.transport,
+            loopback = loopback,
         )
         _connectedDevices.update { list -> list.filterNot { it.connectionId == connection.id } + device }
     }

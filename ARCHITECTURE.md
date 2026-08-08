@@ -41,7 +41,11 @@ flowchart LR
   desktop is the server (default port 8899, bound on every interface). The LAN port is changeable at
   runtime from Settings and persists across restarts; the engine rebinds in place without losing captured
   traffic or rule snapshots (ADR-0036).
-- Android: forwarded over `adb reverse` per device (`adb -s <serial> reverse tcp:8899 tcp:8899`).
+- Android on the cable: forwarded over `adb reverse` per device, installed by Studio rather than by hand.
+  It watches the adb server's `host:track-devices` stream — falling back to an `adb devices -l` poll, which
+  is also what starts a server to track (ADR-0052) — and runs `adb -s <serial> reverse tcp:8899 tcp:8899`
+  for each ready one, re-forwarding them when the capture port moves (ADR-0050). Unlike usbmux this owns no
+  connection — a reverse mapping only installs a route, and the device stays the client on the LAN server.
 - iOS Simulator: shares the Mac's network stack, so `localhost:8899` reaches the LAN server directly.
 - iOS physical device on macOS: Studio monitors Apple's built-in `/var/run/usbmuxd` and connects to the
   SDK's device-local WebSocket listener on port 8900. This reverses only who opens the socket: the
@@ -54,16 +58,21 @@ flowchart LR
   not need a re-plug or an app restart.
 - iOS physical device without USB: finds the LAN server over Bonjour (ADR-0035). This path still needs
   Local Network consent, Bonjour plist declarations, and ATS permission for plaintext `ws://`.
+- Android over Wi-Fi: same handshake, same resolution order (ADR-0048). Discovery is `NsdManager`, the
+  system's own mDNS client, so there is no third-party library and no `MulticastLock` — resolution happens
+  in a system daemon, outside the app's process.
 - Discovery: the desktop advertises `_wailo._tcp` on its LAN address (JmDNS, best-effort — a failure
-  never blocks the server); `sdk-ios` browses with `NWBrowser`. Host apps must declare
-  `NSLocalNetworkUsageDescription` + `NSBonjourServices`, and an ATS exception for plaintext `ws://`
-  to an IP literal. Android doesn't browse — `adb reverse` already makes the desktop local.
-- iOS host resolution, highest first: the `host` passed to `Wailo.start`, then the persisted /
-  `-WailoHost` launch-argument override, then Bonjour, then `localhost`. Every input is runtime-mutable
-  (`Wailo.setHost`, or the `WailoSDKDebug` panel), so changing desktops never needs a rebuild.
+  never blocks the server); `sdk-ios` browses with `NWBrowser` and `sdk-android` with `NsdManager`. iOS
+  host apps must declare `NSLocalNetworkUsageDescription` + `NSBonjourServices`, and an ATS exception for
+  plaintext `ws://` to an IP literal; Android needs no manifest entry for either.
+- Host resolution on both platforms, highest first: the `host` passed to `Wailo.start` /
+  `Wailo.webSocketSink`, then the persisted override (iOS also takes a `-WailoHost` launch argument), then
+  discovery — restricted to desktops this device already holds a key for — then `localhost`, which is
+  where `adb reverse` and the Simulator put it. Every input is runtime-mutable (`Wailo.setHost`, or the
+  on-device panel), so changing desktops never needs a rebuild.
 - Multiple devices/apps each have their own engine session. Studio connects to every USB-attached iOS
   device exposing the configured USB port; `Hello` identifies the app after the tunnel opens.
-- Deferred: Windows/Linux iOS USB support, and mDNS for Android.
+- Deferred: Windows/Linux iOS USB support.
 
 ## Multi-session model
 

@@ -17,6 +17,8 @@ wire = "5.3.5"
 okhttp = "4.12.0"
 asm = "9.9"
 junit = "4.13.2"
+# QR scanning for the debug-only panel. Never reaches :sdk-android, which ships in third-party apps.
+zxing = "4.3.0"
 
 [libraries]
 agp-api = { module = "com.android.tools.build:gradle-api", version.ref = "agp" }
@@ -46,6 +48,8 @@ compose-runtime = { module = "org.jetbrains.compose.runtime:runtime", version.re
 compose-foundation = { module = "org.jetbrains.compose.foundation:foundation", version.ref = "composeMultiplatform" }
 compose-material = { module = "org.jetbrains.compose.material:material", version.ref = "composeMultiplatform" }
 compose-ui = { module = "org.jetbrains.compose.ui:ui", version.ref = "composeMultiplatform" }
+
+zxing-embedded = { module = "com.journeyapps:zxing-android-embedded", version.ref = "zxing" }
 
 wire-runtime = { module = "com.squareup.wire:wire-runtime", version.ref = "wire" }
 # CLI compiler used to emit Swift for sdk-ios; the Wire Gradle plugin has no Swift target.

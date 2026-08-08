@@ -44,6 +44,11 @@ kotlin {
 dependencies {
     implementation(projects.sdkAndroid)
 
+    // debugImplementation, never implementation: this artifact merges a CAMERA permission and a second
+    // launcher icon into whatever it is added to, and carries Compose + ZXing. It is the Android
+    // counterpart of iOS's separate WailoSDKDebug product, and the release build must not see it.
+    debugImplementation(projects.sdkAndroidPanel)
+
     // Required at runtime: the SDK declares OkHttp compileOnly.
     implementation(libs.okhttp)
 

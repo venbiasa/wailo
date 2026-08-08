@@ -42,12 +42,15 @@ import com.venbiasa.wailo.shared.theme.LocalWailoColors
  *
  * [usbPort] is named on each USB row because it is the one setting that can silently mismatch: usbmux has
  * no discovery, so a device listening on another port is indistinguishable from an app that never started.
+ * An adb row names [listenPort] for the same reason — it is both ends of the reverse mapping.
  */
 @Composable
 internal fun DevicesManager(
     devices: List<DeviceInfo>,
     usbSupported: Boolean,
     usbPort: Int,
+    adbSupported: Boolean,
+    listenPort: Int,
     pairing: PairingState,
     onPairingAction: (PairingAction) -> Unit,
     onClose: () -> Unit = {},
@@ -78,19 +81,11 @@ internal fun DevicesManager(
                     item(key = "connected-header") { SectionHeader("Connected") }
                     if (devices.isEmpty()) {
                         item(key = "connected-empty") {
-                            SectionEmptyText(
-                                if (usbSupported) {
-                                    "No devices connected — attach an iPhone by USB (Studio dials port " +
-                                        "$usbPort on it) or pair one over the local area network."
-                                } else {
-                                    "No devices connected — pair one over the local area network. USB " +
-                                        "discovery is currently macOS-only."
-                                },
-                            )
+                            SectionEmptyText(emptyDevicesText(usbSupported, usbPort, adbSupported))
                         }
                     } else {
                         items(devices, key = { "connected-${it.id}" }) { device ->
-                            DeviceRow(device, usbPort)
+                            DeviceRow(device, usbPort, listenPort)
                             RowDivider()
                         }
                     }
@@ -128,8 +123,28 @@ internal fun DevicesManager(
     }
 }
 
+/**
+ * Why nothing is listed, in terms of what this machine can actually do about it — a Mac without the
+ * Android platform-tools cannot be told to attach a phone by cable, and a Linux host cannot be told to
+ * attach an iPhone at all.
+ */
+private fun emptyDevicesText(usbSupported: Boolean, usbPort: Int, adbSupported: Boolean): String {
+    val cable = listOfNotNull(
+        "attach an iPhone by USB (Studio dials port $usbPort on it)".takeIf { usbSupported },
+        "attach an Android device by USB (Studio forwards it with adb)".takeIf { adbSupported },
+    )
+    val ways = (cable + "pair one over the local area network").joinToString(", or ")
+    val missing = when {
+        !usbSupported && !adbSupported -> " iPhone USB is macOS-only, and no adb was found for Android."
+        !usbSupported -> " iPhone USB is currently macOS-only."
+        !adbSupported -> " No adb was found, so Android devices have to connect over the network."
+        else -> ""
+    }
+    return "No devices connected — $ways.$missing"
+}
+
 @Composable
-private fun DeviceRow(device: DeviceInfo, usbPort: Int) {
+private fun DeviceRow(device: DeviceInfo, usbPort: Int, listenPort: Int) {
     Row(
         Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
         horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -152,7 +167,11 @@ private fun DeviceRow(device: DeviceInfo, usbPort: Int) {
                     color = MaterialTheme.colorScheme.onSurface,
                 )
                 Text(
-                    if (device.transport == DeviceTransportKind.USB) "USB · $usbPort" else "LAN",
+                    when (device.transport) {
+                        DeviceTransportKind.USB -> "USB · $usbPort"
+                        DeviceTransportKind.ADB -> "adb · $listenPort"
+                        DeviceTransportKind.LAN -> "LAN"
+                    },
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -181,7 +200,9 @@ private fun statusColor(status: DeviceConnectionStatus) = when (status) {
     DeviceConnectionStatus.ATTACHED,
     DeviceConnectionStatus.CONNECTING,
     -> LocalWailoColors.current.info
-    DeviceConnectionStatus.WAITING_FOR_APP -> LocalWailoColors.current.warning
+    DeviceConnectionStatus.WAITING_FOR_APP,
+    DeviceConnectionStatus.UNAUTHORIZED,
+    -> LocalWailoColors.current.warning
     DeviceConnectionStatus.ERROR -> MaterialTheme.colorScheme.error
 }
 
@@ -189,6 +210,7 @@ private fun statusLabel(status: DeviceConnectionStatus): String = when (status) 
     DeviceConnectionStatus.ATTACHED -> "Attached"
     DeviceConnectionStatus.CONNECTING -> "Connecting…"
     DeviceConnectionStatus.WAITING_FOR_APP -> "Waiting for an app using Wailo"
+    DeviceConnectionStatus.UNAUTHORIZED -> "Waiting for permission on the device"
     DeviceConnectionStatus.CONNECTED -> "Connected"
     DeviceConnectionStatus.ERROR -> "Connection failed"
 }

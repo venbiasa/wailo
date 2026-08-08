@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@color/wailo_panel_icon_background" />
+    <foreground android:drawable="@mipmap/ic_wailo_panel_foreground" />
+    <!-- The same asset: a themed icon reads only the alpha channel, and the foreground is already the
+         mark cut out of transparency, so a separate one-colour copy would be the same shape twice. -->
+    <monochrome android:drawable="@mipmap/ic_wailo_panel_foreground" />
+</adaptive-icon>

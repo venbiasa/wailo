@@ -15,7 +15,9 @@ local WebSocket to a Kotlin Multiplatform desktop app. Later: headless automatio
    Compose/UI code in `engine`, and do not make the desktop UI talk to the transport directly.
 3. The interceptor SDK (`sdk-android`, `sdk-ios`) ships inside third-party apps. Keep it small and
    dependency-light. Never make it depend on `engine`, `shared`, or `desktopApp`. `sdk-ios` is native
-   Swift and must not embed a Kotlin/Native runtime (ADR-0010).
+   Swift and must not embed a Kotlin/Native runtime (ADR-0010). Anything that needs UI, a camera or a
+   heavy library goes in the debug-only artifact beside it — `sdk-android-panel` / the `WailoSDKDebug`
+   product — never in the SDK itself (ADR-0049).
 4. The device-side transport/sink logic (WebSocket client, buffering, redaction) lives *inside*
    `sdk-android` — the former `core` module was folded in (ADR-0011). `sdk-ios` reimplements the same
    thin logic in Swift. There is no shared device-side Kotlin module; consistency across the two SDKs
@@ -26,8 +28,10 @@ local WebSocket to a Kotlin Multiplatform desktop app. Later: headless automatio
 Two Gradle builds, joined only by the published `protocol` artifact (ADR-0015):
 
 ```
-SDK build (repo root, consumer-pinned — ADR-0014); publishes wailo-protocol, wailo-android, plugin:
+SDK build (repo root, consumer-pinned — ADR-0014); publishes wailo-protocol, wailo-android,
+wailo-android-panel, plugin:
   protocol    <- sdk-android <- sample-android
+  sdk-android <- sdk-android-panel <- sample-android   (debugImplementation only — ADR-0049)
   sdk-android <- sample-kmp:androidApp -> sample-kmp:shared   (iOS app links sdk-ios + Shared.framework)
   protocol    -> (Wire Swift codegen) -> sdk-ios <- sample-ios
 
@@ -44,6 +48,11 @@ Swift runtime, with its protobuf types generated from `protocol` (see ADR-0010).
 Multiplatform (jvm+android, for `sdk-android` and the iOS Swift codegen); `shared` is now JVM-only (its
 Android target was dropped, ADR-0015); `sdk-android` and `engine` are single-target.
 
+`sdk-android-panel` is the on-device panel (Compose + a ZXing QR scanner + a launcher shortcut). It is a
+consumer of `sdk-android`, never the other way round, and hosts wire it as `debugImplementation` so its
+`CAMERA` permission and second launcher icon cannot reach a release build (ADR-0049). Its name says what
+it is rather than which variant it belongs to — `-debug` read as an AGP variant suffix.
+
 Samples are leaf consumers (never depended on): `sample-android` (native Android), `sample-ios`
 (a SwiftUI app + a `cli/` smoke harness, both on `sdk-ios`), and `sample-kmp` (KMP: a Wailo-free
 `sample-kmp:shared` Ktor module + an `androidApp` using `sdk-android` + the plugin + an `iosApp` Xcode
@@ -59,11 +68,13 @@ from the desktop `shared` module.
 > root. See `.cursor/rules/gradle-build-directories.mdc`.
 
 ```bash
-# --- SDK build (repo root): protocol, sdk-android, samples, plugin ---
+# --- SDK build (repo root): protocol, sdk-android, sdk-android-panel, samples, plugin ---
 ./gradlew projects
 ./gradlew build
 ./gradlew :protocol:publishToMavenLocal    # required before building studio (which consumes wailo-protocol)
 ./gradlew :sample-android:assembleDebug
+# The panel's debug-only boundary is a build fact, so check it on the merged manifests, not by reading:
+#   assembleRelease must produce no CAMERA permission and no WailoPanelActivity
 # iOS SDK (SwiftPM, macOS host): regenerate protobuf, then build/test
 ./gradlew :protocol:generateSwiftProto
 cd sdk-ios && swift test

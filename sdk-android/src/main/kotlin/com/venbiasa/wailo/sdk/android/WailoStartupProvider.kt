@@ -10,16 +10,23 @@ import android.os.Build
 /**
  * Zero-config startup hook: its [onCreate] runs before the host `Application`, so applying the Wailo
  * Gradle plugin and depending on this SDK is enough to stream captured traffic — no startup code in the
- * host app. Auto-installs a default WebSocket sink to [WailoClient.DEFAULT_HOST]:[WailoClient.DEFAULT_PORT].
+ * host app. Auto-installs a default WebSocket sink, which resolves its own desktop: the address pinned
+ * in the panel, then one discovered over mDNS, then `localhost` for `adb reverse`.
  *
- * Restricted to debuggable builds, so release variants (which still carry the woven, no-op runtime) do
- * nothing. To customise host/port or fan out to extra sinks (e.g. Logcat), call [WailoRuntime.install]
- * from `Application.onCreate`; it runs after this and cleanly replaces the auto-installed sink.
+ * The sink is restricted to debuggable builds, so release variants (which still carry the woven, no-op
+ * runtime) do nothing. To pin a host/port or fan out to extra sinks (e.g. Logcat), call
+ * [WailoRuntime.install] from `Application.onCreate`; it runs after this and cleanly replaces the
+ * auto-installed sink.
+ *
+ * [Wailo.attach] is not gated the same way: it only hands the SDK a `Context`, and doing it here
+ * unconditionally means a host that wires its own sink still gets persisted pairings and discovery
+ * without having to know this call exists.
  */
 class WailoStartupProvider : ContentProvider() {
 
     override fun onCreate(): Boolean {
         val context = context ?: return false
+        Wailo.attach(context)
         val debuggable = (context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
         if (debuggable) {
             WailoRuntime.install(

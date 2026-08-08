@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Library resources merge into the host app's, so every name here is prefixed to keep a clash out of
+  someone else's build.
+-->
+<resources>
+    <!-- semantic.light.background, matching WailoTokens. Painting the window in it stops a white flash
+         between the activity opening and Compose's first frame. -->
+    <color name="wailo_panel_window">#FFFFFFFF</color>
+    <color name="wailo_panel_icon_background">#FF0A0A0A</color>
+
+    <style name="Theme.WailoPanel" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/wailo_panel_window</item>
+    </style>
+</resources>
