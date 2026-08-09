@@ -78,6 +78,9 @@ from the desktop `shared` module.
 # iOS SDK (SwiftPM, macOS host): regenerate protobuf, then build/test
 ./gradlew :protocol:generateSwiftProto
 cd sdk-ios && swift test
+# `swift test` runs on macOS, where `canImport(UIKit)` is false — those branches are only type-checked
+# by an iOS compile, so run it too whenever one is touched (ADR-0053):
+cd sdk-ios && xcodebuild -scheme WailoSDK -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' build CODE_SIGNING_ALLOWED=NO
 # iOS sample app (needs `brew install xcodegen`): generate project, compile for the Simulator SDK
 cd sample-ios && xcodegen generate && xcodebuild -scheme WailoSampleiOS -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' build CODE_SIGNING_ALLOWED=NO
 # iOS sample CLI harness (headless, no simulator): cd sample-ios/cli && swift build

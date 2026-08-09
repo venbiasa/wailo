@@ -95,6 +95,38 @@ final class WailoUsbListenerTests: XCTestCase {
         wait(for: [helloReceived], timeout: 10)
     }
 
+    /// Coming back from the background has to rebind even when the old listener still looks perfectly
+    /// alive.
+    ///
+    /// The reported symptom is locking the phone, returning to the app, and USB never reconnecting
+    /// however long you wait — only a relaunch fixes it. iOS reclaims a suspended app's listening
+    /// socket, and `NWListener` frequently never reports that: it stays `.ready` with nothing behind it.
+    /// Every re-arm was gated on `listener == nil`, which such a listener never satisfies, so nothing
+    /// ever replaced it. A live listener stands in for the zombie here, because from the inside the two
+    /// are indistinguishable — which is the entire point.
+    func testForegroundRebindsAListenerThatStillLooksAlive() throws {
+        let listener = startUsbListener()
+        defer { listener.stopAndWait() }
+        let boundBefore = listener.debugBindGeneration
+
+        listener.rebindAfterForegroundAndWait()
+
+        XCTAssertGreaterThan(
+            listener.debugBindGeneration,
+            boundBefore,
+            "returning to the foreground must rebind rather than trust the listener it already has"
+        )
+        XCTAssertTrue(listener.debugIsListening)
+
+        let client = try connectUsbStudio()
+        defer { client.close() }
+        let hello = expectation(description: "hello after the foreground rebind")
+        client.onEnvelope = { envelope in
+            if case .hello = envelope.message { hello.fulfill() }
+        }
+        wait(for: [hello], timeout: 10)
+    }
+
     func testListenerSendsHelloThenExchange() throws {
         let listener = startUsbListener()
         defer { listener.stopAndWait() }

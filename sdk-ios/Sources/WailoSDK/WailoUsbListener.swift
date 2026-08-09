@@ -42,7 +42,7 @@ final class WailoUsbListener: @unchecked Sendable {
     private let callbackQueue = DispatchQueue(label: "com.venbiasa.wailo.usb.listener.callback")
     private var listener: NWListener?
     private var active: WailoUsbConnection?
-    private var foregroundObserver: NSObjectProtocol?
+    private var lifecycleObservers: [NSObjectProtocol] = []
     /// Identifies the bind a state callback belongs to, so a late `.cancelled` from a listener we already
     /// replaced (or stopped) cannot resurrect one.
     private var bindGeneration = 0
@@ -62,15 +62,15 @@ final class WailoUsbListener: @unchecked Sendable {
     }
 
     deinit {
-        if let foregroundObserver {
-            NotificationCenter.default.removeObserver(foregroundObserver)
+        for observer in lifecycleObservers {
+            NotificationCenter.default.removeObserver(observer)
         }
     }
 
     func start() {
         queue.async {
             self.wanted = true
-            self.observeForeground()
+            self.observeLifecycle()
             guard self.listener == nil else { return }
             self.retryDelay = Self.minRetryDelay
             self.startLocked()
@@ -94,20 +94,33 @@ final class WailoUsbListener: @unchecked Sendable {
         queue.sync {}
     }
 
+    /// Drives the return-from-background re-arm, which no macOS test host can post a notification for.
+    /// Waits for the new bind so a test can assert on a listener rather than poll for one.
+    func rebindAfterForegroundAndWait() {
+        queue.sync { self.rebindAfterForeground() }
+        for _ in 0..<50 {
+            if debugIsListening { return }
+            Thread.sleep(forTimeInterval: 0.1)
+        }
+    }
+
     func debugActiveConnection() -> WailoUsbConnection? {
         queue.sync { active }
     }
 
     var debugIsListening: Bool { listener != nil }
+
+    /// Counts binds, so a test can tell a listener that was replaced from one that was merely left alone.
+    var debugBindGeneration: Int { queue.sync { bindGeneration } }
     #endif
 
     func stop() {
         queue.async {
             self.wanted = false
-            if let observer = self.foregroundObserver {
+            for observer in self.lifecycleObservers {
                 NotificationCenter.default.removeObserver(observer)
-                self.foregroundObserver = nil
             }
+            self.lifecycleObservers.removeAll()
             self.active?.close()
             self.active = nil
             self.listener?.cancel()
@@ -120,21 +133,56 @@ final class WailoUsbListener: @unchecked Sendable {
     /// Returning to the foreground is the other half of the re-arm: a listener that died while the app
     /// was suspended reports its failure only once the process is scheduled again, and on some resumes
     /// not at all.
-    private func observeForeground() {
+    ///
+    /// Hence two hooks rather than one. `willEnterForeground` fires only after the app really was in the
+    /// background — the case where iOS reclaims the listening socket — and rebinds unconditionally.
+    /// `didBecomeActive` also fires for a notification banner or Control Centre, where nothing was lost,
+    /// so it only binds if there is nothing bound at all.
+    private func observeLifecycle() {
         #if canImport(UIKit)
-        guard foregroundObserver == nil else { return }
-        foregroundObserver = NotificationCenter.default.addObserver(
-            forName: UIApplication.didBecomeActiveNotification,
-            object: nil,
-            queue: nil
-        ) { [weak self] _ in
-            guard let self else { return }
-            self.queue.async {
-                guard self.listener == nil else { return }
-                self.startLocked()
-            }
-        }
+        guard lifecycleObservers.isEmpty else { return }
+        lifecycleObservers = [
+            observe(UIApplication.willEnterForegroundNotification) { $0.rebindAfterForeground() },
+            observe(UIApplication.didBecomeActiveNotification) { $0.startLocked() },
+        ]
         #endif
+    }
+
+    #if canImport(UIKit)
+    private func observe(
+        _ name: Notification.Name,
+        with work: @escaping (WailoUsbListener) -> Void
+    ) -> NSObjectProtocol {
+        NotificationCenter.default.addObserver(forName: name, object: nil, queue: nil) { [weak self] _ in
+            guard let self else { return }
+            self.queue.async { work(self) }
+        }
+    }
+    #endif
+
+    /// Throws the current bind away and starts a fresh one, whatever state the old listener claims.
+    ///
+    /// It cannot be conditional on the listener looking dead, which is what every re-arm path used to
+    /// key off. iOS reclaims a suspended app's listening socket, and `NWListener` often never reports
+    /// it: the object sits in `.ready` with nothing behind it, so `listener == nil` is false, every
+    /// re-arm returns early, and USB stays dead until the process is relaunched — the whole of the bug
+    /// where locking the phone and coming back never reconnects however long you wait. There is no way
+    /// to ask a listener whether it can still accept, so the only reliable answer is to rebind, which
+    /// costs milliseconds.
+    ///
+    /// An accepted connection is deliberately left alone: it is a separate socket that a new listener
+    /// does not disturb, and if it died in the background too its keepalive fails it within a ping
+    /// interval — whereas closing it here would drop a session that survived a background short enough
+    /// to never suspend the app.
+    private func rebindAfterForeground() {
+        guard wanted else { return }
+        // Retires the outgoing listener's callbacks first, so the `.cancelled` it is about to report
+        // cannot schedule a rebind on top of this one.
+        bindGeneration += 1
+        listener?.cancel()
+        listener = nil
+        retryDelay = Self.minRetryDelay
+        startLocked()
     }
 
     /// Delayed rather than immediate so a listener that fails the instant it goes ready cannot spin this

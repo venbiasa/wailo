@@ -1,8 +1,5 @@
 #if canImport(UIKit)
-// GENERATED FROM tokens.json — DO NOT EDIT
-// Source: ~/Documents/personal/projects/ai-assists/design-tokens/tokens.json (semantic layer).
-// Regenerate rather than hand-editing; the studio's Compose theme is generated from the same file, which
-// is the only reason the two surfaces agree in both schemes.
+
 import SwiftUI
 import UIKit
 
