@@ -63,6 +63,79 @@ final class WailoHandshakeReconnectTests: XCTestCase {
         XCTAssertEqual(studio.rejections, 0)
     }
 
+    /// A new address says where Studio moved, not which saved identity it is. The challenge supplies
+    /// that identity; choosing first-contact before reading it makes a known device use the wrong key.
+    func testChangingAStudiosAddressFindsItsPairingAmongSeveralSavedDesktops() throws {
+        let studio = FakeStudio()
+        let server = LoopbackWebSocketServer()
+        let port = try server.start()
+        defer { server.stop() }
+        studio.serve(on: server)
+
+        XCTAssertTrue(Wailo.setHost("localhost", port: Int(port)))
+        Wailo.start(
+            appId: "com.test.address-change",
+            deviceName: "address-change",
+            alsoLogToConsole: false
+        )
+
+        waitUntilTrue { studio.admissions.count == 1 }
+        XCTAssertEqual(studio.admissions.first, .firstContact)
+        waitUntilTrue { WailoPairingStore.shared.all.count == 1 }
+
+        let unrelatedKey = P256.Signing.PrivateKey().publicKey.x963Representation
+        WailoPairingStore.shared.save(WailoPairing(
+            studioId: WailoCrypto.studioId(publicKey: unrelatedKey),
+            deviceKey: Data(repeating: 0x7a, count: 32),
+            publicKey: unrelatedKey,
+            sessionCounter: 1,
+            refused: false,
+            lastHost: "10.0.0.9",
+            trustedOnFirstUse: false
+        ))
+
+        XCTAssertTrue(Wailo.setHost("127.0.0.1", port: Int(port)))
+
+        waitUntilTrue { studio.admissions.count == 2 }
+        XCTAssertEqual(
+            studio.admissions.last,
+            .proved,
+            "the Studio identity in the challenge must select its saved key after DHCP moves its address"
+        )
+        waitUntilTrue {
+            WailoPairingStore.shared.pairing(studioId: studio.studioId)?.lastHost == "127.0.0.1"
+        }
+        XCTAssertEqual(Wailo.activeAddress, "127.0.0.1:\(port)")
+        XCTAssertTrue(
+            WailoPairingStore.shared.pairing(studioId: studio.studioId)?.trustedOnFirstUse == true,
+            "moving an address must not rewrite how the Studio was originally trusted"
+        )
+        XCTAssertEqual(studio.rejections, 0)
+    }
+
+    func testAnUnknownStudioStillGetsFirstContactWhenOtherPairingsExist() throws {
+        let deviceId = "0123456789abcdef"
+        let knownStudio = FakeStudio()
+        let newStudio = FakeStudio()
+
+        let known = WailoHandshake(trust: .firstContact, deviceId: deviceId, host: "10.0.0.2")
+        guard case let .established(established) = knownStudio.run(known) else {
+            return XCTFail("the existing Studio must establish the saved pairing")
+        }
+
+        let new = WailoHandshake(
+            trust: .knownOrFirstContact([established.pairing]),
+            deviceId: deviceId,
+            host: "10.0.0.77"
+        )
+        guard case let .established(result) = newStudio.run(new) else {
+            return XCTFail("a user-chosen address with a new identity must remain eligible for first contact")
+        }
+
+        XCTAssertEqual(result.pairing.studioId, newStudio.studioId)
+        XCTAssertTrue(result.pairing.trustedOnFirstUse)
+    }
+
     /// The mechanism behind the failure above, asserted directly so the reason the upgrade is
     /// load-bearing survives a refactor of how it gets there.
     func testAStrangerIsRejectedOnceStudioHoldsAKeyForIt() throws {

@@ -486,21 +486,24 @@ final class WailoCoordinator: @unchecked Sendable {
             ))
         }
 
-        // Nothing known about this address. Only worth a word if the user put it there.
-        return chosen ? .wifi(.firstContact) : .blocked
+        // The address does not identify one saved Studio. A chosen endpoint may still answer as any
+        // known identity; let its signed challenge select the key before treating it as a stranger.
+        guard chosen else { return .blocked }
+        let candidates = pairingStore.all.filter { !$0.refused }
+        return candidates.isEmpty
+            ? .wifi(.firstContact)
+            : .wifi(.knownOrFirstContact(candidates))
     }
 
     /// A typed IP names a machine, not an identity, so work back to one: the advertised `sid` at that
-    /// address, else the Studio last reached there, else the only pairing there is — which is the
-    /// normal case, one developer with one Mac.
+    /// address, else the Studio last reached there. An unfamiliar address is resolved from the
+    /// identity in its challenge, because DHCP can move any one of several saved Studios there.
     private func pairing(forHost host: String) -> WailoPairing? {
         if let advertised = discovered.first(where: { $0.host == host && !$0.studioId.isEmpty }),
            let pairing = pairingStore.pairing(studioId: advertised.studioId) {
             return pairing
         }
-        let all = pairingStore.all
-        if let remembered = all.first(where: { $0.lastHost == host }) { return remembered }
-        return all.count == 1 ? all.first : nil
+        return pairingStore.all.first(where: { $0.lastHost == host })
     }
 
     private static func isLoopback(_ host: String) -> Bool {
@@ -564,13 +567,20 @@ final class WailoCoordinator: @unchecked Sendable {
         _ trust: WailoHandshake.Trust,
         in store: WailoPairingStore
     ) -> WailoHandshake.Trust {
-        guard case let .paired(studioId, deviceKey, publicKey, _) = trust else { return trust }
-        return .paired(
-            studioId: studioId,
-            deviceKey: deviceKey,
-            publicKey: publicKey,
-            sessionCounter: store.pairing(studioId: studioId)?.sessionCounter ?? 0
-        )
+        switch trust {
+        case let .paired(studioId, deviceKey, publicKey, _):
+            return .paired(
+                studioId: studioId,
+                deviceKey: deviceKey,
+                publicKey: publicKey,
+                sessionCounter: store.pairing(studioId: studioId)?.sessionCounter ?? 0
+            )
+        case let .knownOrFirstContact(pairings):
+            let current = pairings.compactMap { store.pairing(studioId: $0.studioId) }.filter { !$0.refused }
+            return current.isEmpty ? .firstContact : .knownOrFirstContact(current)
+        case .firstContact, .invited:
+            return trust
+        }
     }
 
     private func handshakeEstablished(_ pairing: WailoPairing, upgrading trust: TrustBox?) {

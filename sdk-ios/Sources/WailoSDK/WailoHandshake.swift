@@ -16,6 +16,10 @@ final class WailoHandshake {
         /// (ADR-0040). An attacker has to already be in the path at this exact moment; from the next
         /// connection on, the pin makes that too late.
         case firstContact
+        /// The user named an address that is not yet associated with one saved Studio. The challenge's
+        /// identity selects a matching pairing when there is one; only a genuinely new identity falls
+        /// back to first contact.
+        case knownOrFirstContact([WailoPairing])
         /// A QR or typed code supplied the secret out of band. `publicKey` is present for a QR, which
         /// carries it; a typed code has to pin whatever the challenge offers, and leans on the mac to
         /// prove that key belongs to the Studio showing the code.
@@ -59,6 +63,8 @@ final class WailoHandshake {
     private var shared: Data?
     private var resolvedStudioId: String?
     private var acceptedPublicKey: Data?
+    /// Selected from `knownOrFirstContact` once the challenge identifies which Studio answered.
+    private var resolvedPairing: WailoPairing?
     /// Studio proved its identity but declined to prove it holds our key. Only then is the
     /// `AuthResult` that follows worth acting on.
     private var declining = false
@@ -73,8 +79,8 @@ final class WailoHandshake {
     func begin() -> Envelope {
         Envelope {
             $0.message = .auth_request(AuthRequest(
-                // Empty on a first contact: the device has not been told who is listening here, and
-                // guessing would only produce a mismatch Studio has to reject.
+                // Empty when the address is not mapped to one identity: the challenge then decides
+                // whether this is a saved Studio or a genuine first contact.
                 studio_id: expectedStudioId ?? "",
                 device_id: deviceId,
                 nonce: nonceD,
@@ -156,6 +162,15 @@ final class WailoHandshake {
     /// by a different identity, is either a machine that changed hands or someone standing in the
     /// path. Both look identical from here, so neither is resolved automatically.
     private func resolveIdentity(offered: Data) -> Identity {
+        if case let .knownOrFirstContact(pairings) = trust {
+            guard !offered.isEmpty else { return .reject(.failed) }
+            let studioId = WailoCrypto.studioId(publicKey: offered)
+            if let pairing = pairings.first(where: { $0.studioId == studioId }) {
+                guard pairing.publicKey == offered else { return .reject(.failed) }
+                resolvedPairing = pairing
+            }
+            return .use(offered)
+        }
         if let pinned = pinnedPublicKey {
             guard offered.isEmpty || offered == pinned else {
                 return .reject(.identityChanged(
@@ -201,7 +216,7 @@ final class WailoHandshake {
                 sessionCounter: sessionCounter + 1,
                 refused: false,
                 lastHost: host,
-                trustedOnFirstUse: deviceKey == nil
+                trustedOnFirstUse: resolvedPairing?.trustedOnFirstUse ?? (deviceKey == nil)
             )
         ))
     }
@@ -210,7 +225,7 @@ final class WailoHandshake {
 
     private var expectedStudioId: String? {
         switch trust {
-        case .firstContact: return nil
+        case .firstContact, .knownOrFirstContact: return nil
         case let .invited(studioId, _, _, _): return studioId
         case let .paired(studioId, _, _, _): return studioId
         }
@@ -219,6 +234,7 @@ final class WailoHandshake {
     private var deviceKey: SymmetricKey? {
         switch trust {
         case .firstContact: return nil
+        case .knownOrFirstContact: return resolvedPairing.map { SymmetricKey(data: $0.deviceKey) }
         case let .invited(_, key, _, _): return key
         case let .paired(_, key, _, _): return key
         }
@@ -227,6 +243,7 @@ final class WailoHandshake {
     private var pinnedPublicKey: Data? {
         switch trust {
         case .firstContact: return nil
+        case .knownOrFirstContact: return resolvedPairing?.publicKey
         case let .invited(_, _, key, _): return key
         case let .paired(_, _, key, _): return key
         }
@@ -235,6 +252,7 @@ final class WailoHandshake {
     private var sessionCounter: UInt64 {
         switch trust {
         case .firstContact, .invited: return 0
+        case .knownOrFirstContact: return resolvedPairing?.sessionCounter ?? 0
         case let .paired(_, _, _, counter): return counter
         }
     }
@@ -242,7 +260,7 @@ final class WailoHandshake {
     private var pairedByCode: Bool {
         switch trust {
         case let .invited(_, _, _, byCode): return byCode
-        case .firstContact, .paired: return false
+        case .firstContact, .knownOrFirstContact, .paired: return false
         }
     }
 }
