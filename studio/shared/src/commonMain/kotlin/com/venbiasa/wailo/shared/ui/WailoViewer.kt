@@ -38,6 +38,7 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.unit.dp
 import com.venbiasa.wailo.protocol.Header
 import com.venbiasa.wailo.shared.BreakpointNode
@@ -47,6 +48,7 @@ import com.venbiasa.wailo.shared.DeviceInfo
 import com.venbiasa.wailo.shared.PairingAction
 import com.venbiasa.wailo.shared.PairingState
 import com.venbiasa.wailo.shared.FilterKey
+import com.venbiasa.wailo.shared.FilterMatcher
 import com.venbiasa.wailo.shared.FlowEntry
 import com.venbiasa.wailo.shared.MapLocalNode
 import com.venbiasa.wailo.shared.MapLocalRuleDef
@@ -55,8 +57,8 @@ import com.venbiasa.wailo.shared.ResponseHeader
 import com.venbiasa.wailo.shared.SeedNode
 import com.venbiasa.wailo.shared.SeedRuleDef
 import com.venbiasa.wailo.shared.TrafficFilter
+import com.venbiasa.wailo.shared.compile
 import com.venbiasa.wailo.shared.format.requestHost
-import com.venbiasa.wailo.shared.matches
 import com.venbiasa.wailo.shared.resources.Res
 import com.venbiasa.wailo.shared.resources.ic_breakpoint
 import com.venbiasa.wailo.shared.resources.ic_content_paste_go
@@ -193,20 +195,35 @@ internal fun WailoViewer(
         val hosts = entries.map { requestHost(it.exchange.request?.url ?: "") }
             .filter { it.isNotBlank() }.distinct().sorted()
         val codes = entries.mapNotNull { it.exchange.response?.code }.distinct().sorted().map { it.toString() }
-        mapOf(
-            FilterKey.Method to availableMethods,
-            FilterKey.Url to hosts,
-            FilterKey.StatusCode to codes,
-            FilterKey.Client to availableAppIds,
-            FilterKey.Edited to listOf("true", "false"),
-        )
+        // Whole URLs are the pool only an exact or wildcard match can use, and building them costs a
+        // pass over every captured row — so it waits until a matcher actually asks for it.
+        val urls by lazy {
+            entries.map { it.exchange.request?.url ?: "" }.filter { it.isNotBlank() }.distinct().sorted()
+        }
+        val suggest: (FilterKey, FilterMatcher) -> List<String> = { key, matcher ->
+            when (key) {
+                FilterKey.Method -> availableMethods
+                // A host is the useful seed for a substring test but would never match a whole-URL
+                // comparison, so an exact or wildcard match is offered the URLs themselves instead.
+                FilterKey.Url -> when (matcher) {
+                    FilterMatcher.Equals, FilterMatcher.Wildcard -> urls
+                    else -> hosts
+                }
+                FilterKey.StatusCode -> codes
+                FilterKey.Client -> availableAppIds
+                FilterKey.Edited -> listOf("true", "false")
+            }
+        }
+        suggest
     }
 
     val visibleEntries = remember(entries, activeHost, trafficFilter) {
         val host = activeHost
+        // Parse the query and build its patterns once per filter change, not once per row: a regex or
+        // wildcard rebuilt inside the loop would be recompiled for every captured exchange.
+        val passes = trafficFilter.compile()
         entries.filter { entry ->
-            (host == null || requestHost(entry.exchange.request?.url ?: "") == host) &&
-                trafficFilter.matches(entry)
+            (host == null || requestHost(entry.exchange.request?.url ?: "") == host) && passes(entry)
         }
     }
 
@@ -252,48 +269,61 @@ internal fun WailoViewer(
             Row(Modifier.fillMaxSize()) {
                 BoxWithConstraints(Modifier.weight(1f).fillMaxHeight()) {
                     val minDetail = 180.dp
-                    val maxDetail = (maxHeight - 160.dp).coerceAtLeast(minDetail)
+                    // The chrome above the list has no fixed height: the bookmark bar and the filter bar
+                    // come and go, the filter bar grows a second row once it has pills, and all of it
+                    // scales with the user's text size. Measuring it is what keeps the detail panel's
+                    // ceiling honest — a constant reserve here let a dragged panel eat the list and run
+                    // up under the header as soon as anything above it appeared.
+                    var chromeHeight by remember { mutableStateOf(0.dp) }
+                    val maxDetail = (maxHeight - chromeHeight - MinTrafficListHeight).coerceAtLeast(minDetail)
                     var detailHeight by remember { mutableStateOf(360.dp) }
 
                     Column(Modifier.fillMaxSize()) {
-                        TopBar(
-                            listenAddress = listenAddress,
-                            listening = listening,
-                            onRetryListen = onRetryListen,
-                            capturing = capturing,
-                            onToggleCapture = onToggleCapture,
-                            onClear = onClear,
-                        )
-                        RowDivider()
-                        // The bookmark bar only exists once there is something to show, so an empty setup
-                        // costs no vertical space and reads exactly like the pre-bookmark viewer.
-                        if (bookmarks.isNotEmpty()) {
-                            BookmarkBar(
-                                bookmarks = bookmarks,
-                                activeHost = activeHost,
-                                onSelect = { activeHost = it },
-                                onRemove = onRemoveBookmark,
+                        Column(
+                            Modifier.fillMaxWidth()
+                                .onSizeChanged { chromeHeight = with(density) { it.height.toDp() } },
+                        ) {
+                            TopBar(
+                                listenAddress = listenAddress,
+                                listening = listening,
+                                onRetryListen = onRetryListen,
+                                capturing = capturing,
+                                onToggleCapture = onToggleCapture,
+                                onClear = onClear,
                             )
                             RowDivider()
-                        }
-                        // The view filter is hidden until Cmd/Ctrl+F opens it (see [openFilterSignal]), then
-                        // sits closest to the list it narrows.
-                        if (filterOpen) {
-                            FilterBar(
-                                filter = trafficFilter,
-                                onFilterChange = { trafficFilter = it },
-                                onRequestAddFilter = { addFilterOpen = true },
-                                onClose = {
-                                    // Close == clear: never leave a hidden, still-filtered list. Focus goes
-                                    // back to the root so it doesn't die with the field being removed.
-                                    trafficFilter = TrafficFilter()
-                                    addFilterOpen = false
-                                    filterOpen = false
-                                    rootFocus.requestFocus()
-                                },
-                                focusSignal = filterFocusRequests,
-                            )
-                            RowDivider()
+                            // The bookmark bar only exists once there is something to show, so an empty
+                            // setup costs no vertical space and reads exactly like the pre-bookmark viewer.
+                            if (bookmarks.isNotEmpty()) {
+                                BookmarkBar(
+                                    bookmarks = bookmarks,
+                                    activeHost = activeHost,
+                                    onSelect = { activeHost = it },
+                                    onRemove = onRemoveBookmark,
+                                )
+                                RowDivider()
+                            }
+                            // The view filter is hidden until Cmd/Ctrl+F opens it (see [openFilterSignal]),
+                            // then sits closest to the list it narrows.
+                            if (filterOpen) {
+                                FilterBar(
+                                    filter = trafficFilter,
+                                    onFilterChange = { trafficFilter = it },
+                                    suggestions = filterSuggestions,
+                                    onRequestAddFilter = { addFilterOpen = true },
+                                    onClose = {
+                                        // Close == clear: never leave a hidden, still-filtered list. Focus
+                                        // goes back to the root so it doesn't die with the field being
+                                        // removed.
+                                        trafficFilter = TrafficFilter()
+                                        addFilterOpen = false
+                                        filterOpen = false
+                                        rootFocus.requestFocus()
+                                    },
+                                    focusSignal = filterFocusRequests,
+                                )
+                                RowDivider()
+                            }
                         }
                         Box(Modifier.weight(1f).fillMaxWidth()) {
                             TrafficList(
@@ -533,6 +563,10 @@ internal fun WailoViewer(
 }
 
 private val ToolRailWidth = 48.dp
+
+// How much of the traffic list the detail panel may never take. Enough for a header row plus a couple of
+// rows, so dragging the panel to its ceiling still leaves something to click back to.
+private val MinTrafficListHeight = 120.dp
 
 // Response headers not carried into a rule seeded from a row: they describe the live transfer, not the
 // payload, so they'd be wrong (or break the mock) once the desktop serves its own bytes. The host

@@ -279,6 +279,7 @@ internal fun CompactOutlinedTextField(
     isError: Boolean = false,
     containerColor: Color = Color.Unspecified,
     leadingIcon: (@Composable () -> Unit)? = null,
+    trailingIcon: (@Composable () -> Unit)? = null,
 ) {
     val interactionSource = remember { MutableInteractionSource() }
     BasicTextField(
@@ -302,6 +303,7 @@ internal fun CompactOutlinedTextField(
                 isError = isError,
                 containerColor = containerColor,
                 leadingIcon = leadingIcon,
+                trailingIcon = trailingIcon,
                 innerTextField = innerTextField,
             )
         },
