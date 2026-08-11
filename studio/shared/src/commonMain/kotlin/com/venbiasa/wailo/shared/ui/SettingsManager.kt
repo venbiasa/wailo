@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
@@ -103,7 +104,8 @@ internal fun SettingsManager(
                     // it may be gone.
                     canReapplyUnchanged = !listening,
                     onApply = onApplyPort,
-                    status = "Devices dial $listenAddress",
+                    status = listenAddress,
+                    statusPrefix = "Devices dial ",
                     help = "Changing it restarts the server, so connected devices drop. They come back " +
                         "on their own: an attached Android device is re-forwarded with adb, and iOS " +
                         "finds the new port over Bonjour.",
@@ -118,7 +120,8 @@ internal fun SettingsManager(
                         error = usbPortError,
                         canReapplyUnchanged = false,
                         onApply = onApplyUsbPort,
-                        status = "Studio dials usb:$usbPort",
+                        status = "usb:$usbPort",
+                        statusPrefix = "Studio dials ",
                         help = "Must match the port the iOS SDK listens on. USB has no discovery, so a " +
                             "mismatch looks exactly like an app that isn't running.",
                     )
@@ -174,11 +177,13 @@ private fun IdentityRow(studioId: String, deviceCount: Int, onReset: () -> Unit)
             style = MaterialTheme.typography.labelLarge,
             color = MaterialTheme.colorScheme.onSurface,
         )
-        Text(
-            studioId.ifEmpty { "unavailable" },
-            style = monoSmall(),
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
+        SelectionContainer(Modifier.fillMaxWidth()) {
+            Text(
+                studioId.ifEmpty { "unavailable" },
+                style = monoSmall(),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
         if (confirming) {
             Text(
                 "Resetting disconnects and forgets " +
@@ -249,6 +254,7 @@ private fun NumberField(
     onApply: (Int) -> Unit,
     status: String,
     help: String,
+    statusPrefix: String? = null,
 ) {
     // Keyed on the applied value so a successful change (or a rollback to the previous one) re-seeds the
     // field, and the user is never left editing a number nothing is on.
@@ -300,11 +306,28 @@ private fun NumberField(
                 color = MaterialTheme.colorScheme.error,
             )
         } else {
-            Text(
-                status,
-                style = monoSmall(),
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+            if (statusPrefix == null) {
+                Text(
+                    status,
+                    style = monoSmall(),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            } else {
+                Row(Modifier.fillMaxWidth()) {
+                    Text(
+                        statusPrefix,
+                        style = monoSmall(),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    SelectionContainer(Modifier.weight(1f)) {
+                        Text(
+                            status,
+                            style = monoSmall(),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
         }
         MutedText(help)
     }

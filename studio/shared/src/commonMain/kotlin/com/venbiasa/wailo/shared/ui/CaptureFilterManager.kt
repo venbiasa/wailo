@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -259,14 +260,16 @@ private fun HostRow(host: String, onRemove: () -> Unit) {
         horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(
-            host,
-            modifier = Modifier.weight(1f),
-            style = monoSmall(),
-            color = MaterialTheme.colorScheme.onSurface,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
+        SelectionContainer(Modifier.weight(1f)) {
+            Text(
+                host,
+                modifier = Modifier.fillMaxWidth(),
+                style = monoSmall(),
+                color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
         IconButton(onClick = onRemove, modifier = Modifier.size(32.dp)) {
             Icon(
                 imageVector = vectorResource(Res.drawable.ic_delete),

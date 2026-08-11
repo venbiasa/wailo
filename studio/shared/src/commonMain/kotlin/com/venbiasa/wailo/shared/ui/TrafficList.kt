@@ -49,7 +49,9 @@ import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -66,6 +68,7 @@ import com.venbiasa.wailo.shared.format.statusText
 import com.venbiasa.wailo.shared.resources.Res
 import com.venbiasa.wailo.shared.resources.ic_arrow_downward
 import com.venbiasa.wailo.shared.resources.ic_check
+import com.venbiasa.wailo.shared.toCurlCommand
 import kotlinx.coroutines.launch
 import org.jetbrains.compose.resources.vectorResource
 
@@ -162,8 +165,8 @@ internal fun TrafficList(
                 },
             )
             RowDivider()
-            Box(Modifier.fillMaxSize()) {
-                LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
+            Box(Modifier.weight(1f).fillMaxWidth()) {
+                LazyColumn(state = listState, modifier = Modifier.matchParentSize()) {
                     items(entries, key = { it.id }) { entry ->
                         TrafficRow(
                             entry = entry,
@@ -295,18 +298,19 @@ private fun TrafficRow(
     val exchange = entry.exchange
     val request = exchange.request
     val response = exchange.response
+    val clipboard = LocalClipboardManager.current
     val method = request?.method?.ifEmpty { "?" } ?: "?"
     val code = response?.code
     val hasError = exchange.error.isNotEmpty()
     val kind = statusKind(code, hasError)
 
-    // Right-click offers bookmarking this row's host (a tick once saved; the slot is reserved when not,
-    // so the label never shifts as it toggles), adding/removing the host in the capture filter's allow or
-    // block list, and authoring a rule from its URL — a local mapping, a seed, or a breakpoint. The
+    // Right-click can copy the complete captured request as cURL, bookmark this row's host (a tick once
+    // saved; the slot is reserved when not, so the label never shifts as it toggles), add/remove the host
+    // in the capture filter's allow or block list, or author a rule from its URL. The
     // Allowlist/Blocklist ticks track *exact* membership (so a subdomain isn't shown as listed under a
     // `*.example.com` entry, and toggling removes only the exact host it added — a wildcard entry is never
     // silently dropped); arming each list stays a deliberate switch in the capture-filter panel. A row with
-    // no parseable host skips the bookmark/filter entries; one with no URL skips the rule-authoring trio —
+    // no parseable host skips the bookmark/filter entries; one with no URL skips copy and rule authoring —
     // an all-empty list is a plain passthrough (no menu).
     val url = request?.url ?: ""
     val host = remember(url) { requestHost(url) }
@@ -316,6 +320,13 @@ private fun TrafficRow(
     val allowed = host in allowHosts
     val blocked = host in blockHosts
     val actions = buildList {
+        if (request != null && url.isNotEmpty()) {
+            add(
+                ContextMenuAction("Copy cURL") {
+                    clipboard.setText(AnnotatedString(request.toCurlCommand()))
+                },
+            )
+        }
         if (host.isNotEmpty()) {
             add(
                 ContextMenuAction("Bookmark", checked = bookmarked) {

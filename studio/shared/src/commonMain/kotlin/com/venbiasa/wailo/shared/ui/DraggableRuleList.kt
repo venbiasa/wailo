@@ -334,7 +334,6 @@ private fun <T : LayoutRule<T>> DraggableNodeList(
                 when (row) {
                     is HeaderDisp -> GroupHeaderRow(
                         group = row.group,
-                        ruleCount = row.ruleCount,
                         featureEnabled = featureEnabled,
                         collapsed = row.group.id in collapsedGroupIds,
                         dragging = reorder.draggingId == row.group.id,
@@ -449,7 +448,6 @@ private fun <T : LayoutRule<T>> DropIndicator(
 @Composable
 private fun GroupHeaderRow(
     group: RuleGroup,
-    ruleCount: Int,
     featureEnabled: Boolean,
     collapsed: Boolean,
     dragging: Boolean,
@@ -513,16 +511,6 @@ private fun GroupHeaderRow(
                         .padding(vertical = 6.dp, horizontal = 4.dp),
                 )
             }
-        }
-        // When collapsed, surface how many rules are tucked away (a rule row never shows a count, so this
-        // doubles as a group-vs-rule cue).
-        if (collapsed) {
-            Text(
-                "$ruleCount ${if (ruleCount == 1) "rule" else "rules"}",
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(horizontal = 4.dp),
-            )
         }
         IconButton(onClick = onDelete, modifier = Modifier.size(36.dp)) {
             Icon(
@@ -677,7 +665,7 @@ private sealed interface Disp<T : LayoutRule<T>> {
     val key: String
 }
 
-private data class HeaderDisp<T : LayoutRule<T>>(val group: RuleGroup, val topIndex: Int, val ruleCount: Int) : Disp<T> {
+private data class HeaderDisp<T : LayoutRule<T>>(val group: RuleGroup, val topIndex: Int) : Disp<T> {
     override val key: String get() = "h:${group.id}"
 }
 
@@ -706,7 +694,7 @@ private fun <T : LayoutRule<T>> List<LayoutNode<T>>.toDispRows(collapsedGroupIds
                 top++
             }
             is GroupNode -> {
-                add(HeaderDisp(node.group, top, node.rules.size))
+                add(HeaderDisp(node.group, top))
                 // A collapsed group contributes only its header — its rules and footer drop out of both
                 // the rendered list and the drop hit-testing (which share this one row model).
                 if (node.group.id !in collapsedGroupIds) {

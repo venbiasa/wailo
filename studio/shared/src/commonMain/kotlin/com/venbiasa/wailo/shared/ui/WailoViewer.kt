@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -761,11 +762,21 @@ private fun TopBar(
             ),
         )
         Spacer(Modifier.width(6.dp))
-        Text(
-            if (listening) listenAddress else "$listenAddress — not listening",
-            style = MaterialTheme.typography.labelMedium,
-            color = if (listening) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error,
-        )
+        val addressColor = if (listening) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error
+        SelectionContainer {
+            Text(
+                listenAddress,
+                style = MaterialTheme.typography.labelMedium,
+                color = addressColor,
+            )
+        }
+        if (!listening) {
+            Text(
+                " — not listening",
+                style = MaterialTheme.typography.labelMedium,
+                color = addressColor,
+            )
+        }
         // The engine retakes a port it lost on its own, but not one it never got — something else was
         // holding it, and only the user knows when that's over. Offered here rather than only in Settings
         // because this is where the failure is visible, and it's a retry, not a setting to change.
