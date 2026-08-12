@@ -17,11 +17,12 @@ Two boundaries keep the system decoupled:
 - **`protocol`** - the protobuf wire schema (source of truth, code-generated with Wire). Both
   the device SDK and the desktop speak it; neither hand-writes DTOs.
 - **`engine`** - a headless library owning the transport server, a multi-session capture store,
-  and a query/command API. The desktop UI, the future CLI, and the future MCP server are all
-  thin frontends over it.
+  and a query/command API. The desktop UI, the CLI, and the future MCP server are all thin
+  frontends over it (via the `host` orchestration layer for Seed spend and traffic queries —
+  ADR-0055).
 
 ```
-[App under test] -> Wailo SDK (Android/iOS) --(protobuf over WebSocket)--> [engine] -> desktop UI / CLI / MCP
+[App under test] -> Wailo SDK (Android/iOS) --(protobuf over WebSocket)--> [engine] -> host -> desktop UI / CLI / MCP
 ```
 
 The repo is **two Gradle builds** joined only by `protocol`: the **SDK build** (repo root — `protocol`,
@@ -39,8 +40,10 @@ and consumes `protocol` as the published `wailo-protocol` artifact (ADR-0015).
 | `wailo-gradle-plugin` | Build-time only; ASM plugin that auto-instruments OkHttp |
 | `sdk-ios`       | Swift package; `WailoURLProtocol` (URLSession) - the injected iOS SDK |
 | `engine`        | JVM library; WebSocket server + multi-session store + query API — **studio build** |
+| `host`          | JVM library; Seed spend + traffic wait/find helpers over `engine` (CLI/MCP) — **studio build** |
 | `shared`        | JVM + Compose Multiplatform viewer UI + view models — **studio build** |
 | `desktopApp`    | Compose Desktop entry point — **studio build**                     |
+| `cli`           | Headless CLI frontend over `host` (automation / MCP precursor) — **studio build** |
 | `sample-android`| Sample app under test (Android), used for dogfooding/verification |
 | `sample-ios`    | Sample under test (iOS): a SwiftUI app (`app`) + a headless CLI harness (`cli`) |
 | `sample-kmp`    | KMP sample: shared Ktor code + Android app (`sdk-android`) + iOS app shell (`sdk-ios`) |
@@ -63,8 +66,31 @@ Two Gradle builds (ADR-0015). The SDK build is at the repo root; the `studio/` d
 ./gradlew :protocol:publishToMavenLocal  # make wailo-protocol available to the studio build
 ./gradlew :sample-android:assembleDebug
 
-# studio build (desktop; modern toolchain)
-cd studio && ./gradlew build             # engine, shared, desktopApp
+# studio build (desktop + headless; modern toolchain)
+cd studio && ./gradlew build             # engine, host, shared, desktopApp, cli
+```
+
+## Headless CLI
+
+Build the CLI once, then keep `serve` running while automation invokes one-shot commands from other
+processes. The capture engine stays in the server process, so traffic, holds, filters, and rules survive
+across commands. Its control socket binds loopback only and authenticates with a per-run, owner-only token.
+
+```bash
+cd studio
+./gradlew :cli:installDist
+CLI=./cli/build/install/wailo-cli/bin/wailo-cli
+
+# Terminal/process 1
+$CLI serve --port 8899
+
+# Other terminals/processes
+$CLI list_devices
+$CLI wait_exchange --url /login --timeout 30
+$CLI set_capture_filter --allow '*.example.com' --block 'analytics.example.com'
+$CLI set_map_local --id login --url-pattern 'https://api.example.com/login' \
+  --status 200 --header 'Content-Type: application/json' --body-text '{"token":"test"}'
+$CLI list_exchanges
 ```
 
 ## Using the SDK (M1)

@@ -37,5 +37,7 @@ plugins {
 }
 
 include(":engine")
+include(":host")
 include(":shared")
 include(":desktopApp")
+include(":cli")

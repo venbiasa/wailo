@@ -40,9 +40,10 @@ compose.desktop {
 dependencies {
     // currentOs bundles the Compose desktop runtime + window toolkit for the host platform.
     implementation(compose.desktop.currentOs)
-    // engine = the headless query surface; shared = the Compose viewer (invariant #2: UI is a
-    // frontend over engine, and the two never talk to the transport directly).
+    // engine = the headless query surface; host = Seed spend + query helpers shared with CLI/MCP
+    // (ADR-0055); shared = the Compose viewer (invariant #2: UI is a frontend over engine).
     implementation(projects.engine)
+    implementation(projects.host)
     implementation(projects.shared)
     implementation(libs.zxing.core)
 

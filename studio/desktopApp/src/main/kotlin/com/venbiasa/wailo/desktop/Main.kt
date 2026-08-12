@@ -29,11 +29,14 @@ import androidx.compose.ui.window.rememberWindowState
 import com.venbiasa.wailo.engine.MapLocalBodyProvider
 import com.venbiasa.wailo.engine.ConnectedDevice
 import com.venbiasa.wailo.engine.DeviceTransport
+import com.venbiasa.wailo.engine.PausedExchange
 import com.venbiasa.wailo.engine.WailoEngine
 import com.venbiasa.wailo.engine.pairing.InMemoryPairingKeyStore
 import com.venbiasa.wailo.engine.pairing.PairingCode
 import com.venbiasa.wailo.engine.pairing.PairingManager
-import com.venbiasa.wailo.protocol.BreakpointPhase
+import com.venbiasa.wailo.host.HostSeed
+import com.venbiasa.wailo.host.spendSeedOn as spendHostSeedOn
+import com.venbiasa.wailo.protocol.Header
 import com.venbiasa.wailo.shared.BreakpointNode
 import com.venbiasa.wailo.shared.CaptureFilterState
 import com.venbiasa.wailo.shared.DeviceConnectionStatus
@@ -54,8 +57,6 @@ import com.venbiasa.wailo.shared.SeedNode
 import com.venbiasa.wailo.shared.SeedRuleDef
 import com.venbiasa.wailo.shared.WailoApp
 import com.venbiasa.wailo.shared.WailoBreakpointWindowContent
-import com.venbiasa.wailo.shared.consume
-import com.venbiasa.wailo.shared.firstMatch
 import com.venbiasa.wailo.shared.rulesForMatch
 import com.venbiasa.wailo.shared.theme.TextScale
 import com.venbiasa.wailo.desktop.adb.AdbDeviceManager
@@ -772,10 +773,9 @@ private fun runWailo() = application {
 }
 
 /**
- * Answers [hold] with the first seed in [queue] that matches it and returns the queue minus the seed it
- * spent, or null when nothing answered — which leaves both the hold and the queue exactly as they were.
- * Shared by the arrival triage and Fill's sweep so the two can't drift on what a seed is allowed to answer
- * (ADR-0041/0044).
+ * Desktop adapter over [spendHostSeedOn]: maps the UI's [SeedRuleDef] / [PausedFlow] to the host types
+ * and resolves bodies through [SeedStore]. Shared with CLI/MCP so a seed that answers a hold in the
+ * desktop is the same spender headless frontends use (ADR-0055).
  *
  * Three ways to answer nothing, all of them a hold the user has to take: a request-phase hold, since the
  * wire honours an edited response only on a RESPONSE-phase hit; no seed matching the URL/method; or a seed
@@ -787,12 +787,43 @@ private suspend fun spendSeedOn(
     queue: List<SeedRuleDef>,
     hold: PausedFlow,
 ): List<SeedRuleDef>? {
-    if (hold.phase != BreakpointPhase.BREAKPOINT_PHASE_RESPONSE) return null
-    val seed = queue.firstMatch(hold.request?.url.orEmpty(), hold.request?.method.orEmpty()) ?: return null
-    val response = withContext(Dispatchers.IO) { SeedStore.seedResponse(seed) } ?: return null
-    engine.resumeBreakpoint(hold.correlationId, null, response)
-    return queue.consume(seed)
+    val hostQueue = queue.map { it.toHostSeed() }
+    val spent = spendHostSeedOn(
+        engine = engine,
+        queue = hostQueue,
+        hold = hold.toPausedExchange(),
+        responses = { seed ->
+            val def = queue.first { it.id == seed.id }
+            withContext(Dispatchers.IO) { SeedStore.seedResponse(def) }
+        },
+    ) ?: return if (engine.pausedExchanges.value.none { it.correlationId == hold.correlationId }) {
+        // The device disconnected while its body was being read. Treat the vanished hold as handled so
+        // the desktop does not open an empty breakpoint window, but keep the seed because nothing spent it.
+        queue
+    } else {
+        null
+    }
+    val remaining = spent.mapTo(HashSet()) { it.id }
+    return queue.filter { it.id in remaining }
 }
+
+private fun SeedRuleDef.toHostSeed() = HostSeed(
+    id = id,
+    urlPattern = urlPattern,
+    method = method,
+    statusCode = statusCode,
+    headers = headers.map { Header(name = it.name, value_ = it.value) },
+)
+
+private fun PausedFlow.toPausedExchange() = PausedExchange(
+    correlationId = correlationId,
+    deviceName = deviceName,
+    appId = appId,
+    platform = platform,
+    phase = phase,
+    request = request,
+    response = response,
+)
 
 private fun mergeDevices(
     connected: List<ConnectedDevice>,

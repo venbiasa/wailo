@@ -11,7 +11,8 @@ import kotlin.random.Random
  * Unlike Map Local, a seed never reaches a device. It is consumed on the desktop, where a match resolves
  * the hold by sending the response back as the breakpoint's decision. Order is priority *and* sequence:
  * the armed queue is walked top-down, the first match wins, and it is then spent — so two seeds for the
- * same URL answer two successive requests differently.
+ * same URL answer two successive requests differently. The spend itself lives in `host` (ADR-0055) so
+ * CLI/MCP use the same matcher; this type is the UI-facing twin of `HostSeed`.
  */
 data class SeedRuleDef(
     override val id: String,

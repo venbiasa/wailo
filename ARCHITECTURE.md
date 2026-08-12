@@ -31,8 +31,10 @@ flowchart LR
   usb --> session
   session --> store["engine: SessionStore (per device/app)"]
   store --> ui["shared + desktopApp: live inspector"]
-  store -. later .-> cli["CLI (Appium)"]
-  store -. later .-> mcp["MCP server"]
+  store --> host["host: Seed spend + queries"]
+  host --> control["cli serve: authenticated loopback control"]
+  control --> cli["one-shot CLI commands"]
+  host -. later .-> mcp["MCP server"]
 ```
 
 ## Transport
@@ -122,10 +124,19 @@ Matching normally runs on the device — the desktop only ever pushes patterns. 
 resolves holds locally, so it carries a desktop-side copy of the device's wildcard scheme, kept
 byte-identical on purpose (ADR-0041).
 
+## Headless surfaces
+
+`cli serve` owns one `HeadlessHost` and its in-memory engine. Other CLI invocations attach to that
+process over an authenticated, length-framed loopback channel (default control port 8898); they never
+construct throwaway engines. This lets Appium/shell steps query the same captures and holds, and update
+Map Local / Capture Filter state between steps. Map Local response bytes stay in the host registry and
+are fetched lazily through `MapLocalBodyProvider`, exactly like the desktop file-backed path. MCP will be
+another in-process adapter over `HeadlessHost`, not a client of the CLI protocol (ADR-0056).
+
 ## Module layout
 
 See [AGENTS.md](AGENTS.md) for the module dependency rules. `sdk-*` is intentionally isolated from
-`engine`/`shared`/`desktopApp` because it ships inside third-party apps.
+`engine`/`host`/`shared`/`desktopApp`/`cli` because it ships inside third-party apps.
 
 The device-side transport (`CaptureSink` + `WailoClient`) lives inside `sdk-android`. It used to be a
 separate multiplatform `core` module kept thin so iOS could share it; once iOS became native Swift

@@ -801,13 +801,14 @@ class WailoEngine(
     /**
      * Release a paused exchange, letting the device proceed — with [editedRequest] on a request-phase
      * hit or [editedResponse] on a response-phase hit (null = proceed with the device's original). A
-     * no-op if the correlation id is unknown (already released by a disconnect).
+     * Returns false if the correlation id is unknown (already released by a disconnect), so a headless
+     * caller does not report a successful decision for a hold that no longer exists.
      */
     fun resumeBreakpoint(
         correlationId: String,
         editedRequest: HttpRequest? = null,
         editedResponse: HttpResponse? = null,
-    ) {
+    ): Boolean =
         sendDecision(
             BreakpointDecision(
                 correlation_id = correlationId,
@@ -816,29 +817,28 @@ class WailoEngine(
                 edited_response = editedResponse,
             ),
         )
-    }
 
-    /** Abort a paused exchange: the device fails the app's call. A no-op if the id is unknown. */
-    fun abortBreakpoint(correlationId: String) {
+    /** Abort a paused exchange. Returns false when the id is unknown. */
+    fun abortBreakpoint(correlationId: String): Boolean =
         sendDecision(
             BreakpointDecision(
                 correlation_id = correlationId,
                 action = BreakpointAction.BREAKPOINT_ACTION_ABORT,
             ),
         )
-    }
 
     // Send a decision to the session holding this exchange and drop it from the paused set. Removing
     // eagerly (before the send completes) is safe: if the socket is already gone the device has failed
     // open on its side, so the decision is moot.
-    private fun sendDecision(decision: BreakpointDecision) {
-        val session = pausedSessions.remove(decision.correlation_id) ?: return
+    private fun sendDecision(decision: BreakpointDecision): Boolean {
+        val session = pausedSessions.remove(decision.correlation_id) ?: return false
         _pausedExchanges.update { list -> list.filterNot { it.correlationId == decision.correlation_id } }
         scope.launch {
             sendMutex.withLock {
                 runCatching { session.send(Envelope(breakpoint_decision = decision).encode()) }
             }
         }
+        return true
     }
 
     // Drop every exchange a disconnecting session was holding. The device fails those calls open on its
