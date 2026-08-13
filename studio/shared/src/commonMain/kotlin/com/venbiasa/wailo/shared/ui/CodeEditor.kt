@@ -208,7 +208,13 @@ internal fun CodeEditor(
     // and is pruned to whatever is still a real region. `hidden` is the set of folded-away line indices;
     // when it's non-empty the LazyColumn walks `visibleLines` instead of raw indices, and vertical motion
     // skips over the gaps. No folds → both stay null/empty so the huge-document path allocates nothing extra.
-    val foldRegions = remember(state.version) { computeFoldRegions(state) }
+    //
+    // `state` has to be part of every key that uses `version`, because a version counts edits *within* one
+    // document. Callers that re-seed by swapping in a new CodeEditorState — the body preview stepping
+    // through rows, the breakpoint editor switching paused traffic — hand over a fresh instance sitting back
+    // at version 0, so keying on the version alone would keep the previous body's arrows (and its line
+    // indices) over the new text until something finally bumped it.
+    val foldRegions = remember(state, state.version) { computeFoldRegions(state) }
     val foldedStarts = remember(state) { mutableStateListOf<Int>() }
     val activeFolds = foldedStarts.filter { foldRegions.containsKey(it) }
     val hidden = remember(foldRegions, activeFolds) {
@@ -219,7 +225,7 @@ internal fun CodeEditor(
             }
         }
     }
-    val visibleLines = remember(state.version, hidden) {
+    val visibleLines = remember(state, state.version, hidden) {
         if (hidden.isEmpty()) null
         else (0 until lineCount).filter { it !in hidden }
     }
@@ -310,6 +316,16 @@ internal fun CodeEditor(
             expandSelectionOverFold()
             state.insert(text)
         }
+    }
+
+    // Dismissing the bar empties it, so the next Cmd+F opens on a clean field instead of re-presenting a
+    // query hunted through some earlier body. Match case and the replace row are modes rather than values,
+    // so they carry over.
+    fun closeFind() {
+        findOpen = false
+        findQuery = ""
+        findReplacement = ""
+        focusRequester.requestFocus()
     }
 
     // Selects the next/previous match, deliberately leaving focus where it is: the find bar keeps it, so a
@@ -479,8 +495,7 @@ internal fun CodeEditor(
             }
             event.key == Key.Escape -> {
                 if (!findOpen) return false
-                findOpen = false
-                focusRequester.requestFocus()
+                closeFind()
             }
             event.key == Key.DirectionLeft -> horizontalMove(right = false, shift = shift)
             event.key == Key.DirectionRight -> horizontalMove(right = true, shift = shift)
@@ -557,10 +572,7 @@ internal fun CodeEditor(
                 onPrev = { runFind(forward = false) },
                 onReplace = { runReplace() },
                 onReplaceAll = { runReplaceAll() },
-                onClose = {
-                    findOpen = false
-                    focusRequester.requestFocus()
-                },
+                onClose = { closeFind() },
                 focusSignal = findFocusRequests,
             )
         }
