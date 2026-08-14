@@ -38,6 +38,8 @@ plugins {
 
 include(":engine")
 include(":host")
+include(":daemon")
 include(":shared")
 include(":desktopApp")
 include(":cli")
+include(":mcp")

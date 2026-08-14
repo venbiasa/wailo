@@ -22,8 +22,8 @@ application {
 }
 
 dependencies {
-    // Thin frontend over host (ADR-0055). Never depends on shared/Compose.
-    implementation(projects.host)
+    // Thin frontend over the shared daemon client. Never depends on shared/Compose.
+    implementation(projects.daemon)
 
     testImplementation(kotlin("test"))
 }

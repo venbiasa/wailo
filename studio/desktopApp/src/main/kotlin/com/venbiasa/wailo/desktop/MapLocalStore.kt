@@ -76,9 +76,11 @@ object MapLocalStore {
      * file would silently copy nothing for a legacy rule that still points at a user-chosen path.
      */
     fun loadServedBody(rule: MapLocalRuleDef): ByteArray {
-        val file = servedBodyFile(rule) ?: return ByteArray(0)
-        return runCatching { file.readBytes() }.getOrDefault(ByteArray(0))
+        return loadServedBodyOrNull(rule) ?: ByteArray(0)
     }
+
+    fun loadServedBodyOrNull(rule: MapLocalRuleDef): ByteArray? =
+        servedBodyFile(rule)?.let { file -> runCatching { file.readBytes() }.getOrNull() }
 }
 
 // Inline bodies live under the OS's per-user app-data dir (see [appDataDir]), one file per rule id, its

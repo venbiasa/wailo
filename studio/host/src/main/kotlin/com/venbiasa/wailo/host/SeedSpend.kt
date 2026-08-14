@@ -48,10 +48,19 @@ suspend fun spendSeedOn(
     queue: List<HostSeed>,
     hold: PausedExchange,
     responses: SeedResponseProvider,
+): List<HostSeed>? = spendSeedOn(queue, hold, responses) { correlationId, response ->
+    engine.resumeBreakpoint(correlationId, null, response)
+}
+
+suspend fun spendSeedOn(
+    queue: List<HostSeed>,
+    hold: PausedExchange,
+    responses: SeedResponseProvider,
+    resume: suspend (correlationId: String, response: HttpResponse) -> Boolean,
 ): List<HostSeed>? {
     if (hold.phase != BreakpointPhase.BREAKPOINT_PHASE_RESPONSE) return null
     val seed = queue.firstMatch(hold.request?.url.orEmpty(), hold.request?.method.orEmpty()) ?: return null
     val response = responses.serve(seed) ?: return null
-    if (!engine.resumeBreakpoint(hold.correlationId, null, response)) return null
+    if (!resume(hold.correlationId, response)) return null
     return queue.consume(seed)
 }

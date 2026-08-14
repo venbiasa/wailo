@@ -27,6 +27,43 @@ public struct WailoPairing: Codable, Equatable, Sendable {
     public internal(set) var trustedOnFirstUse: Bool = false
 }
 
+extension WailoPairing {
+
+    private enum CodingKeys: String, CodingKey {
+        case studioId
+        case deviceKey
+        case publicKey
+        case sessionCounter
+        case refused
+        case lastHost
+        case trustedOnFirstUse
+    }
+
+    /// Keychain records outlive SDK upgrades. Keep authentication material mandatory, but default
+    /// metadata added by newer builds so one missing field cannot silently discard the device's key.
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        studioId = try values.decode(String.self, forKey: .studioId)
+        deviceKey = try values.decode(Data.self, forKey: .deviceKey)
+        publicKey = try values.decode(Data.self, forKey: .publicKey)
+        sessionCounter = try values.decodeIfPresent(UInt64.self, forKey: .sessionCounter) ?? 0
+        refused = try values.decodeIfPresent(Bool.self, forKey: .refused) ?? false
+        lastHost = try values.decodeIfPresent(String.self, forKey: .lastHost) ?? ""
+        trustedOnFirstUse = try values.decodeIfPresent(Bool.self, forKey: .trustedOnFirstUse) ?? false
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(studioId, forKey: .studioId)
+        try values.encode(deviceKey, forKey: .deviceKey)
+        try values.encode(publicKey, forKey: .publicKey)
+        try values.encode(sessionCounter, forKey: .sessionCounter)
+        try values.encode(refused, forKey: .refused)
+        try values.encode(lastHost, forKey: .lastHost)
+        try values.encode(trustedOnFirstUse, forKey: .trustedOnFirstUse)
+    }
+}
+
 /// Where the device's half of every pairing lives.
 ///
 /// The Keychain rather than `UserDefaults` — which is where `WailoHostStore` keeps the manual host —

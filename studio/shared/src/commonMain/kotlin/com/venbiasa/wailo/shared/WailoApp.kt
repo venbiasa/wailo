@@ -46,7 +46,10 @@ import com.venbiasa.wailo.shared.ui.WailoViewer
  * [maxRetained] is how many captured exchanges the engine holds before the
  * oldest fall off, and [onApplyMaxRetained] moves that cap (out-of-range values come back through
  * [maxRetainedError]); lowering it discards traffic, which is why it is applied on commit and not per
- * keystroke. [pairing] and [onPairingAction] drive the Wi-Fi trust surface (ADR-0039):
+ * keystroke. [mcpAccess] is whether AI tools may reach the capture at all and [mcpRedactSecrets] whether
+ * what they read has its credentials stripped (ADR-0059); both belong to the daemon rather than to this
+ * window, so [onMcpAccessChange]/[onMcpRedactSecretsChange] report a flip and the value comes back from
+ * there. [pairing] and [onPairingAction] drive the Wi-Fi trust surface (ADR-0039):
  * the host owns the keys and the QR rendering, so this only shows what it is given. [capturing] reflects whether
  * traffic is being recorded, and [onToggleCapture]/[onClear] drive the top bar (the engine lives in the
  * host, not here). [bookmarks] are the persisted, host-owned bookmarked hosts; [onAddBookmark]/
@@ -102,6 +105,10 @@ fun WailoApp(
     maxRetained: Int = 0,
     maxRetainedError: String? = null,
     onApplyMaxRetained: (Int) -> Unit = {},
+    mcpAccess: Boolean = true,
+    onMcpAccessChange: (Boolean) -> Unit = {},
+    mcpRedactSecrets: Boolean = true,
+    onMcpRedactSecretsChange: (Boolean) -> Unit = {},
     pairing: PairingState = PairingState(),
     onPairingAction: (PairingAction) -> Unit = {},
     capturing: Boolean = true,
@@ -161,6 +168,10 @@ fun WailoApp(
                 maxRetained = maxRetained,
                 maxRetainedError = maxRetainedError,
                 onApplyMaxRetained = onApplyMaxRetained,
+                mcpAccess = mcpAccess,
+                onMcpAccessChange = onMcpAccessChange,
+                mcpRedactSecrets = mcpRedactSecrets,
+                onMcpRedactSecretsChange = onMcpRedactSecretsChange,
                 pairing = pairing,
                 onPairingAction = onPairingAction,
                 capturing = capturing,

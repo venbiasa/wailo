@@ -63,6 +63,64 @@ final class WailoHandshakeReconnectTests: XCTestCase {
         XCTAssertEqual(studio.rejections, 0)
     }
 
+    func testForgettingOnDeviceDoesNotLeaveARejectedReconnectLookingConnected() throws {
+        let studio = FakeStudio()
+        let server = LoopbackWebSocketServer()
+        let port = try server.start()
+        defer { server.stop() }
+        studio.serve(on: server)
+
+        XCTAssertTrue(Wailo.setHost("127.0.0.1", port: Int(port)))
+        Wailo.start(
+            appId: "com.test.forget",
+            deviceName: "forget",
+            alsoLogToConsole: false
+        )
+        waitUntilTrue { studio.admissions.count == 1 && Wailo.isConnected }
+        let pairing = try XCTUnwrap(WailoPairingStore.shared.all.first)
+
+        Wailo.forgetPairing(studioId: pairing.studioId)
+
+        waitUntilTrue { !Wailo.isConnected }
+        let requestsBeforeRetry = studio.authRequests
+        XCTAssertTrue(Wailo.setHost("127.0.0.1", port: Int(port)))
+        waitUntilTrue { studio.authRequests > requestsBeforeRetry }
+        Thread.sleep(forTimeInterval: 0.1)
+
+        XCTAssertFalse(
+            Wailo.isConnected,
+            "opening a socket is not a connection when Studio rejects the authentication key"
+        )
+        XCTAssertEqual(studio.admissions.count, 1)
+    }
+
+    func testPairingStoreReadsAKeychainRecordFromBeforeTrustMetadataWasAdded() throws {
+        let storage = InMemorySecretStorage()
+        let store = WailoPairingStore(storage: storage)
+        let publicKey = P256.Signing.PrivateKey().publicKey.x963Representation
+        let studioId = WailoCrypto.studioId(publicKey: publicKey)
+        let current = WailoPairing(
+            studioId: studioId,
+            deviceKey: Data(repeating: 0x2a, count: 32),
+            publicKey: publicKey,
+            sessionCounter: 7,
+            refused: false,
+            lastHost: "192.168.1.20",
+            trustedOnFirstUse: false
+        )
+        let encoded = try JSONEncoder().encode(current)
+        var legacy = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        legacy.removeValue(forKey: "trustedOnFirstUse")
+        storage.set(try JSONSerialization.data(withJSONObject: legacy), for: studioId)
+
+        let restored = try XCTUnwrap(store.pairing(studioId: studioId))
+
+        XCTAssertEqual(restored.deviceKey, current.deviceKey)
+        XCTAssertEqual(restored.publicKey, current.publicKey)
+        XCTAssertEqual(restored.lastHost, current.lastHost)
+        XCTAssertFalse(restored.trustedOnFirstUse)
+    }
+
     /// A new address says where Studio moved, not which saved identity it is. The challenge supplies
     /// that identity; choosing first-contact before reading it makes a known device use the wrong key.
     func testChangingAStudiosAddressFindsItsPairingAmongSeveralSavedDesktops() throws {
@@ -182,6 +240,7 @@ private final class FakeStudio {
     private var pending: Pending?
     private var admitted: [Admission] = []
     private var rejected = 0
+    private var requested = 0
 
     var studioId: String { WailoCrypto.studioId(publicKey: identity.publicKey.x963Representation) }
 
@@ -193,6 +252,11 @@ private final class FakeStudio {
     var rejections: Int {
         lock.lock(); defer { lock.unlock() }
         return rejected
+    }
+
+    var authRequests: Int {
+        lock.lock(); defer { lock.unlock() }
+        return requested
     }
 
     /// Answers a live client over the loopback server. Handshake frames only — once a session is sealed
@@ -239,6 +303,7 @@ private final class FakeStudio {
         let shared = WailoCrypto.agree(ephemeral, peer: request.ephemeral_key) ?? Data()
 
         lock.lock()
+        requested += 1
         let deviceKey = known[request.device_id].map(SymmetricKey.init(data:))
         let authKey = WailoCrypto.authKey(shared: shared, deviceKey: deviceKey)
         pending = Pending(

@@ -26,18 +26,24 @@ import androidx.compose.ui.window.WindowPlacement
 import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
-import com.venbiasa.wailo.engine.MapLocalBodyProvider
+import com.venbiasa.wailo.daemon.AdbConnectionStatus
+import com.venbiasa.wailo.daemon.AdbDeviceInfo
+import com.venbiasa.wailo.daemon.DaemonClient
+import com.venbiasa.wailo.daemon.UsbConnectionStatus
+import com.venbiasa.wailo.daemon.UsbDeviceInfo
 import com.venbiasa.wailo.engine.ConnectedDevice
 import com.venbiasa.wailo.engine.DeviceTransport
 import com.venbiasa.wailo.engine.PausedExchange
 import com.venbiasa.wailo.engine.WailoEngine
-import com.venbiasa.wailo.engine.pairing.InMemoryPairingKeyStore
 import com.venbiasa.wailo.engine.pairing.PairingCode
-import com.venbiasa.wailo.engine.pairing.PairingManager
+import com.venbiasa.wailo.host.HostBreakpointRule
+import com.venbiasa.wailo.host.HostMapLocalRule
 import com.venbiasa.wailo.host.HostSeed
 import com.venbiasa.wailo.host.spendSeedOn as spendHostSeedOn
+import com.venbiasa.wailo.protocol.CaptureFilter
 import com.venbiasa.wailo.protocol.Header
 import com.venbiasa.wailo.shared.BreakpointNode
+import com.venbiasa.wailo.shared.BreakpointRuleDef
 import com.venbiasa.wailo.shared.CaptureFilterState
 import com.venbiasa.wailo.shared.DeviceConnectionStatus
 import com.venbiasa.wailo.shared.DeviceInfo
@@ -53,26 +59,23 @@ import com.venbiasa.wailo.shared.PairingState
 import com.venbiasa.wailo.shared.PausedFlow
 import com.venbiasa.wailo.shared.PickedFile
 import com.venbiasa.wailo.shared.RuleNode
+import com.venbiasa.wailo.shared.ResponseHeader
 import com.venbiasa.wailo.shared.SeedNode
 import com.venbiasa.wailo.shared.SeedRuleDef
 import com.venbiasa.wailo.shared.WailoApp
 import com.venbiasa.wailo.shared.WailoBreakpointWindowContent
+import com.venbiasa.wailo.shared.allRules
+import com.venbiasa.wailo.shared.isRuleActive
 import com.venbiasa.wailo.shared.rulesForMatch
 import com.venbiasa.wailo.shared.theme.TextScale
-import com.venbiasa.wailo.desktop.adb.AdbDeviceManager
-import com.venbiasa.wailo.desktop.adb.AdbDeviceState
-import com.venbiasa.wailo.desktop.adb.AdbStatus
-import com.venbiasa.wailo.desktop.pairing.KeychainPairingKeyStore
 import com.venbiasa.wailo.desktop.pairing.PairingQr
-import com.venbiasa.wailo.desktop.usb.UsbConnectionStatus
-import com.venbiasa.wailo.desktop.usb.UsbDeviceManager
-import com.venbiasa.wailo.desktop.usb.UsbDeviceState
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import java.awt.Dimension
@@ -89,7 +92,14 @@ import kotlin.coroutines.resume
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
 
-fun main() = runWailo()
+fun main() {
+    val daemon = runBlocking { DaemonClient.connect() }
+    try {
+        runWailo(daemon)
+    } finally {
+        daemon.close()
+    }
+}
 
 // The window's first-run size, also enforced as its floor so the layout never has to reflow below the
 // geometry it was designed against. On desktop Compose sizes windows from Dp values 1:1 with AWT's
@@ -104,66 +114,27 @@ private val MinBreakpointWindowSize = DpSize(560.dp, 420.dp)
 
 // debounce (used below to coalesce window resize/move writes) is still a coroutines preview API.
 @OptIn(FlowPreview::class)
-private fun runWailo() = application {
-    // Seeded from the last port the user chose, so a device pointed at a non-default port keeps working
-    // across restarts. The engine is built once and moved in place by [applyPort] — rebuilding it to
-    // change a port would discard the captured traffic and every rule snapshot it holds.
-    // The pairing identity has to outlive the process — every device pins this public key, so a new one
-    // each launch would silently un-pair all of them. On a host with no Keychain the engine keeps its
-    // in-memory default: loopback and USB still work, and those are the paths that never needed a key.
-    val engine = remember {
-        WailoEngine(
-            port = PortStore.load(),
-            maxRetained = MaxRetainedStore.load(),
-            pairings = if (KeychainPairingKeyStore.isSupported) {
-                PairingManager(KeychainPairingKeyStore())
-            } else {
-                PairingManager(InMemoryPairingKeyStore())
-            },
-            requirePairing = RequirePairingStore.load(),
-        )
-    }
+private fun runWailo(engine: DaemonClient) = application {
     val rows by engine.exchanges.collectAsState()
     val capturing by engine.capturing.collectAsState()
     val connectedDevices by engine.connectedDevices.collectAsState()
-    val usbManager = remember(engine) { UsbDeviceManager(engine, UsbPortStore.load()) }
-    val usbDevices by usbManager.devices.collectAsState()
-    val usbPort by usbManager.devicePort.collectAsState()
-    DisposableEffect(usbManager) {
-        onDispose { usbManager.close() }
-    }
-    // Android's counterpart to usbmux, and much thinner: it only installs the `adb reverse` route the
-    // README used to ask people to type, after which the device connects on its own like any other.
-    val adbManager = remember(engine) { AdbDeviceManager(engine.port) }
-    val adbDevices by adbManager.devices.collectAsState()
-    DisposableEffect(adbManager) {
-        onDispose { adbManager.close() }
-    }
+    val usbDevices by engine.usbDevices.collectAsState()
+    val usbPort by engine.usbPort.collectAsState()
+    val usbSupported by engine.usbSupported.collectAsState()
+    val adbDevices by engine.adbDevices.collectAsState()
+    val adbSupported by engine.adbSupported.collectAsState()
     val devices = remember(connectedDevices, usbDevices, adbDevices) {
         mergeDevices(connectedDevices, usbDevices, adbDevices)
     }
 
-    // An engine that is replaced without being stopped keeps its socket, and the port it strands is the
-    // one its replacement then fails to bind — the app coming up "not listening" against itself. That is
-    // routine under hot reload, where this composition is rebuilt and the `remember` above re-runs.
-    DisposableEffect(engine) {
-        onDispose { engine.stop() }
-    }
-
-    // Where the server actually is, versus where it was asked to be. A bind can fail at launch as well as
-    // on a change — the saved port may have been taken since it was chosen — and a server that silently
-    // isn't listening is the one failure a user can't diagnose from the UI, so it's surfaced in both the
-    // settings panel ([portError]) and the top bar ([listening]).
-    var listenPort by remember { mutableStateOf(engine.port) }
+    val listenPort by engine.capturePort.collectAsState()
     val listening by engine.listening.collectAsState()
     var portError by remember { mutableStateOf<String?>(null) }
-    LaunchedEffect(Unit) {
-        if (!engine.start()) portError = portUnavailable(engine.port)
+    LaunchedEffect(listening, listenPort) {
+        if (!listening) portError = portUnavailable(listenPort)
     }
-    // Retaking the port after whatever was squatting on it is gone. The engine recovers a socket that died
-    // under it by itself, so this only exists for the case it can't fix: a port it never got.
     val retryListen: suspend () -> Unit = {
-        portError = if (engine.restart()) null else portUnavailable(engine.port)
+        portError = if (engine.restart()) null else portUnavailable(engine.capturePort.value)
     }
 
     // Only the host can try a bind, so it — not `shared` — decides whether a port is usable and hands the
@@ -181,13 +152,6 @@ private fun runWailo() = application {
                 }
                 else -> portUnavailable(next)
             }
-            // The engine is the authority on where it ended up: a rejected port rolls back to the last one
-            // that worked, so read it back rather than assuming the change took.
-            listenPort = engine.port
-            // Every reverse mapping points at the old port and would otherwise route the device to a
-            // socket nobody is listening on — the case the settings help text used to tell people to fix
-            // by hand.
-            adbManager.setHostPort(engine.port)
         }
     }
 
@@ -199,7 +163,7 @@ private fun runWailo() = application {
         if (next in WailoEngine.PORT_RANGE) {
             usbPortError = null
             UsbPortStore.save(next)
-            usbManager.setDevicePort(next)
+            scope.launch { engine.setUsbPort(next) }
         } else {
             usbPortError =
                 "Port must be between ${WailoEngine.PORT_RANGE.first} and ${WailoEngine.PORT_RANGE.last}."
@@ -214,13 +178,19 @@ private fun runWailo() = application {
     val applyMaxRetained: (Int) -> Unit = { next ->
         if (next in WailoEngine.RETAINED_RANGE) {
             maxRetainedError = null
-            engine.setMaxRetained(next)
+            scope.launch { engine.setMaxRetained(next) }
             MaxRetainedStore.save(next)
         } else {
             maxRetainedError = "Must be between ${WailoEngine.RETAINED_RANGE.first} and " +
                 "${WailoEngine.RETAINED_RANGE.last} requests."
         }
     }
+
+    // Whether AI tools may reach the capture, and whether what they read is stripped of credentials
+    // (ADR-0059). The daemon owns and persists both, because the gate has to hold for an MCP session
+    // running with no Studio open — this window only shows and flips them.
+    val mcpAccess by engine.mcpAccess.collectAsState()
+    val mcpRedactSecrets by engine.mcpRedactSecrets.collectAsState()
 
     // The address devices should dial. The server binds every interface; we surface the host's LAN
     // IPv4 (not the wildcard) so a physical device knows where to point, falling back to localhost. The
@@ -232,11 +202,12 @@ private fun runWailo() = application {
     // --- Wi-Fi pairing (ADR-0039) ---------------------------------------------------------------
     // The engine owns the keys; the host owns the QR (ZXing is a desktop dependency, and `shared` has
     // no encoder) and the countdown, since `shared` is stateless and has no clock in commonMain.
-    val pairedDevices by engine.pairings.devices.collectAsState()
-    val pairingOffer by engine.pairings.offer.collectAsState()
-    val refusedDevices by engine.refusedDevices.collectAsState()
-    val suspectedClones by engine.suspectedClones.collectAsState()
-    val requirePairing by engine.requirePairing.collectAsState()
+    val daemonPairing by engine.pairing.collectAsState()
+    val pairedDevices = daemonPairing.devices
+    val pairingOffer = daemonPairing.offer
+    val refusedDevices = daemonPairing.refusals
+    val suspectedClones = daemonPairing.suspectedClones
+    val requirePairing = daemonPairing.requirePairing
     var offerRemaining by remember { mutableStateOf(0) }
     LaunchedEffect(pairingOffer) {
         val offer = pairingOffer ?: return@LaunchedEffect
@@ -249,13 +220,10 @@ private fun runWailo() = application {
         }
         // Drop the offer once it lapses rather than leaving a dead code on screen; the engine already
         // refuses it, and a code that looks live but is not is worse than none.
-        engine.pairings.cancelPairing()
+        engine.cancelPairing()
     }
-    val identity by engine.pairings.identity.collectAsState()
-    val offerQr = remember(pairingOffer, identity, lanAddress, listenPort) {
-        pairingOffer?.let {
-            PairingQr.render(it.qrPayload(identity.studioId, identity.publicKey, lanAddress, listenPort))
-        }
+    val offerQr = remember(pairingOffer) {
+        pairingOffer?.let { PairingQr.render(it.qrPayload) }
     }
     val pairingState = PairingState(
         offer = pairingOffer?.let {
@@ -272,22 +240,24 @@ private fun runWailo() = application {
             )
         },
         refusals = refusedDevices.map { PairingRefusal(it.deviceId, it.reason) },
-        supported = KeychainPairingKeyStore.isSupported,
+        supported = daemonPairing.supported,
         requirePairing = requirePairing,
-        studioId = identity.studioId,
+        studioId = daemonPairing.studioId,
     )
     val onPairingAction: (PairingAction) -> Unit = { action ->
-        when (action) {
-            PairingAction.Begin -> engine.pairings.beginPairing()
-            PairingAction.Cancel -> engine.pairings.cancelPairing()
-            is PairingAction.Forget -> engine.forgetDevice(action.deviceId)
-            PairingAction.ForgetAll -> engine.forgetAllDevices()
-            PairingAction.ResetIdentity -> engine.resetIdentity()
-            is PairingAction.SetRequirePairing -> {
-                engine.setRequirePairing(action.enabled)
-                RequirePairingStore.save(action.enabled)
+        scope.launch {
+            when (action) {
+                PairingAction.Begin -> engine.beginPairing()
+                PairingAction.Cancel -> engine.cancelPairing()
+                is PairingAction.Forget -> engine.forgetDevice(action.deviceId)
+                PairingAction.ForgetAll -> engine.forgetAllDevices()
+                PairingAction.ResetIdentity -> engine.resetIdentity()
+                is PairingAction.SetRequirePairing -> {
+                    engine.setRequirePairing(action.enabled)
+                    RequirePairingStore.save(action.enabled)
+                }
+                is PairingAction.DismissRefusal -> engine.dismissRefusal(action.deviceId)
             }
-            is PairingAction.DismissRefusal -> engine.dismissRefusal(action.deviceId)
         }
     }
 
@@ -346,7 +316,15 @@ private fun runWailo() = application {
     // and hands back a whole new [CaptureFilterState] for any change and stays stateless. The engine pushes
     // it to devices, which gate whole exchanges at the source — with both lists off (the default) every
     // exchange is captured.
-    var captureFilter by remember { mutableStateOf(CaptureFilterStore.load()) }
+    val daemonCaptureFilter by engine.captureFilter.collectAsState()
+    val initialDaemonCaptureFilter = remember { engine.captureFilter.value }
+    val daemonFilterConfigured = initialDaemonCaptureFilter.allow_patterns.isNotEmpty() ||
+        initialDaemonCaptureFilter.block_patterns.isNotEmpty()
+    var captureFilter by remember {
+        mutableStateOf(
+            if (daemonFilterConfigured) initialDaemonCaptureFilter.toUiState() else CaptureFilterStore.load(),
+        )
+    }
     val onCaptureFilterChange = { next: CaptureFilterState ->
         captureFilter = next
         CaptureFilterStore.save(next)
@@ -356,21 +334,48 @@ private fun runWailo() = application {
     // The feature master sits above both lists (ADR-0030): while it's off, neither list is armed — so
     // devices capture everything — yet each list keeps its own hosts and armed state, ready for when the
     // master flips back on. It gates only what's pushed, never the persisted filter.
+    var lastPublishedFilterSignature by remember {
+        mutableStateOf(captureFilterSignature(initialDaemonCaptureFilter))
+    }
     LaunchedEffect(captureFilter) {
         val on = captureFilter.masterEnabled
-        engine.updateCaptureFilter(
-            allowlistEnabled = on && captureFilter.allowEnabled,
-            allowPatterns = captureFilter.allowHosts,
-            blocklistEnabled = on && captureFilter.blockEnabled,
-            blockPatterns = captureFilter.blockHosts,
-        )
+        val signature = captureFilterSignature(captureFilter)
+        if (signature != lastPublishedFilterSignature) {
+            engine.updateCaptureFilter(
+                allowlistEnabled = on && captureFilter.allowEnabled,
+                allowPatterns = captureFilter.allowHosts,
+                blocklistEnabled = on && captureFilter.blockEnabled,
+                blockPatterns = captureFilter.blockHosts,
+            )
+            lastPublishedFilterSignature = signature
+        }
+    }
+    LaunchedEffect(daemonCaptureFilter) {
+        val signature = captureFilterSignature(daemonCaptureFilter)
+        if (signature != lastPublishedFilterSignature) {
+            val imported = daemonCaptureFilter.toUiState()
+            captureFilter = imported
+            CaptureFilterStore.save(imported)
+            lastPublishedFilterSignature = signature
+        }
     }
 
     // Map Local layout (groups + rules, in priority order): host-owned and persisted (like bookmarks).
     // `shared` renders it and hands back a whole new layout for any structural change; the host is the
     // only side that reads files and talks to the engine. The tool panel's open state and any row-seeded
     // draft are the viewer's own transient state now (ADR-0021), so the host only owns the layout.
-    var mapLocalNodes by remember { mutableStateOf(MapLocalStore.load()) }
+    val daemonMapLocalRules by engine.mapLocalRules.collectAsState()
+    val daemonMapLocalEnabled by engine.mapLocalEnabled.collectAsState()
+    val initialDaemonMapRules = remember { engine.mapLocalRules.value }
+    var mapLocalNodes by remember {
+        mutableStateOf(
+            if (initialDaemonMapRules.isEmpty()) {
+                MapLocalStore.load()
+            } else {
+                importMapLocalRules(initialDaemonMapRules)
+            },
+        )
+    }
     val onLayoutChange = { next: List<MapLocalNode> ->
         val prev = mapLocalNodes
         mapLocalNodes = next
@@ -381,51 +386,94 @@ private fun runWailo() = application {
     }
     // Map Local's feature master (ADR-0030): host-owned and persisted like the layout. Off gates what's
     // pushed (see below) — the saved layout is untouched, so flipping it back on restores every rule.
-    var mapLocalEnabled by remember { mutableStateOf(MapLocalStore.loadEnabled()) }
+    var mapLocalEnabled by remember {
+        mutableStateOf(
+            if (initialDaemonMapRules.isEmpty()) MapLocalStore.loadEnabled() else engine.mapLocalEnabled.value,
+        )
+    }
     val onMapLocalEnabledChange = { next: Boolean ->
         mapLocalEnabled = next
         MapLocalStore.saveEnabled(next)
     }
-    // The engine (running on non-UI threads) resolves a matched rule's body through this seam; Compose
-    // state can't be read off the composition, so bridge the current layout through an AtomicReference the
-    // rule effect keeps fresh. Files are read on demand, on the IO dispatcher (ADR-0019).
-    val ruleDefsRef = remember { java.util.concurrent.atomic.AtomicReference(mapLocalNodes) }
-    LaunchedEffect(Unit) {
-        engine.bodyProvider = MapLocalBodyProvider { ruleId, _, _ ->
-            withContext(Dispatchers.IO) { serveBody(ruleId, ruleDefsRef.get()) }
+    var lastPublishedMapSignature by remember {
+        mutableStateOf(mapRuleSignature(initialDaemonMapRules, engine.mapLocalEnabled.value))
+    }
+    LaunchedEffect(mapLocalNodes, mapLocalEnabled) {
+        val rules = withContext(Dispatchers.IO) { mapLocalNodes.toHostMapLocalRules() }
+        val signature = mapRuleSignature(rules, mapLocalEnabled)
+        if (signature != lastPublishedMapSignature) {
+            engine.replaceMapLocalRules(rules, mapLocalEnabled)
+            lastPublishedMapSignature = signature
         }
     }
-    // Push the match-metadata snapshot (no file reads here) on first composition and every edit; a save
-    // re-pushes the active rules in priority order, and the engine re-pushes to any device that hasn't
-    // acked it. Group toggles/reorders change which rules are active and in what order (ADR-0026). The
-    // feature master gates this without touching the saved layout (ADR-0030): off pushes no rules and
-    // empties the body-resolution snapshot too, so an in-flight match can't be served a local body.
-    LaunchedEffect(mapLocalNodes, mapLocalEnabled) {
-        val active = if (mapLocalEnabled) mapLocalNodes else emptyList()
-        ruleDefsRef.set(active)
-        engine.updateRules(compileRules(active))
+    LaunchedEffect(daemonMapLocalRules, daemonMapLocalEnabled) {
+        val signature = mapRuleSignature(daemonMapLocalRules, daemonMapLocalEnabled)
+        if (signature != lastPublishedMapSignature) {
+            val imported = withContext(Dispatchers.IO) { importMapLocalRules(daemonMapLocalRules) }
+            mapLocalNodes = imported
+            mapLocalEnabled = daemonMapLocalEnabled
+            MapLocalStore.save(imported)
+            MapLocalStore.saveEnabled(daemonMapLocalEnabled)
+            lastPublishedMapSignature = signature
+        }
     }
 
     // Breakpoint layout: host-owned and persisted like Map Local (groups + rules in priority order). `shared`
     // renders it and hands back a whole new layout for any structural change; the host persists it and pushes
     // the compiled active rules. On a match a device pauses and the engine surfaces it via [pausedExchanges]
     // below (ADR-0026/0027).
-    var breakpointNodes by remember { mutableStateOf(BreakpointStore.load()) }
+    val daemonBreakpointRules by engine.breakpointRules.collectAsState()
+    val daemonBreakpointsEnabled by engine.breakpointsEnabled.collectAsState()
+    val initialDaemonBreakpointRules = remember { engine.breakpointRules.value }
+    var breakpointNodes by remember {
+        mutableStateOf(
+            if (initialDaemonBreakpointRules.isEmpty()) {
+                BreakpointStore.load()
+            } else {
+                importBreakpointRules(initialDaemonBreakpointRules)
+            },
+        )
+    }
     val onBreakpointLayoutChange = { next: List<BreakpointNode> ->
         breakpointNodes = next
         BreakpointStore.save(next)
     }
     // Breakpoints' feature master (ADR-0030), mirroring Map Local: off pushes no rules (so nothing pauses)
     // while the saved layout stays intact for when it flips back on.
-    var breakpointsEnabled by remember { mutableStateOf(BreakpointStore.loadEnabled()) }
+    var breakpointsEnabled by remember {
+        mutableStateOf(
+            if (initialDaemonBreakpointRules.isEmpty()) {
+                BreakpointStore.loadEnabled()
+            } else {
+                engine.breakpointsEnabled.value
+            },
+        )
+    }
     val onBreakpointsEnabledChange = { next: Boolean ->
         breakpointsEnabled = next
         BreakpointStore.saveEnabled(next)
     }
+    var lastPublishedBreakpointSignature by remember {
+        mutableStateOf(breakpointRuleSignature(initialDaemonBreakpointRules, engine.breakpointsEnabled.value))
+    }
     LaunchedEffect(breakpointNodes, breakpointsEnabled) {
-        engine.updateBreakpointRules(
-            compileBreakpointRules(if (breakpointsEnabled) breakpointNodes else emptyList()),
-        )
+        val rules = breakpointNodes.toHostBreakpointRules()
+        val signature = breakpointRuleSignature(rules, breakpointsEnabled)
+        if (signature != lastPublishedBreakpointSignature) {
+            engine.replaceBreakpointRules(rules, breakpointsEnabled)
+            lastPublishedBreakpointSignature = signature
+        }
+    }
+    LaunchedEffect(daemonBreakpointRules, daemonBreakpointsEnabled) {
+        val signature = breakpointRuleSignature(daemonBreakpointRules, daemonBreakpointsEnabled)
+        if (signature != lastPublishedBreakpointSignature) {
+            val imported = importBreakpointRules(daemonBreakpointRules)
+            breakpointNodes = imported
+            breakpointsEnabled = daemonBreakpointsEnabled
+            BreakpointStore.save(imported)
+            BreakpointStore.saveEnabled(daemonBreakpointsEnabled)
+            lastPublishedBreakpointSignature = signature
+        }
     }
 
     // Seed layout: host-owned and persisted like the two above. Seeds never reach a device — they are
@@ -655,19 +703,23 @@ private fun runWailo() = application {
             portError = portError,
             onApplyPort = applyPort,
             devices = devices,
-            usbSupported = usbManager.supported,
+            usbSupported = usbSupported,
             usbPort = usbPort,
             usbPortError = usbPortError,
             onApplyUsbPort = applyUsbPort,
-            adbSupported = adbManager.supported,
+            adbSupported = adbSupported,
             maxRetained = maxRetained,
             maxRetainedError = maxRetainedError,
             onApplyMaxRetained = applyMaxRetained,
+            mcpAccess = mcpAccess,
+            onMcpAccessChange = { scope.launch { engine.setMcpAccess(it) } },
+            mcpRedactSecrets = mcpRedactSecrets,
+            onMcpRedactSecretsChange = { scope.launch { engine.setMcpRedactSecrets(it) } },
             pairing = pairingState,
             onPairingAction = onPairingAction,
             capturing = capturing,
-            onToggleCapture = { engine.setCapturing(!capturing) },
-            onClear = engine::clear,
+            onToggleCapture = { scope.launch { engine.setCapturing(!capturing) } },
+            onClear = { scope.launch { engine.clear() } },
             bookmarks = bookmarks,
             onAddBookmark = addBookmark,
             onRemoveBookmark = removeBookmark,
@@ -734,7 +786,9 @@ private fun runWailo() = application {
             // proceed each with its original bytes, the same fail-open as a desktop disconnect
             // (ADR-0027) — rather than aborting the app's calls or leaving devices hanging.
             onCloseRequest = {
-                pausedFlows.forEach { engine.resumeBreakpoint(it.correlationId, null, null) }
+                scope.launch {
+                    pausedFlows.forEach { engine.resumeHold(it.correlationId, null, null) }
+                }
                 breakpointWindowOpen = false
             },
             state = breakpointWindowState,
@@ -764,9 +818,11 @@ private fun runWailo() = application {
                 darkTheme = darkTheme,
                 textScale = textScale,
                 onResumeBreakpoint = { correlationId, editedRequest, editedResponse ->
-                    engine.resumeBreakpoint(correlationId, editedRequest, editedResponse)
+                    scope.launch { engine.resumeHold(correlationId, editedRequest, editedResponse) }
                 },
-                onAbortBreakpoint = { correlationId -> engine.abortBreakpoint(correlationId) },
+                onAbortBreakpoint = { correlationId ->
+                    scope.launch { engine.abortHold(correlationId) }
+                },
             )
         }
     }
@@ -783,19 +839,19 @@ private fun runWailo() = application {
  * success.
  */
 private suspend fun spendSeedOn(
-    engine: WailoEngine,
+    engine: DaemonClient,
     queue: List<SeedRuleDef>,
     hold: PausedFlow,
 ): List<SeedRuleDef>? {
     val hostQueue = queue.map { it.toHostSeed() }
     val spent = spendHostSeedOn(
-        engine = engine,
         queue = hostQueue,
         hold = hold.toPausedExchange(),
         responses = { seed ->
             val def = queue.first { it.id == seed.id }
             withContext(Dispatchers.IO) { SeedStore.seedResponse(def) }
         },
+        resume = { correlationId, response -> engine.resumeHold(correlationId, null, response) },
     ) ?: return if (engine.pausedExchanges.value.none { it.correlationId == hold.correlationId }) {
         // The device disconnected while its body was being read. Treat the vanished hold as handled so
         // the desktop does not open an empty breakpoint window, but keep the seed because nothing spent it.
@@ -825,10 +881,130 @@ private fun PausedFlow.toPausedExchange() = PausedExchange(
     response = response,
 )
 
+private fun CaptureFilter.toUiState() = CaptureFilterState(
+    masterEnabled = allowlist_enabled || blocklist_enabled ||
+        (allow_patterns.isEmpty() && block_patterns.isEmpty()),
+    allowEnabled = allowlist_enabled,
+    allowHosts = allow_patterns,
+    blockEnabled = blocklist_enabled,
+    blockHosts = block_patterns,
+)
+
+private fun captureFilterSignature(filter: CaptureFilter): String =
+    "${filter.allowlist_enabled}:${filter.allow_patterns.joinToString("\u0000")}|" +
+        "${filter.blocklist_enabled}:${filter.block_patterns.joinToString("\u0000")}"
+
+private fun captureFilterSignature(filter: CaptureFilterState): String {
+    val on = filter.masterEnabled
+    return "${on && filter.allowEnabled}:${filter.allowHosts.joinToString("\u0000")}|" +
+        "${on && filter.blockEnabled}:${filter.blockHosts.joinToString("\u0000")}"
+}
+
+private fun List<MapLocalNode>.toHostMapLocalRules(): List<HostMapLocalRule> = allRules().map { rule ->
+    val body = MapLocalStore.loadServedBodyOrNull(rule)
+    HostMapLocalRule(
+        id = rule.id,
+        enabled = isRuleActive(rule.id),
+        urlPattern = rule.urlPattern,
+        methods = rule.method.split(',')
+            .map(String::trim)
+            .filter(String::isNotEmpty),
+        statusCode = rule.statusCode,
+        headers = rule.headers.map { Header(name = it.name, value_ = it.value) },
+        body = body ?: ByteArray(0),
+        bodyAvailable = body != null,
+    )
+}
+
+private fun importMapLocalRules(rules: List<HostMapLocalRule>): List<MapLocalNode> = rules.map { rule ->
+    val definition = MapLocalRuleDef(
+        id = rule.id,
+        name = rule.id,
+        enabled = rule.enabled,
+        urlPattern = rule.urlPattern,
+        method = rule.methods.joinToString(","),
+        statusCode = rule.statusCode,
+        headers = rule.headers
+            .filterNot { it.name.equals("Content-Length", ignoreCase = true) }
+            .map { ResponseHeader(it.name, it.value_) },
+        inline = true,
+    )
+    if (rule.bodyAvailable) MapLocalStore.saveInlineBody(definition, rule.bodyCopy())
+    RuleNode(definition)
+}
+
+private fun mapRuleSignature(rules: List<HostMapLocalRule>, enabled: Boolean): String =
+    buildString {
+        append(enabled)
+        rules.forEach { rule ->
+            append('|')
+            append(rule.id)
+            append(':')
+            append(rule.enabled)
+            append(':')
+            append(rule.urlPattern)
+            append(':')
+            append(rule.methods.joinToString(","))
+            append(':')
+            append(rule.statusCode)
+            append(':')
+            append(rule.headers.joinToString("\u0000") { "${it.name}\u0001${it.value_}" })
+            append(':')
+            append(rule.bodyAvailable)
+            append(':')
+            append(rule.bodyCopy().contentHashCode())
+        }
+    }
+
+private fun List<BreakpointNode>.toHostBreakpointRules(): List<HostBreakpointRule> = allRules().map { rule ->
+    HostBreakpointRule(
+        id = rule.id,
+        enabled = isRuleActive(rule.id),
+        urlPattern = rule.urlPattern,
+        methods = rule.method.split(',')
+            .map(String::trim)
+            .filter(String::isNotEmpty),
+        onRequest = rule.onRequest,
+        onResponse = rule.onResponse,
+    )
+}
+
+private fun importBreakpointRules(rules: List<HostBreakpointRule>): List<BreakpointNode> = rules.map { rule ->
+    RuleNode(
+        BreakpointRuleDef(
+            id = rule.id,
+            enabled = rule.enabled,
+            urlPattern = rule.urlPattern,
+            method = rule.methods.joinToString(","),
+            onRequest = rule.onRequest,
+            onResponse = rule.onResponse,
+        ),
+    )
+}
+
+private fun breakpointRuleSignature(rules: List<HostBreakpointRule>, enabled: Boolean): String =
+    buildString {
+        append(enabled)
+        rules.forEach { rule ->
+            append('|')
+            append(rule.id)
+            append(':')
+            append(rule.enabled)
+            append(':')
+            append(rule.urlPattern)
+            append(':')
+            append(rule.methods.joinToString(","))
+            append(':')
+            append(rule.onRequest)
+            append(':')
+            append(rule.onResponse)
+        }
+    }
+
 private fun mergeDevices(
     connected: List<ConnectedDevice>,
-    attachedUsb: List<UsbDeviceState>,
-    attachedAdb: List<AdbDeviceState>,
+    attachedUsb: List<UsbDeviceInfo>,
+    attachedAdb: List<AdbDeviceInfo>,
 ): List<DeviceInfo> {
     val connectedById = connected.associateBy(ConnectedDevice::connectionId)
     val usbRows = attachedUsb.map { usb ->
@@ -853,7 +1029,10 @@ private fun mergeDevices(
     val tunnelled = connected.filter { it.loopback && it.platform.equals("android", ignoreCase = true) }
     val claimed = tunnelled.singleOrNull()?.takeIf { attachedAdb.size == 1 }
     val adbRows = attachedAdb.map { adb ->
-        val session = claimed.takeIf { adb.status == AdbStatus.WAITING_FOR_APP || adb.status == AdbStatus.FORWARDING }
+        val session = claimed.takeIf {
+            adb.status == AdbConnectionStatus.WAITING_FOR_APP ||
+                adb.status == AdbConnectionStatus.FORWARDING
+        }
         DeviceInfo(
             id = "adb:${adb.serial}",
             name = session?.deviceName ?: adb.name,
@@ -898,12 +1077,12 @@ private fun UsbConnectionStatus.toSharedStatus(): DeviceConnectionStatus = when 
     UsbConnectionStatus.ERROR -> DeviceConnectionStatus.ERROR
 }
 
-private fun AdbStatus.toSharedStatus(): DeviceConnectionStatus = when (this) {
-    AdbStatus.UNAUTHORIZED -> DeviceConnectionStatus.UNAUTHORIZED
-    AdbStatus.FORWARDING -> DeviceConnectionStatus.CONNECTING
-    AdbStatus.WAITING_FOR_APP -> DeviceConnectionStatus.WAITING_FOR_APP
-    AdbStatus.CONNECTED -> DeviceConnectionStatus.CONNECTED
-    AdbStatus.ERROR -> DeviceConnectionStatus.ERROR
+private fun AdbConnectionStatus.toSharedStatus(): DeviceConnectionStatus = when (this) {
+    AdbConnectionStatus.UNAUTHORIZED -> DeviceConnectionStatus.UNAUTHORIZED
+    AdbConnectionStatus.FORWARDING -> DeviceConnectionStatus.CONNECTING
+    AdbConnectionStatus.WAITING_FOR_APP -> DeviceConnectionStatus.WAITING_FOR_APP
+    AdbConnectionStatus.CONNECTED -> DeviceConnectionStatus.CONNECTED
+    AdbConnectionStatus.ERROR -> DeviceConnectionStatus.ERROR
 }
 
 private fun abbreviatedUdid(udid: String): String =

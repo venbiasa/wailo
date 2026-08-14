@@ -12,7 +12,7 @@ silently uses the wrong toolchain and fails or misbehaves.
 | Build | Run from | Wrapper | Modules |
 |-------|----------|---------|---------|
 | SDK build | repo root | Gradle 8.11.1 (`./gradlew`) | `protocol`, `sdk-android`, samples, plugin |
-| studio build | `studio/` | Gradle 9.3.1 (`studio/gradlew`) | `engine`, `shared`, `desktopApp` |
+| studio build | `studio/` | Gradle 9.3.1 (`studio/gradlew`) | `engine`, `host`, `daemon`, `shared`, `desktopApp`, `cli`, `mcp` |
 
 ## Rules
 
@@ -20,13 +20,13 @@ silently uses the wrong toolchain and fails or misbehaves.
   parameter alone** — in this environment it is not reliably applied, so `./gradlew` silently
   runs from the repo root (8.11.1) even when `working_directory` says `studio`. Always write
   `cd /abs/path/to/repo/studio && ./gradlew …`.
-- To build/test/run **`engine`, `shared`, or `desktopApp`**, run studio's wrapper. NEVER run
+- To build/test/run **`engine`, `host`, `daemon`, `shared`, `desktopApp`, `cli`, or `mcp`**, run studio's wrapper. NEVER run
   these from the repo root — root's `./gradlew` is 8.11.1 and does not know these modules.
 - `protocol` is the seam: `:protocol:publishToMavenLocal` is a **root** task and must be run
   (from repo root) before the studio build, which consumes `wailo-protocol` from Maven Local.
 
 ```bash
-# studio (engine/shared/desktopApp) — absolute cd, then studio's ./gradlew (9.3.1)
+# studio (engine/host/daemon/shared/desktopApp/cli/mcp) — absolute cd, then studio's ./gradlew (9.3.1)
 cd /abs/path/to/repo/studio && ./gradlew :shared:jvmTest
 cd /abs/path/to/repo/studio && ./gradlew :desktopApp:run
 
@@ -54,6 +54,19 @@ redundant and slow — and a second sandboxed `./gradlew` can even fail on stale
 
 `hotRun` only covers the running app — tests (e.g. `:shared:jvmTest`) are a separate task and
 still need their own invocation.
+
+## Kill the daemon before reinstalling studio dists
+
+A running daemon was launched with `-cp .../cli/build/install/wailo-cli/lib/*.jar` and loads classes
+lazily, so `:cli:installDist` / `:daemon:installDist` while it is alive swaps the jar out from under it.
+It keeps answering `ping` — so frontends happily attach — and then dies on `NoClassDefFoundError` for
+every class it had not loaded yet, which now surfaces as
+`Wailo daemon did not become ready (it answered: NoClassDefFoundError: …)`. Studio and the CLI both fail
+that way until the process is gone; SIGTERM may not be enough, since its shutdown hook can die the same
+way. Before reinstalling: `pkill -f com.venbiasa.wailo.daemon.MainKt` (add `-9` if it lingers).
+
+Better still, keep end-to-end runs off the user's live daemon entirely — there is one daemon per state
+directory, so point `WAILO_HOME` (plus `WAILO_CAPTURE_PORT`) at a scratch dir and the run gets its own.
 
 ## Agent shell is sandboxed: don't verify studio changes with `./gradlew`
 

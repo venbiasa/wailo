@@ -9,10 +9,17 @@ class ParseArgsTest {
 
     @Test
     fun parsesServeAndFlags() {
-        val parsed = parseArgs(arrayOf("serve", "--port", "9000", "--control-port", "9001"))!!
+        val parsed = parseArgs(arrayOf("serve", "--port", "9000"))!!
         assertEquals("serve", parsed.command)
         assertEquals(9000, parsed.port)
-        assertEquals(9001, parsed.controlPort)
+        assertTrue(parsed.portSpecified)
+    }
+
+    // The control port is the daemon's to choose and publish now (ADR-0059), so naming one is an error
+    // rather than an override.
+    @Test
+    fun rejectsAControlPortFlag() {
+        assertNull(parseArgs(arrayOf("serve", "--control-port", "9001")))
     }
 
     @Test
@@ -68,7 +75,6 @@ class ParseArgsTest {
     @Test
     fun rejectsInvalidNumericBounds() {
         assertNull(parseArgs(arrayOf("serve", "--port", "0")))
-        assertNull(parseArgs(arrayOf("serve", "--control-port", "70000")))
         assertNull(parseArgs(arrayOf("wait_exchange", "--timeout", "-1")))
         assertNull(parseArgs(arrayOf("list_exchanges", "--limit", "0")))
     }
@@ -89,6 +95,8 @@ class ParseArgsTest {
                 "abort_hold",
                 "clear_capture",
                 "wait_exchange",
+                "set_mcp_access",
+                "set_mcp_redaction",
             ),
         ))
     }

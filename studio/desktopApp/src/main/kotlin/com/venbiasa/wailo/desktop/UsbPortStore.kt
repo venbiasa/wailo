@@ -1,6 +1,6 @@
 package com.venbiasa.wailo.desktop
 
-import com.venbiasa.wailo.desktop.usb.UsbDeviceManager
+import com.venbiasa.wailo.daemon.DEFAULT_USB_PORT
 import com.venbiasa.wailo.engine.WailoEngine
 import com.venbiasa.wailo.shared.settings.createKeyValueStore
 
@@ -15,8 +15,8 @@ object UsbPortStore {
     private const val KEY = "usbDevicePort"
     private val store = createKeyValueStore("desktop")
 
-    fun load(): Int = store.getInt(KEY, UsbDeviceManager.DEFAULT_DEVICE_PORT)
-        .takeIf { it in WailoEngine.PORT_RANGE } ?: UsbDeviceManager.DEFAULT_DEVICE_PORT
+    fun load(): Int = store.getInt(KEY, DEFAULT_USB_PORT)
+        .takeIf { it in WailoEngine.PORT_RANGE } ?: DEFAULT_USB_PORT
 
     fun save(port: Int) = store.putInt(KEY, port)
 }

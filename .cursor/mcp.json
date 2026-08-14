@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "wailo": {
+      "type": "stdio",
+      "command": "${workspaceFolder}/studio/mcp/build/install/wailo-mcp/bin/wailo-mcp"
+    }
+  }
+}

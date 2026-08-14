@@ -141,8 +141,9 @@ final class WailoCoordinator: @unchecked Sendable {
         lock.lock()
         self.session = session
         startUsbListener(session: session)
-        apply()
+        let connectionChanged = apply()
         lock.unlock()
+        if connectionChanged { post(Wailo.connectionDidChangeNotification) }
     }
 
     func stop() {
@@ -174,8 +175,12 @@ final class WailoCoordinator: @unchecked Sendable {
     /// reach `UserDefaults`, where every later launch would read it back.
     @discardableResult
     func setHost(_ host: String?, port: Int?) -> Bool {
+        var connectionChanged = false
         lock.lock()
-        defer { lock.unlock() }
+        defer {
+            lock.unlock()
+            if connectionChanged { post(Wailo.connectionDidChangeNotification) }
+        }
 
         if let port, !WailoAddress.portRange.contains(port) {
             print("Wailo: port \(port) is outside 1-65535; keeping the current address")
@@ -187,7 +192,7 @@ final class WailoCoordinator: @unchecked Sendable {
             WailoHostStore.host = nil
             WailoHostStore.port = port
             identityChange = nil
-            apply()
+            connectionChanged = apply()
             return true
         }
         guard let address = WailoAddress(host) else {
@@ -201,7 +206,7 @@ final class WailoCoordinator: @unchecked Sendable {
         // keeps the store holding a bare host — the shape everything downstream expects.
         WailoHostStore.host = address.host
         WailoHostStore.port = address.port ?? port
-        apply()
+        connectionChanged = apply()
         return true
     }
 
@@ -387,8 +392,9 @@ final class WailoCoordinator: @unchecked Sendable {
         #endif
     }
 
-    private func apply() {
-        guard let session else { return }
+    @discardableResult
+    private func apply() -> Bool {
+        guard let session else { return false }
 
         // Parsed here rather than trusted, because a host reaching this point may never have passed
         // `setHost` — `start(host:)` and the `-WailoHost` launch argument both land straight here. An
@@ -422,20 +428,22 @@ final class WailoCoordinator: @unchecked Sendable {
 
         guard let target = Endpoint(host: host, port: port) else {
             print("Wailo: cannot dial \(host):\(port); leaving the connection as it is")
-            return
+            return false
         }
 
         let trust = self.trust(for: target, chosen: chosen)
         guard case .blocked = trust else {
-            guard target != endpoint || client == nil else { return }
+            guard target != endpoint || client == nil else { return false }
             endpoint = target
-            rebuildClient(session: session, target: target, trust: trust)
-            return
+            return rebuildClient(session: session, target: target, trust: trust)
         }
         // Nothing worth saying to whoever is on the other end, so do not open the socket at all.
+        let connectionChanged = !usbActive && connected
+        if connectionChanged { connected = false }
         endpoint = nil
         client?.stop()
         client = nil
+        return connectionChanged
     }
 
     /// Discovery may only reconnect to a desktop this device already holds a key for.
@@ -513,7 +521,12 @@ final class WailoCoordinator: @unchecked Sendable {
         return ["localhost", "127.0.0.1", "::1", "[::1]"].contains(host.lowercased())
     }
 
-    private func rebuildClient(session: Session, target: Endpoint, trust: Trust) {
+    private func rebuildClient(session: Session, target: Endpoint, trust: Trust) -> Bool {
+        // A replacement starts disconnected. The old client's eventual close callback is ignored
+        // once `client` points at the replacement, so leaving this to that callback makes a failed
+        // handshake inherit the old client's `true` status forever.
+        let connectionChanged = !usbActive && connected
+        if connectionChanged { connected = false }
         client?.stop()
 
         let hello = Hello(device_name: session.deviceName, app_id: session.appId, platform: Wailo.platform)
@@ -541,6 +554,7 @@ final class WailoCoordinator: @unchecked Sendable {
         } else {
             webSocket.suspend()
         }
+        return connectionChanged
     }
 
     /// Nil for the transports that prove nothing, which is also what makes `security` fall to `.open`.
@@ -670,8 +684,9 @@ final class WailoCoordinator: @unchecked Sendable {
     private func discoveryChanged(_ services: [WailoService]) {
         lock.lock()
         discovered = services
-        apply()
+        let connectionChanged = apply()
         lock.unlock()
+        if connectionChanged { post(Wailo.connectionDidChangeNotification) }
         post(Wailo.discoveryDidChangeNotification)
     }
 

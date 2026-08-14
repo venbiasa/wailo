@@ -40,10 +40,9 @@ compose.desktop {
 dependencies {
     // currentOs bundles the Compose desktop runtime + window toolkit for the host platform.
     implementation(compose.desktop.currentOs)
-    // engine = the headless query surface; host = Seed spend + query helpers shared with CLI/MCP
-    // (ADR-0055); shared = the Compose viewer (invariant #2: UI is a frontend over engine).
-    implementation(projects.engine)
-    implementation(projects.host)
+    // daemon is the shared capture/control owner; shared is the Compose viewer. Studio is a client and
+    // therefore never binds the capture port or owns cable transports itself.
+    implementation(projects.daemon)
     implementation(projects.shared)
     implementation(libs.zxing.core)
 

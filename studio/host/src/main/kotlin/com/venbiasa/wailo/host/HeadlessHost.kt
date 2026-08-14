@@ -74,6 +74,13 @@ class HeadlessHost private constructor(
     @Volatile
     private var fallbackBodyProvider: MapLocalBodyProvider? = null
 
+    private val breakpointMutex = Mutex()
+    private val _breakpointRules = MutableStateFlow<List<HostBreakpointRule>>(emptyList())
+    val breakpointRules: StateFlow<List<HostBreakpointRule>> = _breakpointRules.asStateFlow()
+
+    @Volatile
+    private var breakpointsEnabled = true
+
     /**
      * Optional fallback for rules pushed through the low-level [updateRules] API. Rules registered with
      * [upsertMapLocalRule] always resolve from the host's in-memory registry first.
@@ -161,7 +168,69 @@ class HeadlessHost private constructor(
         }
     }
 
+    suspend fun replaceMapLocalRules(rules: List<HostMapLocalRule>, enabled: Boolean) {
+        require(rules.map { it.id }.distinct().size == rules.size) { "Map Local rule ids must be unique" }
+        rules.forEach {
+            require(it.id.isNotBlank()) { "Map Local id must not be blank" }
+            require(it.urlPattern.isNotBlank()) { "Map Local URL pattern must not be blank" }
+            require(it.statusCode in 100..599) { "Map Local status must be between 100 and 599" }
+        }
+        mapLocalMutex.withLock {
+            _mapLocalRules.value = rules.toList()
+            mapLocalEnabled = enabled
+            pushRegisteredMapLocalRules()
+        }
+    }
+
     fun isMapLocalEnabled(): Boolean = mapLocalEnabled
+
+    suspend fun upsertBreakpointRule(rule: HostBreakpointRule) {
+        require(rule.id.isNotBlank()) { "Breakpoint id must not be blank" }
+        require(rule.urlPattern.isNotBlank()) { "Breakpoint URL pattern must not be blank" }
+        require(rule.onRequest || rule.onResponse) { "Breakpoint must pause requests, responses, or both" }
+        breakpointMutex.withLock {
+            val current = _breakpointRules.value
+            val index = current.indexOfFirst { it.id == rule.id }
+            _breakpointRules.value = if (index == -1) {
+                current + rule
+            } else {
+                current.toMutableList().also { it[index] = rule }
+            }
+            pushRegisteredBreakpointRules()
+        }
+    }
+
+    suspend fun removeBreakpointRule(id: String): Boolean = breakpointMutex.withLock {
+        val current = _breakpointRules.value
+        val next = current.filterNot { it.id == id }
+        if (next.size == current.size) return@withLock false
+        _breakpointRules.value = next
+        pushRegisteredBreakpointRules()
+        true
+    }
+
+    suspend fun setBreakpointsEnabled(enabled: Boolean) {
+        breakpointMutex.withLock {
+            breakpointsEnabled = enabled
+            pushRegisteredBreakpointRules()
+        }
+    }
+
+    suspend fun replaceBreakpointRules(rules: List<HostBreakpointRule>, enabled: Boolean) {
+        require(rules.map { it.id }.distinct().size == rules.size) { "Breakpoint ids must be unique" }
+        rules.forEach {
+            require(it.id.isNotBlank()) { "Breakpoint id must not be blank" }
+            require(it.urlPattern.isNotBlank()) { "Breakpoint URL pattern must not be blank" }
+            require(it.onRequest || it.onResponse) { "Breakpoint must pause requests, responses, or both" }
+        }
+        breakpointMutex.withLock {
+            _breakpointRules.value = rules.toList()
+            breakpointsEnabled = enabled
+            pushRegisteredBreakpointRules()
+        }
+    }
+
+    fun areBreakpointsEnabled(): Boolean = breakpointsEnabled
 
     fun listDevices(): List<ConnectedDevice> = engine.connectedDevices.value
 
@@ -257,6 +326,16 @@ class HeadlessHost private constructor(
         engine.updateRules(
             if (mapLocalEnabled) {
                 _mapLocalRules.value.map(HostMapLocalRule::toProtocolRule)
+            } else {
+                emptyList()
+            },
+        )
+    }
+
+    private fun pushRegisteredBreakpointRules() {
+        engine.updateBreakpointRules(
+            if (breakpointsEnabled) {
+                _breakpointRules.value.map(HostBreakpointRule::toProtocolRule)
             } else {
                 emptyList()
             },

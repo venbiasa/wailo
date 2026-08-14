@@ -42,8 +42,8 @@ private const val MaxPortDigits = 5
 private const val MaxRetainedDigits = 6
 
 /**
- * The settings panel: the two ports a device can arrive on, how much captured traffic Studio keeps, and
- * the local network trust surface.
+ * The settings panel: the two ports a device can arrive on, how much captured traffic Studio keeps, what
+ * AI tools are allowed to do with it, and the local network trust surface.
  *
  * Stateless over its inputs, like the other tool panels (ADR-0013): the host owns the engine, the
  * persistence, and all validation. The number fields are the one exception — they hold in-progress text
@@ -69,6 +69,10 @@ internal fun SettingsManager(
     retainedCount: Int,
     maxRetainedError: String?,
     onApplyMaxRetained: (Int) -> Unit,
+    mcpAccess: Boolean = true,
+    onMcpAccessChange: (Boolean) -> Unit = {},
+    mcpRedactSecrets: Boolean = true,
+    onMcpRedactSecretsChange: (Boolean) -> Unit = {},
     pairing: PairingState = PairingState(),
     onPairingAction: (PairingAction) -> Unit = {},
     onClose: () -> Unit = {},
@@ -141,6 +145,25 @@ internal fun SettingsManager(
                         "request holds its body. Lowering it drops the oldest right away — that traffic " +
                         "is gone, not hidden.",
                 )
+
+                SectionHeader("AI tool access")
+                ToggleRow(
+                    label = "Let AI tools read and control this capture",
+                    checked = mcpAccess,
+                    onCheckedChange = onMcpAccessChange,
+                    help = "Off, an agent's Wailo tool calls are all refused until you turn this back " +
+                        "on. Capture keeps running either way, and nothing changes for Studio or the CLI.",
+                )
+                if (mcpAccess) {
+                    RowDivider()
+                    ToggleRow(
+                        label = "Hide credentials from AI tools",
+                        checked = mcpRedactSecrets,
+                        onCheckedChange = onMcpRedactSecretsChange,
+                        help = "On, authorization headers, cookies, and secret-looking fields read back " +
+                            "as placeholders. Off, a live token reaches the agent and its provider's logs.",
+                    )
+                }
 
                 if (pairing.supported) {
                     SectionHeader("Local area network security")

@@ -114,6 +114,40 @@ class HeadlessHostTest {
         }
     }
 
+    @Test
+    fun registeredBreakpointRulesCanBeDisabledWithoutBeingDeleted() = runBlocking {
+        val engine = WailoEngine()
+        val host = HeadlessHost.wrap(engine)
+        try {
+            host.upsertBreakpointRule(
+                HostBreakpointRule(
+                    id = "errors",
+                    urlPattern = "https://api.example.com/*",
+                    methods = listOf("POST"),
+                    onRequest = true,
+                    onResponse = false,
+                ),
+            )
+
+            val pushed = engine.breakpointRules.value.rules.single()
+            assertEquals("errors", pushed.id)
+            assertEquals(listOf("POST"), pushed.methods)
+            assertTrue(pushed.on_request)
+            assertFalse(pushed.on_response)
+
+            host.setBreakpointsEnabled(false)
+            assertTrue(engine.breakpointRules.value.rules.isEmpty())
+            assertEquals("errors", host.breakpointRules.value.single().id)
+
+            host.setBreakpointsEnabled(true)
+            assertEquals("errors", engine.breakpointRules.value.rules.single().id)
+            assertTrue(host.removeBreakpointRule("errors"))
+            assertFalse(host.removeBreakpointRule("errors"))
+        } finally {
+            host.stop()
+        }
+    }
+
     private class FakeConnection : DeviceConnection {
         override val id = "usb:test"
         override val transport = DeviceTransport.USB

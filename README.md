@@ -5,8 +5,8 @@ Android or iOS app; it streams captured HTTP(S) traffic to a **desktop app** whe
 inspect requests and responses live. Unlike a system proxy, capture happens inside the app,
 so there's no certificate juggling or device-wide proxy setup.
 
-The same capture engine is designed to be driven headlessly (for automation via Appium) and
-exposed to AI tools (via MCP) later, without rewrites.
+The same capture engine can be driven headlessly (for automation via Appium) or exposed directly
+to AI tools through the local MCP server.
 
 > Status: early. Being built in small, verifiable milestones (see Roadmap).
 
@@ -17,17 +17,19 @@ Two boundaries keep the system decoupled:
 - **`protocol`** - the protobuf wire schema (source of truth, code-generated with Wire). Both
   the device SDK and the desktop speak it; neither hand-writes DTOs.
 - **`engine`** - a headless library owning the transport server, a multi-session capture store,
-  and a query/command API. The desktop UI, the CLI, and the future MCP server are all thin
-  frontends over it (via the `host` orchestration layer for Seed spend and traffic queries —
-  ADR-0055).
+  and a query/command API.
+- **`daemon`** - the one persistent local owner of `engine`, cable transports, pairing, rules, and
+  holds. Studio, CLI, and MCP all auto-start and attach to it (ADR-0058).
 
 ```
-[App under test] -> Wailo SDK (Android/iOS) --(protobuf over WebSocket)--> [engine] -> host -> desktop UI / CLI / MCP
+[App under test] -> Wailo SDK --(protobuf over WebSocket)--> daemon -> engine -> host
+                                                          daemon -> Studio / CLI / MCP
 ```
 
 The repo is **two Gradle builds** joined only by `protocol`: the **SDK build** (repo root — `protocol`,
 `sdk-android`, the Gradle plugin, and the samples) is pinned to a conservative toolchain so it's consumable
-inside host apps, while the **`studio/` build** (`engine`, `shared`, `desktopApp`) runs a modern toolchain
+inside host apps, while the **`studio/` build** (`engine`, `host`, `daemon`, `shared`, `desktopApp`, `cli`, `mcp`)
+runs a modern toolchain
 and consumes `protocol` as the published `wailo-protocol` artifact (ADR-0015).
 
 ## Modules
@@ -41,9 +43,11 @@ and consumes `protocol` as the published `wailo-protocol` artifact (ADR-0015).
 | `sdk-ios`       | Swift package; `WailoURLProtocol` (URLSession) - the injected iOS SDK |
 | `engine`        | JVM library; WebSocket server + multi-session store + query API — **studio build** |
 | `host`          | JVM library; Seed spend + traffic wait/find helpers over `engine` (CLI/MCP) — **studio build** |
+| `daemon`        | Persistent local service + authenticated client; owns engine, adb, usbmuxd, and pairing — **studio build** |
 | `shared`        | JVM + Compose Multiplatform viewer UI + view models — **studio build** |
-| `desktopApp`    | Compose Desktop entry point — **studio build**                     |
-| `cli`           | Headless CLI frontend over `host` (automation / MCP precursor) — **studio build** |
+| `desktopApp`    | Compose Desktop client of `daemon` — **studio build**               |
+| `cli`           | Headless daemon client for shell/Appium automation — **studio build** |
+| `mcp`           | Stdio MCP adapter over `daemon` for Cursor/Claude — **studio build** |
 | `sample-android`| Sample app under test (Android), used for dogfooding/verification |
 | `sample-ios`    | Sample under test (iOS): a SwiftUI app (`app`) + a headless CLI harness (`cli`) |
 | `sample-kmp`    | KMP sample: shared Ktor code + Android app (`sdk-android`) + iOS app shell (`sdk-ios`) |
@@ -67,31 +71,86 @@ Two Gradle builds (ADR-0015). The SDK build is at the repo root; the `studio/` d
 ./gradlew :sample-android:assembleDebug
 
 # studio build (desktop + headless; modern toolchain)
-cd studio && ./gradlew build             # engine, host, shared, desktopApp, cli
+cd studio && ./gradlew build             # engine, host, daemon, shared, desktopApp, cli, mcp
 ```
 
 ## Headless CLI
 
-Build the CLI once, then keep `serve` running while automation invokes one-shot commands from other
-processes. The capture engine stays in the server process, so traffic, holds, filters, and rules survive
-across commands. Its control socket binds loopback only and authenticates with a per-run, owner-only token.
+Build the CLI once. Every command auto-starts the shared daemon if needed, then returns while the daemon
+keeps capture, holds, filters, and rules alive. Its control socket binds loopback only and authenticates
+with a per-run, owner-only token.
 
 ```bash
 cd studio
 ./gradlew :cli:installDist
 CLI=./cli/build/install/wailo-cli/bin/wailo-cli
 
-# Terminal/process 1
-$CLI serve --port 8899
-
-# Other terminals/processes
+$CLI serve --port 8899                 # optional compatibility command; returns immediately
+$CLI status
 $CLI list_devices
 $CLI wait_exchange --url /login --timeout 30
 $CLI set_capture_filter --allow '*.example.com' --block 'analytics.example.com'
 $CLI set_map_local --id login --url-pattern 'https://api.example.com/login' \
   --status 200 --header 'Content-Type: application/json' --body-text '{"token":"test"}'
 $CLI list_exchanges
+$CLI stop                              # the daemon otherwise remains running
 ```
+
+## MCP for Cursor and Claude
+
+Build the local stdio server once:
+
+```bash
+cd studio
+./gradlew :mcp:installDist
+```
+
+The committed [`.cursor/mcp.json`](.cursor/mcp.json) already points Cursor at that distribution.
+Restart Cursor, then enable **wailo** under **Customize → MCPs**. Its tools cover traffic and device
+inspection, waits, capture controls, Map Local, Capture Filter, breakpoint rules, and live hold
+resume/edit/abort.
+
+Claude Code reads the committed [`.mcp.json`](.mcp.json). Run `claude` from the repo and approve the
+project server when prompted; `claude mcp list` then reports its connection status.
+
+For Claude Desktop chat, open **Settings → Developer → Edit Config** and add the same executable using
+an absolute path:
+
+```json
+{
+  "mcpServers": {
+    "wailo": {
+      "command": "/absolute/path/to/wailo/studio/mcp/build/install/wailo-mcp/bin/wailo-mcp"
+    }
+  }
+}
+```
+
+Fully quit and reopen Claude Desktop after saving. Cursor, Claude, Studio, and CLI all attach to the same
+auto-started daemon, regardless of startup order, so they see identical traffic, rules, devices, and holds.
+Closing every frontend does not stop capture; run `wailo-cli stop` when you explicitly want it stopped.
+Already-open clients will not relaunch it; the next newly opened frontend or CLI command starts it on demand.
+
+Android `adb reverse` and physical-iOS usbmuxd support live in the daemon, so both continue working when
+Studio is closed. MCP's optional `--port` / `--max-retained` arguments update the shared daemon settings;
+omit them to keep its current configuration.
+
+### Controlling what AI tools may see
+
+Two settings gate that access, both on by default and both owned by the daemon, so they hold whether or not
+Studio is open (ADR-0059). Studio has them under **Settings → AI tool access**, and the CLI can set them
+headlessly:
+
+```bash
+$CLI status                        # ... mcp_access=true mcp_redaction=true
+$CLI set_mcp_access --off          # every MCP tool call is refused; capture keeps running
+$CLI set_mcp_redaction --off       # hand agents real credentials
+```
+
+With access off, an agent's tool calls are refused with an error saying how to restore it — nothing changes
+for Studio or the CLI. With redaction on, authorization and cookie headers, sensitive query parameters, and
+secret-looking body fields read back as `<wailo:redacted>`, so a live token does not end up in a model
+context or a provider's logs. Studio itself always shows real values; redaction applies only to MCP.
 
 ## Using the SDK (M1)
 

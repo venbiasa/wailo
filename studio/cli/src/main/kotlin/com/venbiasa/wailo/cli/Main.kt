@@ -1,26 +1,19 @@
 package com.venbiasa.wailo.cli
 
+import com.venbiasa.wailo.daemon.DaemonClient
 import com.venbiasa.wailo.engine.WailoEngine
-import com.venbiasa.wailo.host.HeadlessHost
 import com.venbiasa.wailo.host.HostMapLocalRule
+import com.venbiasa.wailo.host.urlPatternMatches
 import com.venbiasa.wailo.host.summarizeExchanges
 import com.venbiasa.wailo.protocol.Header
 import java.nio.file.Files
 import java.nio.file.Path
-import java.util.concurrent.CountDownLatch
 import kotlin.system.exitProcess
 import kotlin.time.Duration.Companion.seconds
 import kotlinx.coroutines.runBlocking
 
-/**
- * Headless CLI frontend over [HeadlessHost] (ADR-0055/0056). Same command surface the future MCP server
- * will expose as tools — Tier 1 traffic/session ops plus breakpoint hold resume/abort.
- *
- * Usage:
- *   wailo-cli serve [--port N]
- *   wailo-cli <command> …          # attaches to the long-running `serve` process
- */
-fun main(args: Array<String>) {
+/** CLI frontend over the shared local daemon (ADR-0058). */
+fun main(args: Array<String>) = runBlocking {
     val parsed = parseArgs(args) ?: run {
         printUsage()
         exitProcess(2)
@@ -31,49 +24,49 @@ fun main(args: Array<String>) {
             exitProcess(0)
         }
         "serve" -> runServe(parsed)
-        else -> runRemote(args, parsed)
+        else -> runRemote(parsed)
     }
 }
 
-private fun runServe(parsed: ParsedArgs) {
-    val host = try {
-        HeadlessHost.start(port = parsed.port)
-    } catch (failure: IllegalStateException) {
-        System.err.println(failure.message)
-        exitProcess(1)
-    }
-    val control = try {
-        ControlServer(host, parsed.controlPort).also(ControlServer::start)
+private suspend fun runServe(parsed: ParsedArgs) {
+    val daemon = try {
+        DaemonClient.connect(initialCapturePort = parsed.port.takeIf { parsed.portSpecified })
     } catch (failure: Exception) {
-        host.stop()
-        System.err.println("Could not start Wailo control server on 127.0.0.1:${parsed.controlPort}: ${failure.message}")
+        System.err.println("Could not start the Wailo daemon: ${failure.message}")
         exitProcess(1)
     }
-    val stopped = CountDownLatch(1)
-    val shutdown = Thread {
-        control.close()
-        host.stop()
-        stopped.countDown()
+    if (parsed.portSpecified && !daemon.rebind(parsed.port)) {
+        daemon.close()
+        System.err.println("Could not bind Wailo capture to port ${parsed.port}")
+        exitProcess(1)
     }
-    Runtime.getRuntime().addShutdownHook(shutdown)
-    println("wailo-cli capture listening on ${parsed.port}; control on 127.0.0.1:${parsed.controlPort}")
-    try {
-        stopped.await()
-    } catch (_: InterruptedException) {
-        Thread.currentThread().interrupt()
-        control.close()
-        host.stop()
-    }
+    println(
+        "Wailo daemon is running; capture on ${daemon.capturePort.value}, " +
+            "control on 127.0.0.1:${daemon.controlPort ?: 0}",
+    )
+    daemon.close()
 }
 
-private fun runRemote(rawArgs: Array<String>, parsed: ParsedArgs) {
+private suspend fun runRemote(parsed: ParsedArgs) {
+    val daemon = try {
+        DaemonClient.connect(
+            initialCapturePort = parsed.port.takeIf {
+                parsed.portSpecified && parsed.command == "rebind"
+            },
+        )
+    } catch (failure: Exception) {
+        System.err.println("Could not connect to the Wailo daemon: ${failure.message}")
+        exitProcess(2)
+    }
     val result = try {
-        ControlClient(parsed.controlPort).execute(rawArgs, parsed.timeoutSeconds)
+        dispatch(daemon, parsed)
     } catch (failure: Exception) {
         CommandResult(
-            "No wailo-cli serve process is reachable on 127.0.0.1:${parsed.controlPort}: ${failure.message}",
-            exitCode = 2,
+            "Wailo command failed: ${failure.message}",
+            exitCode = 1,
         )
+    } finally {
+        daemon.close()
     }
     if (result.message.isNotEmpty()) println(result.message)
     exitProcess(result.exitCode)
@@ -81,10 +74,10 @@ private fun runRemote(rawArgs: Array<String>, parsed: ParsedArgs) {
 
 internal data class CommandResult(val message: String, val exitCode: Int = 0)
 
-internal suspend fun dispatch(host: HeadlessHost, args: ParsedArgs): CommandResult {
+internal suspend fun dispatch(host: DaemonClient, args: ParsedArgs): CommandResult {
     return when (args.command) {
         "list_exchanges", "list-exchanges" ->
-            CommandResult(host.summarizeExchanges(args.limit))
+            CommandResult(summarizeExchanges(host.listExchanges(), args.limit))
         "search_traffic", "search-traffic" -> {
             val rows = host.searchTraffic(
                 urlContains = args.urlContains,
@@ -168,7 +161,7 @@ internal suspend fun dispatch(host: HeadlessHost, args: ParsedArgs): CommandResu
             CommandResult("capture_filter cleared")
         }
         "list_capture_filter", "list-capture-filter" -> {
-            val filter = host.engine.captureFilter.value
+            val filter = host.captureFilter.value
             CommandResult(
                 buildString {
                     appendLine("allowlist=${filter.allowlist_enabled}")
@@ -190,7 +183,18 @@ internal suspend fun dispatch(host: HeadlessHost, args: ParsedArgs): CommandResu
                 },
             )
         }
-        "list_holds", "list-holds" -> CommandResult(host.summarizeHolds())
+        "list_holds", "list-holds" -> {
+            val holds = host.listHolds()
+            CommandResult(
+                if (holds.isEmpty()) {
+                    "(no holds)"
+                } else {
+                    holds.joinToString("\n") {
+                        "${it.correlationId}\t${it.phase.name}\t${it.request?.method}\t${it.request?.url}"
+                    }
+                },
+            )
+        }
         "resume_hold", "resume-hold" -> {
             val id = args.id ?: return CommandResult("resume_hold requires --id (correlation id)", exitCode = 2)
             if (host.resumeHold(id)) {
@@ -217,13 +221,18 @@ internal suspend fun dispatch(host: HeadlessHost, args: ParsedArgs): CommandResu
             CommandResult("capturing=$enabled")
         }
         "wait_exchange", "wait-exchange" -> {
-            val row = host.waitForExchange(
-                timeout = args.timeoutSeconds.seconds,
-                urlContains = args.urlContains,
-                urlPattern = args.urlPattern,
-                method = args.method,
-                statusCode = args.statusCode,
-            ) ?: return CommandResult("timeout waiting for exchange", exitCode = 1)
+            val row = host.waitForExchange(timeout = args.timeoutSeconds.seconds) { candidate ->
+                val request = candidate.exchange.request
+                val url = request?.url.orEmpty()
+                val matchesUrl = when {
+                    args.urlPattern != null -> urlPatternMatches(args.urlPattern, url)
+                    args.urlContains != null -> url.contains(args.urlContains, ignoreCase = true)
+                    else -> true
+                }
+                matchesUrl &&
+                    (args.method == null || request?.method.equals(args.method, ignoreCase = true)) &&
+                    (args.statusCode == null || candidate.exchange.response?.code == args.statusCode)
+            } ?: return CommandResult("timeout waiting for exchange", exitCode = 1)
             CommandResult("${row.exchange.id}\t${row.exchange.request?.method}\t${row.exchange.response?.code}\t${row.exchange.request?.url}")
         }
         "wait_hold", "wait-hold" -> {
@@ -235,11 +244,30 @@ internal suspend fun dispatch(host: HeadlessHost, args: ParsedArgs): CommandResu
             val ok = host.rebind(args.port)
             CommandResult(if (ok) "rebound to ${args.port}" else "rebind failed for ${args.port}", exitCode = if (ok) 0 else 1)
         }
+        "set_mcp_access", "set-mcp-access", "mcp_access", "mcp-access" -> {
+            val enabled = args.flag ?: return CommandResult("set_mcp_access requires --on or --off", exitCode = 2)
+            host.setMcpAccess(enabled)
+            CommandResult("mcp_access=$enabled")
+        }
+        "set_mcp_redaction", "set-mcp-redaction", "mcp_redaction", "mcp-redaction" -> {
+            val enabled = args.flag ?: return CommandResult("set_mcp_redaction requires --on or --off", exitCode = 2)
+            host.setMcpRedactSecrets(enabled)
+            CommandResult("mcp_redaction=$enabled")
+        }
+        "status", "daemon_status", "daemon-status" -> CommandResult(
+            "listening=${host.listening.value} port=${host.capturePort.value} " +
+                "devices=${host.connectedDevices.value.size} exchanges=${host.exchanges.value.size} " +
+                "mcp_access=${host.mcpAccess.value} mcp_redaction=${host.mcpRedactSecrets.value}",
+        )
+        "stop", "daemon_stop", "daemon-stop" -> {
+            host.stopDaemon()
+            CommandResult("Wailo daemon stopped")
+        }
         else -> CommandResult("unknown command: ${args.command}", exitCode = 2)
     }
 }
 
-private suspend fun setMapLocal(host: HeadlessHost, args: ParsedArgs): CommandResult {
+private suspend fun setMapLocal(host: DaemonClient, args: ParsedArgs): CommandResult {
     val id = args.id ?: return CommandResult("set_map_local requires --id", exitCode = 2)
     val pattern = args.urlPattern
         ?: return CommandResult("set_map_local requires --url-pattern", exitCode = 2)
@@ -319,12 +347,16 @@ internal enum class Command(val verb: String) {
     WaitExchange("wait_exchange"),
     WaitHold("wait_hold"),
     Rebind("rebind"),
+    SetMcpAccess("set_mcp_access"),
+    SetMcpRedaction("set_mcp_redaction"),
+    Status("status"),
+    Stop("stop"),
 }
 
 internal data class ParsedArgs(
     val command: String,
     val port: Int = WailoEngine.DEFAULT_PORT,
-    val controlPort: Int = DEFAULT_CONTROL_PORT,
+    val portSpecified: Boolean = false,
     val id: String? = null,
     val urlContains: String? = null,
     val urlPattern: String? = null,
@@ -346,7 +378,7 @@ internal fun parseArgs(args: Array<String>): ParsedArgs? {
     if (args.isEmpty()) return null
     val command = args[0]
     var port = WailoEngine.DEFAULT_PORT
-    var controlPort = DEFAULT_CONTROL_PORT
+    var portSpecified = false
     var id: String? = null
     var urlContains: String? = null
     var urlPattern: String? = null
@@ -365,8 +397,10 @@ internal fun parseArgs(args: Array<String>): ParsedArgs? {
     var i = 1
     while (i < args.size) {
         when (val a = args[i]) {
-            "--port" -> port = args.getOrNull(++i)?.toIntOrNull() ?: return null
-            "--control-port" -> controlPort = args.getOrNull(++i)?.toIntOrNull() ?: return null
+            "--port" -> {
+                port = args.getOrNull(++i)?.toIntOrNull() ?: return null
+                portSpecified = true
+            }
             "--id" -> id = args.getOrNull(++i) ?: return null
             "--url-contains", "--url" -> urlContains = args.getOrNull(++i) ?: return null
             "--url-pattern" -> urlPattern = args.getOrNull(++i) ?: return null
@@ -387,12 +421,12 @@ internal fun parseArgs(args: Array<String>): ParsedArgs? {
         }
         i += 1
     }
-    if (port !in WailoEngine.PORT_RANGE || controlPort !in 1..65535) return null
+    if (port !in WailoEngine.PORT_RANGE) return null
     if (limit !in 1..1_000 || bodyChars !in 0..1_000_000 || timeoutSeconds !in 0..86_400) return null
     return ParsedArgs(
         command = command,
         port = port,
-        controlPort = controlPort,
+        portSpecified = portSpecified,
         id = id,
         urlContains = urlContains,
         urlPattern = urlPattern,
@@ -414,9 +448,11 @@ internal fun parseArgs(args: Array<String>): ParsedArgs? {
 private fun printUsage() {
     println(
         """
-        wailo-cli — headless frontend over WailoEngine (ADR-0056)
+        wailo-cli — frontend over the persistent shared Wailo daemon
 
-        wailo-cli serve [--port N] [--control-port N]
+        wailo-cli serve [--port N]
+        wailo-cli status
+        wailo-cli stop
         wailo-cli list_exchanges [--limit N]
         wailo-cli search_traffic [--url S] [--url-pattern GLOB] [--method M] [--status C] [--app ID]
         wailo-cli get_exchange --id ID
@@ -437,9 +473,14 @@ private fun printUsage() {
         wailo-cli wait_exchange [--url S] [--url-pattern GLOB] [--method M] [--status C] [--timeout SEC]
         wailo-cli wait_hold [--timeout SEC]
         wailo-cli rebind --port N
+        wailo-cli set_mcp_access --on|--off
+        wailo-cli set_mcp_redaction --on|--off
 
-        Start `serve` first. Every other invocation attaches to that process on --control-port
-        (default $DEFAULT_CONTROL_PORT), so captures, rules, and holds survive across commands.
+        Every invocation auto-starts and attaches to the same daemon. It keeps running after the CLI,
+        Studio, and MCP disconnect; use `wailo-cli stop` to stop it explicitly.
+
+        set_mcp_access gates whether AI tools reach this capture at all; set_mcp_redaction decides
+        whether what they read has its credentials stripped. Both are also in Studio's Settings panel.
         """.trimIndent(),
     )
 }
