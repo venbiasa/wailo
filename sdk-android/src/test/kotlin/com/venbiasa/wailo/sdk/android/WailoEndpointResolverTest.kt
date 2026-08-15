@@ -51,6 +51,16 @@ class WailoEndpointResolverTest {
     }
 
     @Test
+    fun aFilledTargetCarriesItsExpectedStudioIdentity() {
+        WailoHostStore.host = "10.0.0.9"
+        WailoHostStore.expectedStudioId = "aaaa"
+
+        val endpoint = WailoEndpointResolver.resolve(null, null, emptyList())
+
+        assertEquals("aaaa", endpoint.studioId)
+    }
+
+    @Test
     fun aTrustedDiscoveredDesktopIsDialled() {
         remember(trusted)
         val endpoint = WailoEndpointResolver.resolve(null, null, listOf(stranger, trusted))
@@ -108,6 +118,7 @@ class WailoEndpointResolverTest {
         WailoPairingStore.save(
             WailoPairing(
                 studioId = desktop.studioId,
+                deviceAlias = "00112233445566778899aabbccddeeff",
                 deviceKey = ByteArray(32) { 1 },
                 publicKey = ByteArray(65) { 2 },
                 sessionCounter = 1,

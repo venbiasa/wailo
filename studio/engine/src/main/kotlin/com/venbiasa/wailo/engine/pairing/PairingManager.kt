@@ -13,7 +13,7 @@ import java.util.Base64
 /** One device this Studio has paired with. */
 data class PairedDevice(
     val deviceId: String,
-    /** The long-term secret `K`. Secret — the store must not put this anywhere world-readable. */
+    /** Long-term relationship secret. The store must not put this anywhere world-readable. */
     val key: ByteArray,
     /** From the device's `Hello`, so the list reads as device names rather than opaque ids. */
     val name: String,
@@ -31,11 +31,27 @@ data class PairedDevice(
      */
     val trustedOnFirstUse: Boolean = false,
 ) {
-    // ByteArray in a data class gives identity equality, which would silently break every
-    // list-diffing caller. Compare on the id, which is the actual identity here.
-    override fun equals(other: Any?): Boolean = other is PairedDevice && other.deviceId == deviceId
+    // Content equality keeps StateFlow from suppressing real metadata/counter updates while avoiding
+    // ByteArray's reference equality for records loaded twice from secure storage.
+    override fun equals(other: Any?): Boolean =
+        other is PairedDevice &&
+            other.deviceId == deviceId &&
+            other.key.contentEquals(key) &&
+            other.name == name &&
+            other.pairedAtEpochMs == pairedAtEpochMs &&
+            other.lastSeenEpochMs == lastSeenEpochMs &&
+            other.sessionCounter == sessionCounter &&
+            other.trustedOnFirstUse == trustedOnFirstUse
 
-    override fun hashCode(): Int = deviceId.hashCode()
+    override fun hashCode(): Int {
+        var result = deviceId.hashCode()
+        result = 31 * result + key.contentHashCode()
+        result = 31 * result + name.hashCode()
+        result = 31 * result + pairedAtEpochMs.hashCode()
+        result = 31 * result + lastSeenEpochMs.hashCode()
+        result = 31 * result + sessionCounter.hashCode()
+        return 31 * result + trustedOnFirstUse.hashCode()
+    }
 }
 
 /**
@@ -149,23 +165,18 @@ class PairingManager(private val store: PairingKeyStore) {
         _offer.value = null
     }
 
-    /**
-     * The secret a device's proof should be checked against, or null when this Studio has no reason to
-     * talk to it. Falls back to the live offer for a device it has never seen, which is what makes the
-     * first successful handshake double as the pairing.
-     */
-    fun keyFor(
-        deviceId: String,
+    /** Derive a v3 key from the live offer for a fresh per-Studio alias. */
+    fun inviteKeyV3(
+        deviceAlias: String,
         pairedByCode: Boolean = false,
         now: Long = System.currentTimeMillis(),
     ): ByteArray? {
-        known(deviceId)?.let { return it.key }
         val offer = _offer.value ?: return null
-        if (now > offer.expiresAtEpochMs) {
+        if (now >= offer.expiresAtEpochMs) {
             _offer.value = null
             return null
         }
-        return WailoCrypto.deviceKey(offer.secretFor(pairedByCode, studioId), studioId, deviceId)
+        return WailoCrypto.deviceKeyV3(offer.secretFor(pairedByCode, studioId), studioId, deviceAlias)
     }
 
     fun known(deviceId: String): PairedDevice? = _devices.value.firstOrNull { it.deviceId == deviceId }
@@ -190,7 +201,9 @@ class PairingManager(private val store: PairingKeyStore) {
             pairedAtEpochMs = existing?.pairedAtEpochMs ?: now,
             lastSeenEpochMs = now,
             sessionCounter = maxOf(sessionCounter, existing?.sessionCounter ?: 0L),
-            trustedOnFirstUse = trustedOnFirstUse,
+            // Trust provenance is immutable relationship metadata. A later metadata-only refresh (for
+            // example, learning the human-readable name from Hello) must not relabel TOFU as invited.
+            trustedOnFirstUse = trustedOnFirstUse || existing?.trustedOnFirstUse == true,
         )
         store.saveDevice(device)
         _devices.update { list -> list.filterNot { it.deviceId == deviceId } + device }
@@ -222,14 +235,50 @@ class PairingManager(private val store: PairingKeyStore) {
         _identity.value = Identity(stored)
     }
 
-    internal fun sign(
+    internal fun signStudioHelloV3(
         nonceD: ByteArray,
         nonceS: ByteArray,
         ephemeralD: ByteArray,
         ephemeralS: ByteArray,
+        pairingRequired: Boolean,
     ): ByteArray {
         val current = _identity.value
-        return WailoCrypto.sign(current.privateKey, current.studioId, nonceD, nonceS, ephemeralD, ephemeralS)
+        return WailoCrypto.signStudioHelloV3(
+            current.privateKey,
+            current.studioId,
+            nonceD,
+            nonceS,
+            ephemeralD,
+            ephemeralS,
+            pairingRequired,
+        )
+    }
+
+    internal fun signResultV3(
+        nonceD: ByteArray,
+        nonceS: ByteArray,
+        ephemeralD: ByteArray,
+        ephemeralS: ByteArray,
+        pairingRequired: Boolean,
+        deviceAlias: String,
+        mode: Int,
+        sessionCounter: Long,
+        resultCode: Int,
+    ): ByteArray {
+        val current = _identity.value
+        return WailoCrypto.signResultV3(
+            current.privateKey,
+            current.studioId,
+            nonceD,
+            nonceS,
+            ephemeralD,
+            ephemeralS,
+            pairingRequired,
+            deviceAlias,
+            mode,
+            sessionCounter,
+            resultCode,
+        )
     }
 
     private fun loadOrCreateIdentity(): StoredIdentity =

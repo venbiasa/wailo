@@ -37,7 +37,8 @@ final class WailoTransportSession: CaptureSink, WailoBodyFetcher, WailoBreakpoin
     private var buffer: [HttpExchange] = []
     private var pending: [String: (WailoMappedResponse?) -> Void] = [:]
     private var pendingBreakpoints: [String: (BreakpointDecision?) -> Void] = [:]
-    /// Non-nil only between dialling and `AuthResult`; every frame in that window is an auth frame.
+    private var pendingRevocations: [String: (Bool) -> Void] = [:]
+    /// Non-nil only between dialling and `AuthResultV3`; every frame in that window is an auth frame.
     private var handshake: WailoHandshake?
     /// Installed the moment auth succeeds, which is also the moment anything else may be sent.
     private var codec: WailoFrameCodec?
@@ -56,7 +57,8 @@ final class WailoTransportSession: CaptureSink, WailoBodyFetcher, WailoBreakpoin
 
     /// A pairing worth persisting: the whole record on a first pairing, the advanced session counter
     /// afterwards.
-    var onHandshakeEstablished: ((WailoPairing) -> Void)?
+    /// Return false to abort before Hello, for example when Forget raced the final auth result.
+    var onHandshakeEstablished: ((WailoPairing) -> Bool)?
 
     /// Studio answered that it does not know this device. Distinct from a plain disconnect because the
     /// caller has to stop retrying rather than reconnect into the same refusal every two seconds.
@@ -66,6 +68,8 @@ final class WailoTransportSession: CaptureSink, WailoBodyFetcher, WailoBreakpoin
     /// reconciled down here: only a human can say whether the machine changed hands or someone is in
     /// the path (ADR-0040).
     var onIdentityChanged: ((String, String) -> Void)?
+
+    var onAuthenticationStarted: (() -> Void)?
 
     init(
         hello: Hello,
@@ -124,6 +128,25 @@ final class WailoTransportSession: CaptureSink, WailoBodyFetcher, WailoBreakpoin
         onQueue { self.unbindLocked() }
     }
 
+    /// Ask the authenticated Studio to remove this session's alias. Completion is best-effort and
+    /// bounded: local Forget must never retain a credential because the peer is offline (ADR-0060).
+    func revoke(completion: @escaping (Bool) -> Void) {
+        onQueue {
+            guard self.connected, self.codec != nil else { completion(false); return }
+            let requestId = UUID().uuidString
+            self.pendingRevocations[requestId] = completion
+            self.sendControl(Envelope {
+                $0.message = .revoke_device(RevokeDevice(request_id: requestId))
+            })
+            self.queue.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+                guard let self, let timedOut = self.pendingRevocations.removeValue(forKey: requestId) else {
+                    return
+                }
+                timedOut(false)
+            }
+        }
+    }
+
     private func onQueue(_ work: @escaping () -> Void) {
         if DispatchQueue.getSpecific(key: queueKey) != nil {
             work()
@@ -144,6 +167,7 @@ final class WailoTransportSession: CaptureSink, WailoBodyFetcher, WailoBreakpoin
         case let .guarded(makeHandshake):
             let handshake = makeHandshake()
             self.handshake = handshake
+            onAuthenticationStarted?()
             sendAuth(handshake.begin(), gen: gen)
         }
     }
@@ -169,7 +193,10 @@ final class WailoTransportSession: CaptureSink, WailoBodyFetcher, WailoBreakpoin
             codec = WailoFrameCodec(
                 sessionKey: result.sessionKey, sealing: .deviceToStudio, opening: .studioToDevice
             )
-            onHandshakeEstablished?(result.pairing)
+            if onHandshakeEstablished?(result.pairing) == false {
+                unbindLocked()
+                return
+            }
             send(Envelope { $0.message = .hello(hello) }, isHandshake: true, gen: gen)
         case let .refused(reason):
             self.handshake = nil
@@ -273,6 +300,7 @@ final class WailoTransportSession: CaptureSink, WailoBodyFetcher, WailoBreakpoin
         dropCachedRules()
         drainPending()
         drainBreakpoints()
+        drainRevocations()
         link?.stopKeepalive()
         link?.closeLink()
         link = nil
@@ -293,6 +321,8 @@ final class WailoTransportSession: CaptureSink, WailoBodyFetcher, WailoBreakpoin
             sendControl(Envelope { $0.message = .breakpoint_rules_ack(BreakpointRulesAck(epoch: rules.epoch)) })
         case let .breakpoint_decision(decision)?:
             resolveBreakpoint(decision)
+        case let .revoke_device_ack(ack)?:
+            pendingRevocations.removeValue(forKey: ack.request_id)?(true)
         default:
             break
         }
@@ -328,6 +358,12 @@ final class WailoTransportSession: CaptureSink, WailoBodyFetcher, WailoBreakpoin
         let waiting = pendingBreakpoints.values
         pendingBreakpoints.removeAll()
         for resolver in waiting { resolver(nil) }
+    }
+
+    private func drainRevocations() {
+        let waiting = pendingRevocations.values
+        pendingRevocations.removeAll()
+        for completion in waiting { completion(false) }
     }
 
     /// Seals once the session has a key. Before that — loopback for its whole life, or WiFi during the

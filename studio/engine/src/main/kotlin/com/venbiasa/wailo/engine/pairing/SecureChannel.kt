@@ -2,9 +2,11 @@ package com.venbiasa.wailo.engine.pairing
 
 import com.venbiasa.wailo.engine.DeviceConnection
 import com.venbiasa.wailo.engine.DeviceTransport
-import com.venbiasa.wailo.protocol.AuthChallenge
-import com.venbiasa.wailo.protocol.AuthRequest
-import com.venbiasa.wailo.protocol.AuthResult
+import com.venbiasa.wailo.protocol.AuthDeviceProofV3
+import com.venbiasa.wailo.protocol.AuthModeV3
+import com.venbiasa.wailo.protocol.AuthResultCodeV3
+import com.venbiasa.wailo.protocol.AuthResultV3
+import com.venbiasa.wailo.protocol.AuthStudioHelloV3
 import com.venbiasa.wailo.protocol.Envelope
 import com.venbiasa.wailo.protocol.SealedFrame
 import okio.ByteString
@@ -32,20 +34,7 @@ sealed interface Admission {
     data object Rejected : Admission
 }
 
-/**
- * Studio's half of the WiFi handshake (ADR-0039, revised by ADR-0040).
- *
- * Runs before `WailoEngine` learns anything about the connection, which is the point: the rule set,
- * the capture filter and the breakpoint rules were previously pushed the moment a socket opened, so
- * anything that dialled the port received a list of the hosts being intercepted and every Map Local
- * path before saying a word. Nothing is pushed now until this returns [Admission.Sealed].
- *
- * Two ways in. A device that already holds a key, or that was handed one by a QR or typed code,
- * proves it. A device with neither is admitted anyway *if* [requirePairing] is off — trust on first
- * use, which is what makes the common case (one developer, one Mac, an address they typed themselves)
- * work without a ceremony. Either way the session is encrypted; the difference is only what was
- * proved before it started.
- */
+/** Studio's identity-first Wi-Fi admission gate (ADR-0060). */
 class DeviceAdmission(
     private val pairings: PairingManager,
     /** Read per connection, not captured: the user can flip this while devices are connected. */
@@ -53,130 +42,216 @@ class DeviceAdmission(
 ) {
 
     suspend fun admit(connection: DeviceConnection): Admission {
-        // Loopback — the Simulator, `adb reverse`, the usbmux tunnel — reaches a peer the kernel already
-        // guarantees is this machine. A key would prove nothing that the address does not.
         if (connection.isTrusted) {
             return Admission.Sealed(connection, deviceId = connection.id, suspectedClone = false)
         }
 
-        val request = read(connection)?.auth_request ?: return Admission.Rejected
-        if (request.nonce.size != WailoCrypto.NONCE_LENGTH) return Admission.Rejected
-        // Empty means "I do not know who is listening here yet", which only a first contact says. A
-        // device naming a different identity is dialling a Studio this one has rotated away from.
-        if (request.studio_id.isNotEmpty() && request.studio_id != pairings.studioId) return Admission.Rejected
-
-        val nonceD = request.nonce.toByteArray()
+        val hello = read(connection)?.auth_client_hello_v3 ?: return Admission.Rejected
+        if (hello.version != PROTOCOL_VERSION || hello.nonce.size != WailoCrypto.NONCE_LENGTH) {
+            return Admission.Rejected
+        }
+        val nonceD = hello.nonce.toByteArray()
         val nonceS = WailoCrypto.randomNonce()
-        val ephemeralD = request.ephemeral_key.toByteArray()
+        val ephemeralD = hello.ephemeral_key.toByteArray()
         val ephemeral = WailoCrypto.generateEphemeral()
         val ephemeralS = WailoCrypto.encodePublicKey(ephemeral.public)
-        // No agreement, no session — there is no other way to a key, and falling back to one derived
-        // from the long-term secret alone would quietly drop forward secrecy for anyone who omits this.
         val shared = WailoCrypto.agree(ephemeral.private, ephemeralD) ?: return Admission.Rejected
+        val pairingRequired = requirePairing()
 
-        val known = pairings.known(request.device_id)
-        val invited = pairings.keyFor(request.device_id, request.paired_by_code)
-        val firstContact = known == null && invited == null
-        if (firstContact && requirePairing()) {
-            return decline(connection, request, nonceD, nonceS, ephemeralD, ephemeralS)
-        }
-
-        // A first contact has nothing to prove with, so the agreed secret carries the session on its
-        // own. Everyone else mixes their long-term key in, which is what actually authenticates them.
-        val deviceKey = known?.key ?: invited
-        val authKey = WailoCrypto.authKey(shared, deviceKey)
         send(
             connection,
             Envelope(
-                auth_challenge = AuthChallenge(
+                auth_studio_hello_v3 = AuthStudioHelloV3(
                     nonce = nonceS.toByteString(),
-                    signature = pairings
-                        .sign(nonceD, nonceS, ephemeralD, ephemeralS)
-                        .toByteString(),
-                    mac = WailoCrypto
-                        .studioMac(authKey, pairings.studioId, nonceD, nonceS, ephemeralD, ephemeralS)
-                        .toByteString(),
                     public_key = pairings.publicKey.toByteString(),
                     ephemeral_key = ephemeralS.toByteString(),
+                    signature = pairings.signStudioHelloV3(
+                        nonceD,
+                        nonceS,
+                        ephemeralD,
+                        ephemeralS,
+                        pairingRequired,
+                    ).toByteString(),
+                    pairing_required = pairingRequired,
                 ),
             ),
         ) || return Admission.Rejected
 
-        val response = read(connection)?.auth_response ?: return Admission.Rejected
+        val response = read(connection)?.auth_device_proof_v3 ?: return Admission.Rejected
+        val alias = response.device_alias
+        if (!isValidAlias(alias)) return Admission.Rejected
+        val known = pairings.known(alias)
+        val selected = when (response.mode) {
+            AuthModeV3.AUTH_MODE_V3_KNOWN -> {
+                val saved = known ?: return decline(
+                    connection,
+                    response,
+                    nonceD,
+                    nonceS,
+                    ephemeralD,
+                    ephemeralS,
+                    pairingRequired,
+                    AuthResultCodeV3.AUTH_RESULT_CODE_V3_UNKNOWN_DEVICE,
+                    "asked to reconnect with an alias this Studio no longer knows",
+                )
+                SelectedCredential(saved.key, saved, firstContact = false, trustedOnFirstUse = saved.trustedOnFirstUse)
+            }
+
+            AuthModeV3.AUTH_MODE_V3_TOFU -> {
+                if (known != null) return Admission.Rejected
+                if (pairingRequired) {
+                    return decline(
+                        connection,
+                        response,
+                        nonceD,
+                        nonceS,
+                        ephemeralD,
+                        ephemeralS,
+                        pairingRequired,
+                        AuthResultCodeV3.AUTH_RESULT_CODE_V3_PAIRING_REQUIRED,
+                        "asked for trust on first use while strict pairing is enabled",
+                    )
+                }
+                SelectedCredential(
+                    WailoCrypto.tofuDeviceKeyV3(shared, pairings.studioId, alias),
+                    known = null,
+                    firstContact = true,
+                    trustedOnFirstUse = true,
+                )
+            }
+
+            AuthModeV3.AUTH_MODE_V3_INVITED_QR,
+            AuthModeV3.AUTH_MODE_V3_INVITED_CODE,
+            -> {
+                if (known != null) return Admission.Rejected
+                val key = pairings.inviteKeyV3(
+                    alias,
+                    pairedByCode = response.mode == AuthModeV3.AUTH_MODE_V3_INVITED_CODE,
+                ) ?: return decline(
+                    connection,
+                    response,
+                    nonceD,
+                    nonceS,
+                    ephemeralD,
+                    ephemeralS,
+                    pairingRequired,
+                    AuthResultCodeV3.AUTH_RESULT_CODE_V3_PAIRING_OFFER_INVALID,
+                    "presented an expired or absent pairing offer",
+                )
+                SelectedCredential(key, known = null, firstContact = false, trustedOnFirstUse = false)
+            }
+
+            AuthModeV3.AUTH_MODE_V3_UNSPECIFIED -> return Admission.Rejected
+        }
+
+        val authKey = WailoCrypto.authKeyV3(shared, selected.key)
         val expected = WailoCrypto
-            .deviceProof(authKey, pairings.studioId, nonceD, nonceS, ephemeralD, ephemeralS)
+            .deviceProofV3(
+                authKey,
+                pairings.studioId,
+                nonceD,
+                nonceS,
+                ephemeralD,
+                ephemeralS,
+                pairingRequired,
+                alias,
+                response.mode.value,
+                response.session_counter,
+            )
         if (!WailoCrypto.constantTimeEquals(response.proof.toByteArray(), expected)) {
             return Admission.Rejected
         }
 
-        // A counter that has not moved forward means two devices are using one key. It cannot be
-        // stopped from here — both hold the same secret — but it can be made visible. A first contact
-        // has no history to compare against.
-        val suspectedClone = !firstContact && response.session_counter <= (known?.sessionCounter ?: -1)
-
-        // The key a first contact keeps is derived from this connection's agreed secret, by both ends
-        // independently, so it is never sent. Every later connection then takes the path above.
+        val suspectedClone = selected.known != null &&
+            response.session_counter <= selected.known.sessionCounter
         pairings.remember(
-            deviceId = request.device_id,
-            key = deviceKey ?: WailoCrypto.tofuDeviceKey(shared, pairings.studioId, request.device_id),
-            name = known?.name.orEmpty(),
+            deviceId = alias,
+            key = selected.key,
+            name = selected.known?.name.orEmpty(),
             sessionCounter = response.session_counter,
-            trustedOnFirstUse = firstContact || (known?.trustedOnFirstUse ?: false),
+            trustedOnFirstUse = selected.trustedOnFirstUse,
         )
-        send(connection, Envelope(auth_result = AuthResult(ok = true))) || return Admission.Rejected
+        val resultCode = AuthResultCodeV3.AUTH_RESULT_CODE_V3_OK
+        send(
+            connection,
+            Envelope(
+                auth_result_v3 = AuthResultV3(
+                    code = resultCode,
+                    proof = WailoCrypto.studioProofV3(
+                        authKey,
+                        pairings.studioId,
+                        nonceD,
+                        nonceS,
+                        ephemeralD,
+                        ephemeralS,
+                        pairingRequired,
+                        alias,
+                        response.mode.value,
+                        response.session_counter,
+                        resultCode.value,
+                    ).toByteString(),
+                    signature = pairings.signResultV3(
+                        nonceD,
+                        nonceS,
+                        ephemeralD,
+                        ephemeralS,
+                        pairingRequired,
+                        alias,
+                        response.mode.value,
+                        response.session_counter,
+                        resultCode.value,
+                    ).toByteString(),
+                ),
+            ),
+        ) || return Admission.Rejected
 
         return Admission.Sealed(
             connection = SealedConnection(
                 connection,
                 FrameCodec(
-                    sessionKey = WailoCrypto.sessionKey(shared, deviceKey, nonceD, nonceS),
+                    sessionKey = WailoCrypto.sessionKeyV3(shared, selected.key, nonceD, nonceS),
                     sealing = FrameCodec.Direction.STUDIO_TO_DEVICE,
                     opening = FrameCodec.Direction.DEVICE_TO_STUDIO,
                 ),
             ),
-            deviceId = request.device_id,
+            deviceId = alias,
             suspectedClone = suspectedClone,
-            firstContact = firstContact,
+            firstContact = selected.firstContact,
         )
     }
 
-    /**
-     * Turn a device away in a way it can trust. Studio holds no key for it, so it cannot produce a
-     * mac — but it can still sign, and a device that has been here before pinned that public key.
-     * Sending the signature and omitting the mac is exactly "I am the Studio you know, and I will not
-     * take you", which is what lets the device stop retrying instead of reconnecting into the same
-     * wall every two seconds. Without the signature any peer on the network could produce that effect.
-     */
     private suspend fun decline(
         connection: DeviceConnection,
-        request: AuthRequest,
+        request: AuthDeviceProofV3,
         nonceD: ByteArray,
         nonceS: ByteArray,
         ephemeralD: ByteArray,
         ephemeralS: ByteArray,
+        pairingRequired: Boolean,
+        code: AuthResultCodeV3,
+        reason: String,
     ): Admission {
         send(
             connection,
             Envelope(
-                auth_challenge = AuthChallenge(
-                    nonce = nonceS.toByteString(),
-                    signature = pairings.sign(nonceD, nonceS, ephemeralD, ephemeralS).toByteString(),
-                    mac = ByteString.EMPTY,
-                    public_key = pairings.publicKey.toByteString(),
-                    ephemeral_key = ephemeralS.toByteString(),
+                auth_result_v3 = AuthResultV3(
+                    code = code,
+                    proof = ByteString.EMPTY,
+                    signature = pairings.signResultV3(
+                        nonceD,
+                        nonceS,
+                        ephemeralD,
+                        ephemeralS,
+                        pairingRequired,
+                        request.device_alias,
+                        request.mode.value,
+                        request.session_counter,
+                        code.value,
+                    ).toByteString(),
                 ),
             ),
         )
-        send(
-            connection,
-            Envelope(
-                auth_result = AuthResult(
-                    ok = false,
-                    reason = "This Studio only accepts paired devices. Pair from its Devices panel.",
-                ),
-            ),
-        )
-        return Admission.Refused(RefusedDevice(request.device_id, "asked to connect but is not paired"))
+        return Admission.Refused(RefusedDevice(request.device_alias, reason))
     }
 
     private suspend fun read(connection: DeviceConnection): Envelope? =
@@ -184,6 +259,21 @@ class DeviceAdmission(
 
     private suspend fun send(connection: DeviceConnection, envelope: Envelope): Boolean =
         runCatching { connection.send(envelope.encode()) }.isSuccess
+
+    private fun isValidAlias(alias: String): Boolean =
+        alias.length == DEVICE_ALIAS_HEX_LENGTH && alias.all { it in '0'..'9' || it in 'a'..'f' }
+
+    private data class SelectedCredential(
+        val key: ByteArray,
+        val known: PairedDevice?,
+        val firstContact: Boolean,
+        val trustedOnFirstUse: Boolean,
+    )
+
+    private companion object {
+        const val PROTOCOL_VERSION = 3
+        const val DEVICE_ALIAS_HEX_LENGTH = 32
+    }
 }
 
 /**

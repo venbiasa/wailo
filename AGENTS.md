@@ -118,6 +118,9 @@ directory — every frontend and the daemon it spawns pick it up from the enviro
 WAILO_HOME=$(mktemp -d) WAILO_CAPTURE_PORT=8991 ./cli/build/install/wailo-cli/bin/wailo-cli status
 ```
 
+`WAILO_HOME` isolates daemon files and settings. A test that also needs an independent Studio
+identity/pairing Keychain must set `WAILO_KEYCHAIN_SERVICE` to a unique disposable service name.
+
 ## Conventions
 
 - Comments explain intent, not narration. Write the *why* — constraints, trade-offs, non-obvious

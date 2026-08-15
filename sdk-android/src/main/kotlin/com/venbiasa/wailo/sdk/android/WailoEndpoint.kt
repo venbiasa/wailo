@@ -11,8 +11,8 @@ internal data class WailoEndpoint(val host: String, val port: Int, val studioId:
      * Whether the engine will see this peer as loopback and waive the handshake, which it decides with
      * `InetAddress.getByName(remote).isLoopbackAddress` (`WailoEngine.isLoopbackPeer`). Asking the same
      * question the same way is what keeps the two ends from disagreeing about whether a session starts
-     * with `AuthRequest` or `Hello` — a disagreement that reads as a connection which opens and then
-     * goes silent.
+     * with `AuthClientHelloV3` or `Hello` — a disagreement that reads as a connection which opens and
+     * then goes silent.
      *
      * Resolution, not string matching, because the engine resolves too: `adb reverse` arrives as
      * `localhost`, but a host file alias for 127.0.0.1 has to reach the same verdict. Called from the
@@ -54,7 +54,11 @@ internal object WailoEndpointResolver {
 
         val pinned = WailoHostStore.host
         if (pinned != null) {
-            return WailoEndpoint(pinned, port(explicitPort, null, null), studioId = identityAt(pinned))
+            return WailoEndpoint(
+                pinned,
+                port(explicitPort, null, null),
+                studioId = WailoHostStore.expectedStudioId,
+            )
         }
 
         val trusted = firstTrusted(discovered)
@@ -95,9 +99,6 @@ internal object WailoEndpointResolver {
         val all = WailoPairingStore.all()
         return all.firstOrNull { it.lastHost == host } ?: all.singleOrNull()
     }
-
-    private fun identityAt(host: String): String? =
-        WailoPairingStore.all().firstOrNull { it.lastHost == host }?.studioId
 
     private fun port(explicit: Int?, fromAddress: Int?, discovered: Int?): Int =
         explicit ?: fromAddress ?: WailoHostStore.port ?: discovered ?: WailoClient.DEFAULT_PORT

@@ -19,7 +19,12 @@ fun main() {
     val settings = DaemonSettings()
     val config = settings.load()
     val keyStore = if (KeychainPairingKeyStore.isSupported) {
-        KeychainPairingKeyStore()
+        // A second, isolated daemon may need a genuinely independent Studio identity, not just its own
+        // ports and preferences. Production keeps the stable default service; smoke/E2E runs can opt in.
+        System.getenv("WAILO_KEYCHAIN_SERVICE")
+            ?.takeIf { it.isNotBlank() }
+            ?.let(::KeychainPairingKeyStore)
+            ?: KeychainPairingKeyStore()
     } else {
         InMemoryPairingKeyStore()
     }

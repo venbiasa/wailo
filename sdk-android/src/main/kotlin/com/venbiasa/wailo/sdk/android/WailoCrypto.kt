@@ -1,6 +1,7 @@
 package com.venbiasa.wailo.sdk.android
 
 import java.math.BigInteger
+import java.nio.ByteBuffer
 import java.security.AlgorithmParameters
 import java.security.KeyFactory
 import java.security.KeyPair
@@ -21,7 +22,7 @@ import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
 
 /**
- * The device's half of the WiFi handshake primitives (ADR-0039/0040), the third independent
+ * The device's half of the identity-first WiFi handshake primitives (ADR-0060), the third independent
  * implementation of one byte-for-byte contract: `sdk-ios/Sources/WailoSDK/WailoCrypto.swift` and
  * `engine/pairing/WailoCrypto.kt`. Nothing can be shared with either — `sdk-ios` is Swift, and the
  * studio build is a separate Gradle build joined only by the `protocol` artifact (ADR-0015) — so every
@@ -78,38 +79,21 @@ internal object WailoCrypto {
 
     // MARK: key schedule
 
-    /** The long-term per-device secret for a QR or typed-code pairing. Never transmitted. */
-    fun deviceKey(pairingSecret: ByteArray, studioId: String, deviceId: String): ByteArray =
-        hkdf(pairingSecret, studioId.toByteArray(), label("wailo/device-key/v1", deviceId.toByteArray()))
+    fun deviceKeyV3(pairingSecret: ByteArray, studioId: String, deviceAlias: String): ByteArray =
+        hkdf(pairingSecret, studioId.toByteArray(), label("wailo/device-key/v3", deviceAlias.toByteArray()))
 
-    /**
-     * The same long-term secret, for a lenient first contact that had no invite (ADR-0040). Both ends
-     * derive it from that one connection's agreed secret and keep it, so every later connection takes
-     * the ordinary paired path. Nothing is transmitted here either.
-     */
-    fun tofuDeviceKey(shared: ByteArray, studioId: String, deviceId: String): ByteArray =
-        hkdf(shared, studioId.toByteArray(), label("wailo/tofu-device-key/v1", deviceId.toByteArray()))
+    fun tofuDeviceKeyV3(shared: ByteArray, studioId: String, deviceAlias: String): ByteArray =
+        hkdf(shared, studioId.toByteArray(), label("wailo/tofu-device-key/v3", deviceAlias.toByteArray()))
 
-    /**
-     * What every per-connection key descends from: the agreed secret, then the long-term key when
-     * there is one.
-     *
-     * Both, rather than either. The agreed secret alone would let anyone merely *present* at a
-     * handshake derive the session — nothing would have to be known. `K` alone would mean a key that
-     * leaks in a year opens every session recorded before it. Concatenating them needs both.
-     */
-    private fun material(shared: ByteArray, deviceKey: ByteArray?): ByteArray =
-        shared + (deviceKey ?: ByteArray(0))
+    fun authKeyV3(shared: ByteArray, deviceKey: ByteArray): ByteArray =
+        hkdf(shared + deviceKey, ByteArray(0), "wailo/auth/v3".toByteArray())
 
-    fun authKey(shared: ByteArray, deviceKey: ByteArray?): ByteArray =
-        hkdf(material(shared, deviceKey), ByteArray(0), "wailo/auth/v2".toByteArray())
-
-    fun sessionKey(
+    fun sessionKeyV3(
         shared: ByteArray,
-        deviceKey: ByteArray?,
+        deviceKey: ByteArray,
         nonceD: ByteArray,
         nonceS: ByteArray,
-    ): ByteArray = hkdf(material(shared, deviceKey), nonceD + nonceS, "wailo/session/v2".toByteArray())
+    ): ByteArray = hkdf(shared + deviceKey, nonceD + nonceS, "wailo/session/v3".toByteArray())
 
     /**
      * Stretches a typed pairing code into the same 32 bytes a scanned QR carries directly. The
@@ -120,43 +104,63 @@ internal object WailoCrypto {
 
     // MARK: proofs
 
-    /**
-     * The ephemeral keys are in here because otherwise they are the one part of the handshake nobody
-     * vouches for: anyone in the path could substitute their own into a replayed challenge and agree a
-     * separate key with each side, which is a man in the middle wearing the real Studio's signature.
-     */
-    fun transcript(
-        role: String,
-        studioId: String,
-        nonceD: ByteArray,
-        nonceS: ByteArray,
-        ephemeralD: ByteArray,
-        ephemeralS: ByteArray,
-    ): ByteArray = label(role, studioId.toByteArray()) + nonceD + nonceS + ephemeralD + ephemeralS
-
-    fun deviceProof(
+    fun deviceProofV3(
         authKey: ByteArray,
         studioId: String,
         nonceD: ByteArray,
         nonceS: ByteArray,
         ephemeralD: ByteArray,
         ephemeralS: ByteArray,
-    ): ByteArray = hmac(authKey, transcript("wailo/device", studioId, nonceD, nonceS, ephemeralD, ephemeralS))
+        pairingRequired: Boolean,
+        deviceAlias: String,
+        mode: Int,
+        sessionCounter: Long,
+    ): ByteArray = hmac(
+        authKey,
+        authTranscriptV3(
+            "wailo/device-proof/v3",
+            studioId,
+            nonceD,
+            nonceS,
+            ephemeralD,
+            ephemeralS,
+            pairingRequired,
+            deviceAlias,
+            mode,
+            sessionCounter,
+        ),
+    )
 
-    fun studioMac(
+    fun studioProofV3(
         authKey: ByteArray,
         studioId: String,
         nonceD: ByteArray,
         nonceS: ByteArray,
         ephemeralD: ByteArray,
         ephemeralS: ByteArray,
-    ): ByteArray = hmac(authKey, transcript("wailo/studio-mac", studioId, nonceD, nonceS, ephemeralD, ephemeralS))
+        pairingRequired: Boolean,
+        deviceAlias: String,
+        mode: Int,
+        sessionCounter: Long,
+        resultCode: Int,
+    ): ByteArray = hmac(
+        authKey,
+        resultTranscriptV3(
+            "wailo/studio-proof/v3",
+            studioId,
+            nonceD,
+            nonceS,
+            ephemeralD,
+            ephemeralS,
+            pairingRequired,
+            deviceAlias,
+            mode,
+            sessionCounter,
+            resultCode,
+        ),
+    )
 
-    /**
-     * Studio's half. False for a malformed key or signature as readily as for a wrong one: every
-     * failure here means "this is not the Studio I paired with", and the device hangs up either way.
-     */
-    fun isValidStudioSignature(
+    fun isValidStudioHelloV3(
         signature: ByteArray,
         publicKey: ByteArray,
         studioId: String,
@@ -164,12 +168,51 @@ internal object WailoCrypto {
         nonceS: ByteArray,
         ephemeralD: ByteArray,
         ephemeralS: ByteArray,
-    ): Boolean = runCatching {
-        Signature.getInstance(SIGNATURE_ALGORITHM).apply {
-            initVerify(decodePublicKey(publicKey))
-            update(transcript("wailo/studio", studioId, nonceD, nonceS, ephemeralD, ephemeralS))
-        }.verify(rawToDerSignature(signature))
-    }.getOrDefault(false)
+        pairingRequired: Boolean,
+    ): Boolean = verifyV3(
+        signature,
+        publicKey,
+        helloTranscriptV3(
+            "wailo/studio-hello/v3",
+            studioId,
+            nonceD,
+            nonceS,
+            ephemeralD,
+            ephemeralS,
+            pairingRequired,
+        ),
+    )
+
+    fun isValidResultSignatureV3(
+        signature: ByteArray,
+        publicKey: ByteArray,
+        studioId: String,
+        nonceD: ByteArray,
+        nonceS: ByteArray,
+        ephemeralD: ByteArray,
+        ephemeralS: ByteArray,
+        pairingRequired: Boolean,
+        deviceAlias: String,
+        mode: Int,
+        sessionCounter: Long,
+        resultCode: Int,
+    ): Boolean = verifyV3(
+        signature,
+        publicKey,
+        resultTranscriptV3(
+            "wailo/result-signature/v3",
+            studioId,
+            nonceD,
+            nonceS,
+            ephemeralD,
+            ephemeralS,
+            pairingRequired,
+            deviceAlias,
+            mode,
+            sessionCounter,
+            resultCode,
+        ),
+    )
 
     /** Constant-time, because these compare secrets. */
     fun constantTimeEquals(a: ByteArray, b: ByteArray): Boolean {
@@ -224,6 +267,72 @@ internal object WailoCrypto {
     /** A `0x00`-separated label, so a transcript can never be read two ways. */
     private fun label(text: String, suffix: ByteArray): ByteArray =
         text.toByteArray() + byteArrayOf(0) + suffix + byteArrayOf(0)
+
+    private fun helloTranscriptV3(
+        role: String,
+        studioId: String,
+        nonceD: ByteArray,
+        nonceS: ByteArray,
+        ephemeralD: ByteArray,
+        ephemeralS: ByteArray,
+        pairingRequired: Boolean,
+    ): ByteArray = label(role, studioId.toByteArray()) +
+        nonceD + nonceS + ephemeralD + ephemeralS + byteArrayOf(if (pairingRequired) 1 else 0)
+
+    private fun authTranscriptV3(
+        role: String,
+        studioId: String,
+        nonceD: ByteArray,
+        nonceS: ByteArray,
+        ephemeralD: ByteArray,
+        ephemeralS: ByteArray,
+        pairingRequired: Boolean,
+        deviceAlias: String,
+        mode: Int,
+        sessionCounter: Long,
+    ): ByteArray = helloTranscriptV3(
+        role,
+        studioId,
+        nonceD,
+        nonceS,
+        ephemeralD,
+        ephemeralS,
+        pairingRequired,
+    ) + label("wailo/device-alias/v3", deviceAlias.toByteArray()) +
+        ByteBuffer.allocate(Int.SIZE_BYTES).putInt(mode).array() +
+        ByteBuffer.allocate(Long.SIZE_BYTES).putLong(sessionCounter).array()
+
+    private fun resultTranscriptV3(
+        role: String,
+        studioId: String,
+        nonceD: ByteArray,
+        nonceS: ByteArray,
+        ephemeralD: ByteArray,
+        ephemeralS: ByteArray,
+        pairingRequired: Boolean,
+        deviceAlias: String,
+        mode: Int,
+        sessionCounter: Long,
+        resultCode: Int,
+    ): ByteArray = authTranscriptV3(
+        role,
+        studioId,
+        nonceD,
+        nonceS,
+        ephemeralD,
+        ephemeralS,
+        pairingRequired,
+        deviceAlias,
+        mode,
+        sessionCounter,
+    ) + ByteBuffer.allocate(Int.SIZE_BYTES).putInt(resultCode).array()
+
+    private fun verifyV3(signature: ByteArray, publicKey: ByteArray, transcript: ByteArray): Boolean = runCatching {
+        Signature.getInstance(SIGNATURE_ALGORITHM).apply {
+            initVerify(decodePublicKey(publicKey))
+            update(transcript)
+        }.verify(rawToDerSignature(signature))
+    }.getOrDefault(false)
 
     /** RFC 5869 HKDF-SHA256. One SHA-256 block out, so expand is a single iteration. */
     private fun hkdf(keyMaterial: ByteArray, salt: ByteArray, info: ByteArray): ByteArray =

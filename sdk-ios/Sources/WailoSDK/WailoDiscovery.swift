@@ -34,6 +34,10 @@ final class WailoDiscovery: @unchecked Sendable {
     /// TXT key carrying Studio's public-key fingerprint.
     static let studioIdKey = "sid"
 
+    static var browserDescriptor: NWBrowser.Descriptor {
+        .bonjourWithTXTRecord(type: serviceType, domain: nil)
+    }
+
     /// Backoff for rebuilding a browser the OS reported as failed. Doubles up to the cap because the
     /// commonest cause is permanent — a host app that never declared `NSBonjourServices` /
     /// `NSLocalNetworkUsageDescription` gets denied on every attempt — and retrying that at a fixed
@@ -46,6 +50,9 @@ final class WailoDiscovery: @unchecked Sendable {
     private var browser: NWBrowser?
     /// Throwaway connections used purely to turn a Bonjour service into an address, keyed by instance name.
     private var resolvers: [String: NWConnection] = [:]
+    /// The latest service endpoint for each instance. Unlike the resolved numeric address, this remains
+    /// valid when DHCP moves Studio and can therefore be resolved again on demand.
+    private var serviceEndpoints: [String: NWEndpoint] = [:]
     private var resolved: [String: WailoService] = [:]
     /// Kept beside the resolved set because the TXT record arrives with the browse result, well before
     /// the address does.
@@ -72,11 +79,18 @@ final class WailoDiscovery: @unchecked Sendable {
             self.browser = nil
             for resolver in self.resolvers.values { resolver.cancel() }
             self.resolvers.removeAll()
+            self.serviceEndpoints.removeAll()
             let hadResults = !self.resolved.isEmpty
             self.resolved.removeAll()
             self.studioIds.removeAll()
             if hadResults { self.publish() }
         }
+    }
+
+    /// Re-resolves services already in the published set. Bonjour service identity is stable across an
+    /// address change; treating a previous numeric result as permanent leaves the panel on the old IP.
+    func refresh() {
+        queue.async { self.refreshResolutions() }
     }
 
     // MARK: - queue-confined
@@ -87,7 +101,7 @@ final class WailoDiscovery: @unchecked Sendable {
         // radio and widens the local-network prompt's scope for a case the desktop can't serve anyway.
         parameters.includePeerToPeer = false
 
-        let browser = NWBrowser(for: .bonjour(type: Self.serviceType, domain: nil), using: parameters)
+        let browser = NWBrowser(for: Self.browserDescriptor, using: parameters)
         browser.browseResultsChangedHandler = { [weak self] results, _ in
             self?.queue.async { self?.handle(results) }
         }
@@ -106,27 +120,70 @@ final class WailoDiscovery: @unchecked Sendable {
 
     private func handle(_ results: Set<NWBrowser.Result>) {
         var seen = Set<String>()
+        var metadataChanged = false
         for result in results {
             guard case let .service(name, type, domain, _) = result.endpoint else { continue }
             seen.insert(name)
-            studioIds[name] = Self.studioId(from: result.metadata)
-            guard resolvers[name] == nil, resolved[name] == nil else { continue }
-            resolve(name: name, endpoint: .service(name: name, type: type, domain: domain, interface: nil))
+            let endpoint = NWEndpoint.service(name: name, type: type, domain: domain, interface: nil)
+            serviceEndpoints[name] = endpoint
+            let studioId = Self.studioId(from: result.metadata)
+            studioIds[name] = studioId
+            if let service = resolved[name],
+               let updated = Self.replacingStudioId(in: service, with: studioId) {
+                resolved[name] = updated
+                metadataChanged = true
+            }
+            // A browse update may be Studio re-announcing the same service after an address change.
+            // Its instance name and TXT identity stay equal, so a cached resolved value must not block
+            // another resolution.
+            guard resolvers[name] == nil else { continue }
+            resolve(name: name, endpoint: endpoint)
         }
 
-        let vanished = Set(resolvers.keys).union(resolved.keys).subtracting(seen)
-        guard !vanished.isEmpty else { return }
+        let vanished = Set(serviceEndpoints.keys).union(resolvers.keys).union(resolved.keys).subtracting(seen)
         for name in vanished {
             resolvers.removeValue(forKey: name)?.cancel()
+            serviceEndpoints.removeValue(forKey: name)
             resolved.removeValue(forKey: name)
             studioIds.removeValue(forKey: name)
         }
-        publish()
+        if metadataChanged || !vanished.isEmpty { publish() }
     }
 
     private static func studioId(from metadata: NWBrowser.Result.Metadata) -> String {
         guard case let .bonjour(record) = metadata else { return "" }
         return record[Self.studioIdKey] ?? ""
+    }
+
+    static func replacingStudioId(in service: WailoService, with studioId: String) -> WailoService? {
+        replacingRoute(
+            in: service,
+            host: service.host,
+            port: service.port,
+            studioId: studioId
+        )
+    }
+
+    static func replacingRoute(
+        in service: WailoService,
+        host: String,
+        port: Int,
+        studioId: String
+    ) -> WailoService? {
+        let updated = WailoService(
+            name: service.name,
+            host: host,
+            port: port,
+            studioId: studioId
+        )
+        return updated == service ? nil : updated
+    }
+
+    private func refreshResolutions() {
+        guard started else { return }
+        for (name, endpoint) in serviceEndpoints where resolvers[name] == nil {
+            resolve(name: name, endpoint: endpoint)
+        }
     }
 
     /// Bonjour hands back a *service*, but `URLSessionWebSocketTask` needs a `ws://host:port` URL and
@@ -158,12 +215,22 @@ final class WailoDiscovery: @unchecked Sendable {
         guard let connection = resolvers.removeValue(forKey: name) else { return }
         connection.cancel()
         guard case let .hostPort(host, port)? = remote, let address = Self.address(from: host) else { return }
-        resolved[name] = WailoService(
-            name: name,
-            host: address,
-            port: Int(port.rawValue),
-            studioId: studioIds[name] ?? ""
-        )
+        if let existing = resolved[name] {
+            guard let updated = Self.replacingRoute(
+                in: existing,
+                host: address,
+                port: Int(port.rawValue),
+                studioId: studioIds[name] ?? ""
+            ) else { return }
+            resolved[name] = updated
+        } else {
+            resolved[name] = WailoService(
+                name: name,
+                host: address,
+                port: Int(port.rawValue),
+                studioId: studioIds[name] ?? ""
+            )
+        }
         publish()
     }
 

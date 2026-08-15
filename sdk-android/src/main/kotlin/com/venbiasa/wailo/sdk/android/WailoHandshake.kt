@@ -1,9 +1,11 @@
 package com.venbiasa.wailo.sdk.android
 
-import com.venbiasa.wailo.protocol.AuthChallenge
-import com.venbiasa.wailo.protocol.AuthRequest
-import com.venbiasa.wailo.protocol.AuthResponse
-import com.venbiasa.wailo.protocol.AuthResult
+import com.venbiasa.wailo.protocol.AuthClientHelloV3
+import com.venbiasa.wailo.protocol.AuthDeviceProofV3
+import com.venbiasa.wailo.protocol.AuthModeV3
+import com.venbiasa.wailo.protocol.AuthResultCodeV3
+import com.venbiasa.wailo.protocol.AuthResultV3
+import com.venbiasa.wailo.protocol.AuthStudioHelloV3
 import com.venbiasa.wailo.protocol.Envelope
 import okio.ByteString.Companion.toByteString
 
@@ -18,7 +20,6 @@ import okio.ByteString.Companion.toByteString
  */
 internal class WailoHandshake(
     private val trust: Trust,
-    private val deviceId: String,
     private val host: String,
 ) {
 
@@ -29,27 +30,27 @@ internal class WailoHandshake(
          * (ADR-0040). An attacker has to already be in the path at this exact moment; from the next
          * connection on, the pin makes that too late.
          */
-        data object FirstContact : Trust
+        data class FirstContact(val expectedStudioId: String?) : Trust
+
+        data class KnownOrFirstContact(
+            val pairings: List<WailoPairing>,
+            val expectedStudioId: String?,
+        ) : Trust
 
         /**
          * A QR or typed code supplied the secret out of band. [publicKey] is present for a QR, which
-         * carries it; a typed code has to pin whatever the challenge offers, and leans on the mac to
-         * prove that key belongs to the Studio showing the code.
+         * carries it; a typed code pins the signed StudioHello identity after the code-derived proof
+         * authenticates it.
          */
         data class Invited(
             val studioId: String,
-            val deviceKey: ByteArray,
+            val pairingSecret: ByteArray,
             val publicKey: ByteArray?,
             val byCode: Boolean,
         ) : Trust
 
         /** Established previously: both the key and the identity are pinned, and neither may move. */
-        data class Paired(
-            val studioId: String,
-            val deviceKey: ByteArray,
-            val publicKey: ByteArray,
-            val sessionCounter: Long,
-        ) : Trust
+        data class Paired(val pairing: WailoPairing) : Trust
     }
 
     class Established(val sessionKey: ByteArray, val pairing: WailoPairing)
@@ -59,9 +60,8 @@ internal class WailoHandshake(
         data class Done(val established: Established) : Step
 
         /**
-         * Studio does not know us, or will not take an unpaired device. Deliberately distinct from
-         * [Failed]: the device stops retrying but keeps its key, because `AuthResult` is
-         * unauthenticated and deleting on it would let anyone force a re-pair on demand.
+         * Studio authenticated a refusal. Distinct from [Failed] so the UI can offer explicit
+         * Retry/Forget recovery instead of silently looping.
          */
         data class Refused(val reason: String) : Step
 
@@ -79,78 +79,92 @@ internal class WailoHandshake(
     private val nonceD = WailoCrypto.randomNonce()
     private val ephemeral = WailoCrypto.generateEphemeral()
     private val ephemeralD = WailoCrypto.encodePublicKey(ephemeral.public)
+    private val pendingDeviceAlias = WailoPairingStore.newDeviceAlias()
 
     private var nonceS: ByteArray? = null
+    private var ephemeralS: ByteArray? = null
     private var shared: ByteArray? = null
     private var resolvedStudioId: String? = null
     private var acceptedPublicKey: ByteArray? = null
-
-    /**
-     * Studio proved its identity but declined to prove it holds our key. Only then is the `AuthResult`
-     * that follows worth acting on.
-     */
-    private var declining = false
+    private var resolvedPairing: WailoPairing? = null
+    private var deviceAlias: String? = null
+    private var selectedDeviceKey: ByteArray? = null
+    private var mode: AuthModeV3? = null
+    private var sessionCounter: Long? = null
+    private var pairingRequired: Boolean = false
 
     fun begin(): Envelope = Envelope(
-        auth_request = AuthRequest(
-            // Empty on a first contact: the device has not been told who is listening here, and
-            // guessing would only produce a mismatch Studio has to reject.
-            studio_id = expectedStudioId.orEmpty(),
-            device_id = deviceId,
+        auth_client_hello_v3 = AuthClientHelloV3(
+            version = 3,
             nonce = nonceD.toByteString(),
-            paired_by_code = pairedByCode,
             ephemeral_key = ephemeralD.toByteString(),
         ),
     )
 
     fun handle(envelope: Envelope): Step {
-        envelope.auth_challenge?.let { return handle(it) }
-        envelope.auth_result?.let { return handle(it) }
+        envelope.auth_studio_hello_v3?.let { return handle(it) }
+        envelope.auth_result_v3?.let { return handle(it) }
         // Anything else before auth completes is a peer that skipped the handshake.
         return Step.Failed
     }
 
-    private fun handle(challenge: AuthChallenge): Step {
-        if (nonceS != null || challenge.nonce.size != WailoCrypto.NONCE_LENGTH) return Step.Failed
-        val nonceS = challenge.nonce.toByteArray()
-        val ephemeralS = challenge.ephemeral_key.toByteArray()
+    private fun handle(hello: AuthStudioHelloV3): Step {
+        if (nonceS != null || hello.nonce.size != WailoCrypto.NONCE_LENGTH) return Step.Failed
+        val nonceS = hello.nonce.toByteArray()
+        val ephemeralS = hello.ephemeral_key.toByteArray()
         val shared = WailoCrypto.agree(ephemeral.private, ephemeralS) ?: return Step.Failed
+        val offered = hello.public_key.toByteArray()
+        if (offered.isEmpty()) return Step.Failed
+        val studioId = WailoCrypto.studioId(offered)
+        if (!WailoCrypto.isValidStudioHelloV3(
+                hello.signature.toByteArray(),
+                offered,
+                studioId,
+                nonceD,
+                nonceS,
+                ephemeralD,
+                ephemeralS,
+                hello.pairing_required,
+            )
+        ) {
+            return Step.Failed
+        }
 
-        val publicKey = when (val identity = resolveIdentity(challenge.public_key.toByteArray())) {
+        val publicKey = when (val identity = resolveIdentity(offered, studioId)) {
             is Identity.Use -> identity.publicKey
             is Identity.Reject -> return identity.step
         }
-        val studioId = WailoCrypto.studioId(publicKey)
-
-        val signed = WailoCrypto.isValidStudioSignature(
-            challenge.signature.toByteArray(), publicKey, studioId, nonceD, nonceS, ephemeralD, ephemeralS,
-        )
-        if (!signed) return Step.Failed
 
         this.nonceS = nonceS
+        this.ephemeralS = ephemeralS
         this.shared = shared
         this.resolvedStudioId = studioId
-
-        // No mac means Studio can sign as itself but will not answer under our key: it has either
-        // forgotten this device or refuses unpaired ones. Requiring the signature first is what makes
-        // the refusal that follows trustworthy — otherwise anyone on the network could send one and
-        // park the device in a re-pair prompt.
-        if (challenge.mac.size == 0) {
-            declining = true
-            return Step.Ignore
-        }
-
-        val authKey = WailoCrypto.authKey(shared, deviceKey)
-        val expectedMac = WailoCrypto.studioMac(authKey, studioId, nonceD, nonceS, ephemeralD, ephemeralS)
-        if (!WailoCrypto.constantTimeEquals(challenge.mac.toByteArray(), expectedMac)) return Step.Failed
-
         acceptedPublicKey = publicKey
-        val proof = WailoCrypto.deviceProof(authKey, studioId, nonceD, nonceS, ephemeralD, ephemeralS)
+        pairingRequired = hello.pairing_required
+        val selected = credential(shared, studioId)
+        deviceAlias = selected.alias
+        selectedDeviceKey = selected.key
+        mode = selected.mode
+        sessionCounter = selected.counter
+        val authKey = WailoCrypto.authKeyV3(shared, selected.key)
         return Step.Send(
             Envelope(
-                auth_response = AuthResponse(
-                    proof = proof.toByteString(),
-                    session_counter = sessionCounter + 1,
+                auth_device_proof_v3 = AuthDeviceProofV3(
+                    device_alias = selected.alias,
+                    mode = selected.mode,
+                    session_counter = selected.counter,
+                    proof = WailoCrypto.deviceProofV3(
+                        authKey,
+                        studioId,
+                        nonceD,
+                        nonceS,
+                        ephemeralD,
+                        ephemeralS,
+                        hello.pairing_required,
+                        selected.alias,
+                        selected.mode.value,
+                        selected.counter,
+                    ).toByteString(),
                 ),
             ),
         )
@@ -168,93 +182,164 @@ internal class WailoHandshake(
      * a different identity, is either a machine that changed hands or someone standing in the path.
      * Both look identical from here, so neither is resolved automatically.
      */
-    private fun resolveIdentity(offered: ByteArray): Identity {
-        val pinned = pinnedPublicKey
-        if (pinned != null) {
-            if (offered.isNotEmpty() && !offered.contentEquals(pinned)) {
-                return Identity.Reject(
-                    Step.IdentityChanged(
-                        expected = WailoCrypto.studioId(pinned),
-                        actual = WailoCrypto.studioId(offered),
-                    ),
-                )
+    private fun resolveIdentity(offered: ByteArray, studioId: String): Identity {
+        return when (val current = trust) {
+            is Trust.FirstContact -> {
+                if (current.expectedStudioId != null && current.expectedStudioId != studioId) {
+                    return Identity.Reject(Step.IdentityChanged(current.expectedStudioId, studioId))
+                }
+                Identity.Use(offered)
             }
-            return Identity.Use(pinned)
+            is Trust.KnownOrFirstContact -> {
+                if (current.expectedStudioId != null && current.expectedStudioId != studioId) {
+                    return Identity.Reject(Step.IdentityChanged(current.expectedStudioId, studioId))
+                }
+                current.pairings.firstOrNull { it.studioId == studioId }?.let { pairing ->
+                    if (!offered.contentEquals(pairing.publicKey)) return Identity.Reject(Step.Failed)
+                    resolvedPairing = pairing
+                }
+                Identity.Use(offered)
+            }
+
+            is Trust.Invited -> {
+                if (studioId != current.studioId) return Identity.Reject(Step.Failed)
+                if (current.publicKey != null && !offered.contentEquals(current.publicKey)) {
+                    return Identity.Reject(Step.Failed)
+                }
+                Identity.Use(offered)
+            }
+
+            is Trust.Paired -> {
+                val pairing = current.pairing
+                if (studioId != pairing.studioId || !offered.contentEquals(pairing.publicKey)) {
+                    return Identity.Reject(
+                        Step.IdentityChanged(
+                            expected = pairing.studioId,
+                            actual = studioId,
+                        ),
+                    )
+                }
+                resolvedPairing = pairing
+                Identity.Use(offered)
+            }
         }
-        // Nothing pinned: take what is offered, but a named identity still has to match its own
-        // fingerprint, which keeps "sid is the hash of the key" true even here.
-        if (offered.isEmpty()) return Identity.Reject(Step.Failed)
-        val expected = expectedStudioId
-        if (expected != null && WailoCrypto.studioId(offered) != expected) return Identity.Reject(Step.Failed)
-        return Identity.Use(offered)
     }
 
-    private fun handle(result: AuthResult): Step {
-        if (declining) {
-            return Step.Refused(result.reason.ifEmpty { "This Studio will not accept this device." })
-        }
+    private fun handle(result: AuthResultV3): Step {
         val nonceS = this.nonceS ?: return Step.Failed
+        val ephemeralS = this.ephemeralS ?: return Step.Failed
         val shared = this.shared ?: return Step.Failed
         val studioId = resolvedStudioId ?: return Step.Failed
         val acceptedPublicKey = this.acceptedPublicKey ?: return Step.Failed
-        // A rejection at this point came from a peer that already proved it holds our key, so it is
-        // worth surfacing rather than silently retrying.
-        if (!result.ok) {
-            return Step.Refused(result.reason.ifEmpty { "This Studio does not recognise this device." })
+        val deviceAlias = this.deviceAlias ?: return Step.Failed
+        val selectedDeviceKey = this.selectedDeviceKey ?: return Step.Failed
+        val mode = this.mode ?: return Step.Failed
+        val sessionCounter = this.sessionCounter ?: return Step.Failed
+        if (!WailoCrypto.isValidResultSignatureV3(
+                result.signature.toByteArray(),
+                acceptedPublicKey,
+                studioId,
+                nonceD,
+                nonceS,
+                ephemeralD,
+                ephemeralS,
+                pairingRequired,
+                deviceAlias,
+                mode.value,
+                sessionCounter,
+                result.code.value,
+            )
+        ) {
+            return Step.Failed
         }
-        // On a first contact the long-term key is derived from this connection's agreed secret, by both
-        // ends independently, so it never crosses the wire.
-        val longTerm = deviceKey ?: WailoCrypto.tofuDeviceKey(shared, studioId, deviceId)
+
+        if (result.code != AuthResultCodeV3.AUTH_RESULT_CODE_V3_OK) {
+            return Step.Refused(refusalMessage(result.code))
+        }
+        val authKey = WailoCrypto.authKeyV3(shared, selectedDeviceKey)
+        val expectedProof = WailoCrypto.studioProofV3(
+            authKey,
+            studioId,
+            nonceD,
+            nonceS,
+            ephemeralD,
+            ephemeralS,
+            pairingRequired,
+            deviceAlias,
+            mode.value,
+            sessionCounter,
+            result.code.value,
+        )
+        if (!WailoCrypto.constantTimeEquals(result.proof.toByteArray(), expectedProof)) return Step.Failed
+
         return Step.Done(
             Established(
-                sessionKey = WailoCrypto.sessionKey(shared, deviceKey, nonceD, nonceS),
+                sessionKey = WailoCrypto.sessionKeyV3(shared, selectedDeviceKey, nonceD, nonceS),
                 pairing = WailoPairing(
                     studioId = studioId,
-                    deviceKey = longTerm,
+                    deviceAlias = deviceAlias,
+                    deviceKey = selectedDeviceKey,
                     publicKey = acceptedPublicKey,
-                    sessionCounter = sessionCounter + 1,
+                    sessionCounter = sessionCounter,
                     refused = false,
                     lastHost = host,
-                    trustedOnFirstUse = deviceKey == null,
+                    trustedOnFirstUse = resolvedPairing?.trustedOnFirstUse
+                        ?: (mode == AuthModeV3.AUTH_MODE_V3_TOFU),
                 ),
             ),
         )
     }
 
-    // MARK: - what the trust mode supplies
+    private data class Credential(
+        val alias: String,
+        val key: ByteArray,
+        val mode: AuthModeV3,
+        val counter: Long,
+    )
 
-    private val expectedStudioId: String?
-        get() = when (trust) {
-            Trust.FirstContact -> null
-            is Trust.Invited -> trust.studioId
-            is Trust.Paired -> trust.studioId
+    private fun credential(shared: ByteArray, studioId: String): Credential {
+        resolvedPairing?.let { pairing ->
+            return Credential(
+                pairing.deviceAlias,
+                pairing.deviceKey,
+                AuthModeV3.AUTH_MODE_V3_KNOWN,
+                pairing.sessionCounter + 1,
+            )
         }
+        return when (val current = trust) {
+            is Trust.Invited -> Credential(
+                pendingDeviceAlias,
+                WailoCrypto.deviceKeyV3(current.pairingSecret, studioId, pendingDeviceAlias),
+                if (current.byCode) {
+                    AuthModeV3.AUTH_MODE_V3_INVITED_CODE
+                } else {
+                    AuthModeV3.AUTH_MODE_V3_INVITED_QR
+                },
+                1,
+            )
 
-    private val deviceKey: ByteArray?
-        get() = when (trust) {
-            Trust.FirstContact -> null
-            is Trust.Invited -> trust.deviceKey
-            is Trust.Paired -> trust.deviceKey
-        }
+            is Trust.FirstContact, is Trust.KnownOrFirstContact -> Credential(
+                pendingDeviceAlias,
+                WailoCrypto.tofuDeviceKeyV3(shared, studioId, pendingDeviceAlias),
+                AuthModeV3.AUTH_MODE_V3_TOFU,
+                1,
+            )
 
-    private val pinnedPublicKey: ByteArray?
-        get() = when (trust) {
-            Trust.FirstContact -> null
-            is Trust.Invited -> trust.publicKey
-            is Trust.Paired -> trust.publicKey
+            is Trust.Paired -> error("a paired trust always resolves before credential selection")
         }
+    }
 
-    private val sessionCounter: Long
-        get() = when (trust) {
-            Trust.FirstContact, is Trust.Invited -> 0
-            is Trust.Paired -> trust.sessionCounter
-        }
-
-    private val pairedByCode: Boolean
-        get() = when (trust) {
-            is Trust.Invited -> trust.byCode
-            Trust.FirstContact, is Trust.Paired -> false
-        }
+    private fun refusalMessage(code: AuthResultCodeV3): String = when (code) {
+        AuthResultCodeV3.AUTH_RESULT_CODE_V3_PAIRING_REQUIRED ->
+            "This Studio only accepts paired devices. Pair from its Devices panel."
+        AuthResultCodeV3.AUTH_RESULT_CODE_V3_PAIRING_OFFER_INVALID ->
+            "The pairing offer expired or was already used. Start pairing again in Studio."
+        AuthResultCodeV3.AUTH_RESULT_CODE_V3_UNKNOWN_DEVICE ->
+            "This Studio no longer recognises this device. Forget it here, then connect or pair again."
+        AuthResultCodeV3.AUTH_RESULT_CODE_V3_OK,
+        AuthResultCodeV3.AUTH_RESULT_CODE_V3_UNSPECIFIED,
+        -> "This Studio did not accept this device."
+    }
 
     companion object {
         /**
@@ -262,25 +347,27 @@ internal class WailoHandshake(
          * connection attempt rather than once per client, which is the whole of ADR-0046's WiFi bug:
          * iOS captured the `Trust` when it built the client and then reconnected internally, so every
          * reconnect after a successful first contact re-introduced a device Studio had *just* stored a
-         * key for, derived the auth key without that key, and failed the mac check — silently, and
+         * key for, derived the auth key without that key, and failed authentication — silently, and
          * identically forever. Re-reading the pairing per attempt makes that unrepresentable here.
          */
-        fun trustFor(pairing: WailoPairing?, invite: WailoPairingInvite?, deviceId: String): Trust = when {
+        fun trustFor(
+            pairing: WailoPairing?,
+            invite: WailoPairingInvite?,
+            candidates: List<WailoPairing> = emptyList(),
+            expectedStudioId: String? = null,
+        ): Trust = when {
             invite != null -> Trust.Invited(
                 studioId = invite.studioId,
-                deviceKey = WailoCrypto.deviceKey(invite.pairingSecret, invite.studioId, deviceId),
+                pairingSecret = invite.pairingSecret,
                 publicKey = invite.publicKey,
                 byCode = invite.pairedByCode,
             )
 
-            pairing != null -> Trust.Paired(
-                studioId = pairing.studioId,
-                deviceKey = pairing.deviceKey,
-                publicKey = pairing.publicKey,
-                sessionCounter = pairing.sessionCounter,
-            )
+            pairing != null -> Trust.Paired(pairing)
 
-            else -> Trust.FirstContact
+            candidates.isNotEmpty() -> Trust.KnownOrFirstContact(candidates, expectedStudioId)
+
+            else -> Trust.FirstContact(expectedStudioId)
         }
     }
 }

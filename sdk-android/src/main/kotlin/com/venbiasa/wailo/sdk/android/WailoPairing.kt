@@ -11,7 +11,9 @@ import java.net.URI
 @ConsistentCopyVisibility
 data class WailoPairing internal constructor(
     val studioId: String,
-    /** The long-term secret `K`. Derived from the pairing secret, never transmitted. */
+    /** Random handle scoped to this Studio relationship and replaced after Forget (ADR-0060). */
+    val deviceAlias: String,
+    /** Long-term relationship secret, derived from an invite or authenticated TOFU and never transmitted. */
     internal val deviceKey: ByteArray,
     /**
      * Pinned at pairing, as an X9.63 uncompressed point. Everything after that connection is
@@ -24,11 +26,7 @@ data class WailoPairing internal constructor(
      * key — it cannot stop the clone, but it turns a silent compromise into a visible one.
      */
     val sessionCounter: Long,
-    /**
-     * Set when Studio said it does not know us. Kept rather than acted on: `AuthResult` arrives
-     * unauthenticated, so deleting the key here would hand anyone a way to force a re-pair on demand.
-     * It only stops the 2-second reconnect loop until a human clears it in the panel.
-     */
+    /** Set by an authenticated refusal; it stops retries until a human chooses Retry or Forget. */
     val refused: Boolean,
     /**
      * Where this Studio was last reached. Lets a manually typed LAN address resolve back to the
@@ -46,17 +44,16 @@ data class WailoPairing internal constructor(
 /**
  * Everything needed to pair with one Studio, however the user supplied it.
  *
- * A scanned QR fills all of this in one shot, including the public key, so the signature in the
- * handshake is meaningful from the very first connection. A typed code cannot carry a key, so
- * [publicKey] is null and the device pins whatever key `AuthChallenge` offers — safe only because
- * Studio's mac has to prove knowledge of the same code first, and because the key still has to hash to
- * the [studioId] being dialled.
+ * A scanned QR fills all of this in one shot, including the public key, so Studio's signed hello is
+ * pinned on the first connection. A typed code cannot carry a key, so [publicKey] is null and the
+ * device pins the key in the signed v3 hello after checking its fingerprint; the authenticated result
+ * then proves Studio selected the same code-derived credential.
  */
 class WailoPairingInvite private constructor(
     val studioId: String,
     val host: String,
     val port: Int,
-    /** X9.63 uncompressed point, matching what `AuthChallenge.public_key` carries. */
+    /** X9.63 uncompressed point, matching what `AuthStudioHelloV3.public_key` carries. */
     internal val publicKey: ByteArray?,
     internal val pairingSecret: ByteArray,
     /**

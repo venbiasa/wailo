@@ -2,17 +2,16 @@ import Foundation
 
 /// Everything needed to pair with one Studio, however the user supplied it.
 ///
-/// A scanned QR fills all of this in one shot, including the public key, so the signature in the
-/// handshake is meaningful from the very first connection. A typed code cannot carry a key, so
-/// `publicKey` is nil and the device pins whatever key `AuthChallenge` offers — safe only because
-/// Studio's mac has to prove knowledge of the same code first, and because the key still has to hash
-/// to the `studioId` being dialled.
+/// A scanned QR fills all of this in one shot, including the public key, so Studio's signed hello is
+/// pinned on the first connection. A typed code cannot carry a key, so `publicKey` is nil and the
+/// device pins the key in the signed v3 hello after checking its fingerprint; the authenticated result
+/// then proves Studio selected the same code-derived credential.
 public struct WailoPairingInvite: Equatable, Sendable {
 
     public let studioId: String
     public let host: String
     public let port: Int
-    /// X9.63 uncompressed point, matching what `AuthChallenge.public_key` carries.
+    /// X9.63 uncompressed point, matching what `AuthStudioHelloV3.public_key` carries.
     public let publicKey: Data?
     public let pairingSecret: Data
     /// Tells Studio which half of its offer to answer under. The QR's secret and the typed code's are

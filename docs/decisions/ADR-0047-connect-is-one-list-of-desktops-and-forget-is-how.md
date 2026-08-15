@@ -7,7 +7,8 @@ date_source: git-commit
 ---
 # ADR-0047 — Connect is one list of desktops, and Forget is how one stops being reached
 
-- Status: Accepted; implemented in `sdk-ios` (`WailoDebugUI`). Amends ADR-0040.
+- Status: Accepted; implemented in both on-device panels. ADR-0060 amends Forget with best-effort
+  sealed revocation and a fresh per-Studio alias on any later explicit Connect.
 - Context: The panel had grown two lists that were really one. "Found on the network" sat in its own section well below the address fields, and the paired desktops sat under Wi-Fi pairing — so the same machine could appear twice, in two places, described two different ways, and the panel invented a question ("which of these is mine?") that the user did not have. It was also the wrong shape for what tapping a row *does*: since ADR-0040 a discovered row fills the address field rather than connecting, which makes it a suggestion for the field it is nowhere near. Meanwhile a remembered desktop could only be forgotten from Studio — the wrong machine, and unavailable exactly when it matters, since a desktop that has moved networks is one the device will keep reaching for and the user has no way to say no to.
 - Decision:
   - **One list, directly under the Connect button, merged on identity.** A desktop advertising on the network and a desktop this device holds a key for are the same machine as far as choosing an address goes, so they are one row keyed on `studioId`. It sits under the button because a row's only job is to fill the fields above it.

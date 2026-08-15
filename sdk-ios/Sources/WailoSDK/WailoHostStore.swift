@@ -14,6 +14,7 @@ enum WailoHostStore {
 
     static let hostKey = "WailoHost"
     static let portKey = "WailoPort"
+    static let expectedStudioIdKey = "WailoExpectedStudioId"
     static let usbPortKey = "WailoUsbPort"
 
     private static var defaults: UserDefaults { .standard }
@@ -40,6 +41,17 @@ enum WailoHostStore {
         }
     }
 
+    static var expectedStudioId: String? {
+        get { defaults.string(forKey: expectedStudioIdKey)?.nilIfEmpty }
+        set {
+            if let value = newValue?.nilIfEmpty {
+                defaults.set(value, forKey: expectedStudioIdKey)
+            } else {
+                defaults.removeObject(forKey: expectedStudioIdKey)
+            }
+        }
+    }
+
     /// The device-side port Studio dials over USB. Unlike the LAN address there is no discovery to fall
     /// back on — usbmux only forwards to a port number — so this must match what Studio is configured to
     /// dial, and `nil` means the shared default both sides ship with.
@@ -59,6 +71,7 @@ enum WailoHostStore {
     static func clear() {
         host = nil
         port = nil
+        expectedStudioId = nil
         usbPort = nil
     }
 
@@ -73,4 +86,8 @@ enum WailoHostStore {
     private static func validPort(_ raw: Int) -> Int? {
         (1...65535).contains(raw) ? raw : nil
     }
+}
+
+private extension String {
+    var nilIfEmpty: String? { isEmpty ? nil : self }
 }

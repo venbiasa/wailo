@@ -1,13 +1,16 @@
 package com.venbiasa.wailo.sdk.android
 
-import com.venbiasa.wailo.protocol.AuthChallenge
-import com.venbiasa.wailo.protocol.AuthRequest
-import com.venbiasa.wailo.protocol.AuthResponse
-import com.venbiasa.wailo.protocol.AuthResult
+import com.venbiasa.wailo.protocol.AuthClientHelloV3
+import com.venbiasa.wailo.protocol.AuthDeviceProofV3
+import com.venbiasa.wailo.protocol.AuthModeV3
+import com.venbiasa.wailo.protocol.AuthResultCodeV3
+import com.venbiasa.wailo.protocol.AuthResultV3
+import com.venbiasa.wailo.protocol.AuthStudioHelloV3
 import com.venbiasa.wailo.protocol.Envelope
 import okio.ByteString
 import okio.ByteString.Companion.toByteString
 import java.math.BigInteger
+import java.nio.ByteBuffer
 import java.security.KeyPairGenerator
 import java.security.Signature
 import java.security.spec.ECGenParameterSpec
@@ -45,16 +48,12 @@ internal class FakeStudio {
 
     /** "Only accept paired devices": turns a first contact into a signed refusal instead. */
     var requirePairing: Boolean = false
-
-    /**
-     * Answers even when the device asked for a different `studio_id`, which the real Studio refuses.
-     * That is precisely the peer the pinned-key check exists for: something standing in the path, or
-     * squatting the address a Mac used to have, has no reason to honour the id it was asked for.
-     */
-    var answersAnyIdentity: Boolean = false
+    var forgeHelloSignature: Boolean = false
+    var forgeResultSignature: Boolean = false
+    var forgeResultProof: Boolean = false
 
     /** Set as each connection completes, so a test can assert what Studio believed happened. */
-    var lastDeviceId: String? = null
+    var lastDeviceAlias: String? = null
     var lastFirstContact: Boolean = false
     var lastSessionCounter: Long = -1
 
@@ -65,10 +64,64 @@ internal class FakeStudio {
             "&k=${encoder.encodeToString(publicKey)}&s=${encoder.encodeToString(secret)}"
     }
 
-    fun sign(nonceD: ByteArray, nonceS: ByteArray, ephemeralD: ByteArray, ephemeralS: ByteArray): ByteArray {
+    fun signHelloV3(
+        nonceD: ByteArray,
+        nonceS: ByteArray,
+        ephemeralD: ByteArray,
+        ephemeralS: ByteArray,
+        pairingRequired: Boolean,
+    ): ByteArray = sign(
+        helloTranscriptV3(
+            "wailo/studio-hello/v3",
+            nonceD,
+            nonceS,
+            ephemeralD,
+            ephemeralS,
+            pairingRequired,
+        ),
+    )
+
+    fun signResultV3(
+        nonceD: ByteArray,
+        nonceS: ByteArray,
+        ephemeralD: ByteArray,
+        ephemeralS: ByteArray,
+        pairingRequired: Boolean,
+        deviceAlias: String,
+        mode: Int,
+        counter: Long,
+        code: Int,
+    ): ByteArray = sign(
+        helloTranscriptV3(
+            "wailo/result-signature/v3",
+            nonceD,
+            nonceS,
+            ephemeralD,
+            ephemeralS,
+            pairingRequired,
+        ) + label("wailo/device-alias/v3", deviceAlias.toByteArray()) +
+            ByteBuffer.allocate(Int.SIZE_BYTES).putInt(mode).array() +
+            ByteBuffer.allocate(Long.SIZE_BYTES).putLong(counter).array() +
+            ByteBuffer.allocate(Int.SIZE_BYTES).putInt(code).array(),
+    )
+
+    private fun helloTranscriptV3(
+        role: String,
+        nonceD: ByteArray,
+        nonceS: ByteArray,
+        ephemeralD: ByteArray,
+        ephemeralS: ByteArray,
+        pairingRequired: Boolean,
+    ): ByteArray = label(role, studioId.toByteArray()) +
+        nonceD + nonceS + ephemeralD + ephemeralS + byteArrayOf(if (pairingRequired) 1 else 0)
+
+    private fun label(text: String, suffix: ByteArray): ByteArray =
+        text.toByteArray() + byteArrayOf(0) + suffix + byteArrayOf(0)
+
+    private fun sign(transcript: ByteArray): ByteArray {
         val der = Signature.getInstance("SHA256withECDSA").apply {
             initSign(keyPair.private)
-            update(WailoCrypto.transcript("wailo/studio", studioId, nonceD, nonceS, ephemeralD, ephemeralS))
+            update(transcript)
         }.sign()
         return derToRaw(der)
     }
@@ -115,26 +168,15 @@ internal class FakeStudioSession(private val studio: FakeStudio) {
     private var ephemeralD: ByteArray? = null
     private var ephemeralS: ByteArray? = null
     private var shared: ByteArray? = null
-    private var authKey: ByteArray? = null
-    private var deviceKey: ByteArray? = null
-    private var deviceId: String? = null
-    private var firstContact = false
 
     fun handle(envelope: Envelope): Reply {
-        envelope.auth_request?.let { return challenge(it) }
-        envelope.auth_response?.let { return admit(it) }
+        envelope.auth_client_hello_v3?.let { return hello(it) }
+        envelope.auth_device_proof_v3?.let { return admit(it) }
         return Reply(close = true)
     }
 
-    private fun challenge(request: AuthRequest): Reply {
-        if (request.nonce.size != WailoCrypto.NONCE_LENGTH) return Reply(close = true)
-        if (!studio.answersAnyIdentity &&
-            request.studio_id.isNotEmpty() &&
-            request.studio_id != studio.studioId
-        ) {
-            return Reply(close = true)
-        }
-
+    private fun hello(request: AuthClientHelloV3): Reply {
+        if (request.version != 3 || request.nonce.size != WailoCrypto.NONCE_LENGTH) return Reply(close = true)
         val nonceD = request.nonce.toByteArray()
         val nonceS = WailoCrypto.randomNonce()
         val ephemeralD = request.ephemeral_key.toByteArray()
@@ -142,94 +184,170 @@ internal class FakeStudioSession(private val studio: FakeStudio) {
         val ephemeralS = WailoCrypto.encodePublicKey(ephemeral.public)
         val shared = WailoCrypto.agree(ephemeral.private, ephemeralD) ?: return Reply(close = true)
 
-        val offered = if (request.paired_by_code) {
-            studio.offerCode?.let { WailoCrypto.stretch(it, studio.studioId) }
-        } else {
-            studio.offer
-        }
-        val invited = studio.known[request.device_id]
-            ?: offered?.let { WailoCrypto.deviceKey(it, studio.studioId, request.device_id) }
-        val firstContact = invited == null
-
         this.nonceD = nonceD
         this.nonceS = nonceS
         this.ephemeralD = ephemeralD
         this.ephemeralS = ephemeralS
         this.shared = shared
-        this.deviceId = request.device_id
-        this.firstContact = firstContact
-
-        if (firstContact && studio.requirePairing) {
-            // Signed but unmac'd: "I am the Studio you know, and I will not take you". The device may
-            // only act on the refusal that follows because the signature came first.
-            return Reply(
-                out = listOf(
-                    Envelope(
-                        auth_challenge = AuthChallenge(
-                            nonce = nonceS.toByteString(),
-                            signature = studio.sign(nonceD, nonceS, ephemeralD, ephemeralS).toByteString(),
-                            mac = ByteString.EMPTY,
-                            public_key = studio.publicKey.toByteString(),
-                            ephemeral_key = ephemeralS.toByteString(),
-                        ),
-                    ),
-                    Envelope(
-                        auth_result = AuthResult(
-                            ok = false,
-                            reason = "This Studio only accepts paired devices. Pair from its Devices panel.",
-                        ),
-                    ),
-                ),
-                close = true,
-            )
-        }
-
-        deviceKey = invited
-        val authKey = WailoCrypto.authKey(shared, invited)
-        this.authKey = authKey
         return Reply(
             out = listOf(
                 Envelope(
-                    auth_challenge = AuthChallenge(
+                    auth_studio_hello_v3 = AuthStudioHelloV3(
                         nonce = nonceS.toByteString(),
-                        signature = studio.sign(nonceD, nonceS, ephemeralD, ephemeralS).toByteString(),
-                        mac = WailoCrypto
-                            .studioMac(authKey, studio.studioId, nonceD, nonceS, ephemeralD, ephemeralS)
-                            .toByteString(),
                         public_key = studio.publicKey.toByteString(),
                         ephemeral_key = ephemeralS.toByteString(),
+                        signature = if (studio.forgeHelloSignature) {
+                            ByteArray(64).toByteString()
+                        } else {
+                            studio.signHelloV3(
+                                nonceD,
+                                nonceS,
+                                ephemeralD,
+                                ephemeralS,
+                                studio.requirePairing,
+                            ).toByteString()
+                        },
+                        pairing_required = studio.requirePairing,
                     ),
                 ),
             ),
         )
     }
 
-    private fun admit(response: AuthResponse): Reply {
-        val authKey = authKey ?: return Reply(close = true)
+    private fun admit(response: AuthDeviceProofV3): Reply {
         val nonceD = nonceD!!
         val nonceS = nonceS!!
-        val deviceId = deviceId!!
+        val ephemeralD = ephemeralD!!
+        val ephemeralS = ephemeralS!!
+        val shared = shared!!
+        val alias = response.device_alias
+        val known = studio.known[alias]
+        val selected = when (response.mode) {
+            AuthModeV3.AUTH_MODE_V3_KNOWN -> {
+                known ?: return refusal(response, AuthResultCodeV3.AUTH_RESULT_CODE_V3_UNKNOWN_DEVICE)
+            }
+
+            AuthModeV3.AUTH_MODE_V3_TOFU -> {
+                if (studio.requirePairing) {
+                    return refusal(response, AuthResultCodeV3.AUTH_RESULT_CODE_V3_PAIRING_REQUIRED)
+                }
+                WailoCrypto.tofuDeviceKeyV3(shared, studio.studioId, alias)
+            }
+
+            AuthModeV3.AUTH_MODE_V3_INVITED_QR -> {
+                val offer = studio.offer
+                    ?: return refusal(response, AuthResultCodeV3.AUTH_RESULT_CODE_V3_PAIRING_OFFER_INVALID)
+                WailoCrypto.deviceKeyV3(offer, studio.studioId, alias)
+            }
+
+            AuthModeV3.AUTH_MODE_V3_INVITED_CODE -> {
+                val code = studio.offerCode
+                    ?: return refusal(response, AuthResultCodeV3.AUTH_RESULT_CODE_V3_PAIRING_OFFER_INVALID)
+                WailoCrypto.deviceKeyV3(WailoCrypto.stretch(code, studio.studioId), studio.studioId, alias)
+            }
+
+            AuthModeV3.AUTH_MODE_V3_UNSPECIFIED -> return Reply(close = true)
+        }
+        val authKey = WailoCrypto.authKeyV3(shared, selected)
         val expected = WailoCrypto
-            .deviceProof(authKey, studio.studioId, nonceD, nonceS, ephemeralD!!, ephemeralS!!)
+            .deviceProofV3(
+                authKey,
+                studio.studioId,
+                nonceD,
+                nonceS,
+                ephemeralD,
+                ephemeralS,
+                studio.requirePairing,
+                alias,
+                response.mode.value,
+                response.session_counter,
+            )
         if (!WailoCrypto.constantTimeEquals(response.proof.toByteArray(), expected)) return Reply(close = true)
 
-        studio.known[deviceId] = deviceKey
-            ?: WailoCrypto.tofuDeviceKey(shared!!, studio.studioId, deviceId)
-        studio.counters[deviceId] = response.session_counter
-        studio.lastDeviceId = deviceId
-        studio.lastFirstContact = firstContact
+        studio.known[alias] = selected
+        studio.counters[alias] = response.session_counter
+        studio.lastDeviceAlias = alias
+        studio.lastFirstContact = response.mode == AuthModeV3.AUTH_MODE_V3_TOFU
         studio.lastSessionCounter = response.session_counter
         // One displayed code pairs one device, rather than standing open for whoever else saw the screen.
         studio.offer = null
         studio.offerCode = null
 
+        val code = AuthResultCodeV3.AUTH_RESULT_CODE_V3_OK
         return Reply(
-            out = listOf(Envelope(auth_result = AuthResult(ok = true))),
+            out = listOf(
+                Envelope(
+                    auth_result_v3 = AuthResultV3(
+                        code = code,
+                        proof = if (studio.forgeResultProof) {
+                            ByteArray(32).toByteString()
+                        } else {
+                            WailoCrypto.studioProofV3(
+                                authKey,
+                                studio.studioId,
+                                nonceD,
+                                nonceS,
+                                ephemeralD,
+                                ephemeralS,
+                                studio.requirePairing,
+                                alias,
+                                response.mode.value,
+                                response.session_counter,
+                                code.value,
+                            ).toByteString()
+                        },
+                        signature = if (studio.forgeResultSignature) {
+                            ByteArray(64).toByteString()
+                        } else {
+                            studio.signResultV3(
+                                nonceD,
+                                nonceS,
+                                ephemeralD,
+                                ephemeralS,
+                                studio.requirePairing,
+                                alias,
+                                response.mode.value,
+                                response.session_counter,
+                                code.value,
+                            ).toByteString()
+                        },
+                    ),
+                ),
+            ),
             codec = WailoFrameCodec(
-                sessionKey = WailoCrypto.sessionKey(shared!!, deviceKey, nonceD, nonceS),
+                sessionKey = WailoCrypto.sessionKeyV3(shared, selected, nonceD, nonceS),
                 sealing = WailoFrameCodec.Direction.STUDIO_TO_DEVICE,
                 opening = WailoFrameCodec.Direction.DEVICE_TO_STUDIO,
             ),
+        )
+    }
+
+    private fun refusal(response: AuthDeviceProofV3, code: AuthResultCodeV3): Reply {
+        val nonceD = nonceD!!
+        val nonceS = nonceS!!
+        val ephemeralD = ephemeralD!!
+        val ephemeralS = ephemeralS!!
+        return Reply(
+            out = listOf(
+                Envelope(
+                    auth_result_v3 = AuthResultV3(
+                        code = code,
+                        proof = ByteString.EMPTY,
+                        signature = studio.signResultV3(
+                            nonceD,
+                            nonceS,
+                            ephemeralD,
+                            ephemeralS,
+                            studio.requirePairing,
+                            response.device_alias,
+                            response.mode.value,
+                            response.session_counter,
+                            code.value,
+                        ).toByteString(),
+                    ),
+                ),
+            ),
+            close = true,
         )
     }
 }

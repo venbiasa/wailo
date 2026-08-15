@@ -5,7 +5,11 @@ import Security
 public struct WailoPairing: Codable, Equatable, Sendable {
 
     public let studioId: String
-    /// The long-term secret `K`. Derived from the pairing secret, never transmitted.
+    /// Random handle scoped to this Studio relationship. It is revealed only after Studio proves its
+    /// identity and is replaced, rather than reused, after Forget (ADR-0060).
+    public internal(set) var deviceAlias: String = ""
+    /// The long-term relationship secret, derived from an invite or the authenticated TOFU exchange
+    /// and never transmitted.
     var deviceKey: Data
     /// Pinned at pairing, as an X9.63 uncompressed point. Everything after that connection is
     /// authenticated against this and nothing else, so a peer advertising the same `sid` with a
@@ -14,9 +18,7 @@ public struct WailoPairing: Codable, Equatable, Sendable {
     /// Advances on each successful handshake. Studio reads a counter that moves backwards as a cloned
     /// key — it cannot stop the clone, but it turns a silent compromise into a visible one.
     public internal(set) var sessionCounter: UInt64
-    /// Set when Studio said it does not know us. Kept rather than acted on: `AuthResult` arrives
-    /// unauthenticated, so deleting the key here would hand anyone a way to force a re-pair on demand.
-    /// It only stops the 2-second reconnect loop until a human clears it in the panel.
+    /// Set by an authenticated refusal; it stops retries until a human chooses Retry or Forget.
     public internal(set) var refused: Bool
     /// Where this Studio was last reached. Lets a manually typed LAN address resolve back to the
     /// identity it belongs to, since a typed IP says nothing about who is listening on it.
@@ -31,6 +33,7 @@ extension WailoPairing {
 
     private enum CodingKeys: String, CodingKey {
         case studioId
+        case deviceAlias
         case deviceKey
         case publicKey
         case sessionCounter
@@ -44,6 +47,15 @@ extension WailoPairing {
     public init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         studioId = try values.decode(String.self, forKey: .studioId)
+        deviceAlias = try values.decode(String.self, forKey: .deviceAlias)
+        guard deviceAlias.utf8.count == 32,
+              deviceAlias.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }) else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .deviceAlias,
+                in: values,
+                debugDescription: "V3 device aliases must be 32 lowercase hexadecimal characters"
+            )
+        }
         deviceKey = try values.decode(Data.self, forKey: .deviceKey)
         publicKey = try values.decode(Data.self, forKey: .publicKey)
         sessionCounter = try values.decodeIfPresent(UInt64.self, forKey: .sessionCounter) ?? 0
@@ -55,6 +67,7 @@ extension WailoPairing {
     public func encode(to encoder: Encoder) throws {
         var values = encoder.container(keyedBy: CodingKeys.self)
         try values.encode(studioId, forKey: .studioId)
+        try values.encode(deviceAlias, forKey: .deviceAlias)
         try values.encode(deviceKey, forKey: .deviceKey)
         try values.encode(publicKey, forKey: .publicKey)
         try values.encode(sessionCounter, forKey: .sessionCounter)
@@ -77,7 +90,9 @@ protocol WailoSecretStorage: AnyObject {
 
 final class WailoPairingStore {
 
-    private static let service = "com.venbiasa.wailo.pairing"
+    // A clean namespace is the v3 migration: old global-id records remain unread rather than being
+    // mistaken for Studio-scoped aliases. The host app does not need to mutate Keychain at upgrade.
+    private static let service = "com.venbiasa.wailo.pairing.v3"
 
     #if DEBUG
     /// Swappable in debug builds only, because otherwise the WiFi handshake has no test coverage at
@@ -95,18 +110,8 @@ final class WailoPairingStore {
         self.storage = storage
     }
 
-    /// A stable, opaque handle for this install. Opaque on purpose: it is the one identifier that
-    /// crosses the wire before either side has proved anything, so it must not leak the device's name
-    /// or the app's bundle id the way `Hello` does.
-    var deviceId: String {
-        lock.lock()
-        defer { lock.unlock() }
-        if let existing = storage.data(for: Self.deviceIdAccount).flatMap({ String(data: $0, encoding: .utf8) }) {
-            return existing
-        }
-        let generated = WailoCrypto.randomNonce().prefix(16).hexadecimal
-        storage.set(Data(generated.utf8), for: Self.deviceIdAccount)
-        return generated
+    func newDeviceAlias() -> String {
+        WailoCrypto.randomNonce().prefix(16).hexadecimal
     }
 
     func pairing(studioId: String) -> WailoPairing? {
@@ -131,22 +136,17 @@ final class WailoPairingStore {
     func forgetAll() {
         lock.lock()
         defer { lock.unlock() }
-        for account in storage.accounts() where account != Self.deviceIdAccount {
-            storage.set(nil, for: account)
-        }
+        for account in storage.accounts() { storage.set(nil, for: account) }
     }
 
     var all: [WailoPairing] {
         lock.lock()
         defer { lock.unlock() }
         return storage.accounts()
-            .filter { $0 != Self.deviceIdAccount }
             .compactMap { storage.data(for: $0) }
             .compactMap { try? JSONDecoder().decode(WailoPairing.self, from: $0) }
             .sorted { $0.studioId < $1.studioId }
     }
-
-    private static let deviceIdAccount = "__wailo_device_id"
 }
 
 /// Generic-password items, one per Studio.

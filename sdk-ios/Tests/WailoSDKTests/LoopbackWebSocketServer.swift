@@ -27,9 +27,14 @@ final class LoopbackWebSocketServer {
 
     var onEnvelope: ((Envelope) -> Void)?
 
+    private let autoReplyPing: Bool
     private let queue = DispatchQueue(label: "com.venbiasa.wailo.test.loopback")
     private var listener: NWListener?
     private var connections: [NWConnection] = []
+
+    init(autoReplyPing: Bool = true) {
+        self.autoReplyPing = autoReplyPing
+    }
 
     @discardableResult
     func start(on port: UInt16? = nil) throws -> UInt16 {
@@ -47,7 +52,7 @@ final class LoopbackWebSocketServer {
 
     private func bind(on port: UInt16?) throws -> UInt16 {
         let webSocket = NWProtocolWebSocket.Options()
-        webSocket.autoReplyPing = true
+        webSocket.autoReplyPing = autoReplyPing
         let parameters = NWParameters(tls: nil, tcp: NWProtocolTCP.Options())
         parameters.allowLocalEndpointReuse = true
         parameters.defaultProtocolStack.applicationProtocols.insert(webSocket, at: 0)

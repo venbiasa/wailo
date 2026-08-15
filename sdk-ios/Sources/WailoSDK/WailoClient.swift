@@ -12,6 +12,7 @@ final class WailoClient: NSObject, CaptureSink, WailoBodyFetcher, WailoBreakpoin
 
     private let url: URL
     private let reconnectDelay: TimeInterval
+    private let pingTimeout: TimeInterval
     private let queue = DispatchQueue(label: "com.venbiasa.wailo.client")
     private let session: WailoTransportSession
 
@@ -21,13 +22,14 @@ final class WailoClient: NSObject, CaptureSink, WailoBodyFetcher, WailoBreakpoin
     private var suspended = false
     private var generation = 0
     private var pingGeneration = 0
+    private var pingSequence = 0
 
     var onConnectionChange: ((Bool) -> Void)? {
         get { session.onConnectionChange }
         set { session.onConnectionChange = newValue }
     }
 
-    var onHandshakeEstablished: ((WailoPairing) -> Void)? {
+    var onHandshakeEstablished: ((WailoPairing) -> Bool)? {
         get { session.onHandshakeEstablished }
         set { session.onHandshakeEstablished = newValue }
     }
@@ -42,6 +44,13 @@ final class WailoClient: NSObject, CaptureSink, WailoBodyFetcher, WailoBreakpoin
         set { session.onIdentityChanged = newValue }
     }
 
+    var onDialling: (() -> Void)?
+
+    var onAuthenticationStarted: (() -> Void)? {
+        get { session.onAuthenticationStarted }
+        set { session.onAuthenticationStarted = newValue }
+    }
+
     /// Takes a URL rather than a host and port: whether free text names a diallable address is
     /// `WailoAddress`'s question, and building the URL here meant a force-unwrap that crashed the host
     /// app on a mistyped address.
@@ -51,11 +60,13 @@ final class WailoClient: NSObject, CaptureSink, WailoBodyFetcher, WailoBreakpoin
         security: WailoSessionSecurity = .open,
         bufferCapacity: Int = 512,
         reconnectDelay: TimeInterval = 2.0,
-        pingInterval: TimeInterval = 20.0,
+        pingInterval: TimeInterval = 10.0,
+        pingTimeout: TimeInterval = 5.0,
         bodyTimeout: TimeInterval = 10.0
     ) {
         self.url = url
         self.reconnectDelay = reconnectDelay
+        self.pingTimeout = pingTimeout
         self.session = WailoTransportSession(
             hello: hello,
             queue: queue,
@@ -94,6 +105,10 @@ final class WailoClient: NSObject, CaptureSink, WailoBodyFetcher, WailoBreakpoin
     }
 
     func onExchange(_ exchange: HttpExchange) { session.onExchange(exchange) }
+
+    func revoke(completion: @escaping (Bool) -> Void) {
+        session.revoke(completion: completion)
+    }
 
     func fetchBody(ruleId: String, url: String, method: String, completion: @escaping (WailoMappedResponse?) -> Void) {
         session.fetchBody(ruleId: ruleId, url: url, method: method, completion: completion)
@@ -148,6 +163,7 @@ final class WailoClient: NSObject, CaptureSink, WailoBodyFetcher, WailoBreakpoin
 
     func stopKeepalive() {
         pingGeneration += 1
+        pingSequence += 1
     }
 
     func closeLink() {
@@ -159,6 +175,7 @@ final class WailoClient: NSObject, CaptureSink, WailoBodyFetcher, WailoBreakpoin
 
     private func connect() {
         guard started, !suspended, task == nil else { return }
+        onDialling?()
         generation += 1
         let gen = generation
         let urlSession = self.urlSession ?? URLSession(configuration: transportConfiguration(), delegate: self, delegateQueue: nil)
@@ -195,18 +212,37 @@ final class WailoClient: NSObject, CaptureSink, WailoBodyFetcher, WailoBreakpoin
     private func schedulePing(interval: TimeInterval, gen: Int, onFailure: @escaping () -> Void) {
         queue.asyncAfter(deadline: .now() + interval) { [weak self] in
             guard let self, gen == self.pingGeneration, let task = self.task else { return }
+            self.pingSequence += 1
+            let sequence = self.pingSequence
             task.sendPing { [weak self] error in
                 guard let self else { return }
                 self.queue.async {
-                    guard gen == self.pingGeneration else { return }
+                    guard gen == self.pingGeneration, sequence == self.pingSequence else { return }
+                    self.pingSequence += 1
                     if error != nil {
-                        onFailure()
+                        self.keepaliveFailed(onFailure)
                     } else {
                         self.schedulePing(interval: interval, gen: gen, onFailure: onFailure)
                     }
                 }
             }
+            self.queue.asyncAfter(deadline: .now() + self.pingTimeout) { [weak self] in
+                guard let self,
+                      gen == self.pingGeneration,
+                      sequence == self.pingSequence,
+                      task === self.task else { return }
+                self.pingSequence += 1
+                self.keepaliveFailed(onFailure)
+            }
         }
+    }
+
+    private func keepaliveFailed(_ onFailure: () -> Void) {
+        // URLSession does not promise a completion for a ping whose route disappeared. Mark the
+        // semantic session down first so observers stop showing Connected, then tear down the task so
+        // the ordinary reconnect loop can resolve Studio's current route.
+        onFailure()
+        teardownConnection(scheduleReconnect: started && !suspended)
     }
 
     private func handleDisconnect(_ gen: Int) {

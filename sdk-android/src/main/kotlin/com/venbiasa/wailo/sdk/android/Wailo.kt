@@ -75,7 +75,11 @@ object Wailo {
     // MARK: - connection control (see the matching members on WailoClient)
 
     /** False when no client is running, or when the text names nothing diallable. */
-    fun setHost(host: String?, port: Int? = null): Boolean = active?.setHost(host, port) ?: false
+    fun setHost(
+        host: String?,
+        port: Int? = null,
+        expectedStudioId: String? = null,
+    ): Boolean = active?.setHost(host, port, expectedStudioId) ?: false
 
     fun pair(invite: WailoPairingInvite) {
         active?.pair(invite)

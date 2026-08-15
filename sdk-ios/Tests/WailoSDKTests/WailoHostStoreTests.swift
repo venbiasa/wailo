@@ -104,4 +104,16 @@ final class WailoHostStoreTests: XCTestCase {
         XCTAssertNil(Wailo.configuredHost)
         XCTAssertNil(Wailo.configuredPort)
     }
+
+    func testFilledTargetCarriesExpectedIdentityAndManualEditClearsIt() {
+        XCTAssertTrue(Wailo.setHost(
+            "192.168.1.42",
+            port: 8899,
+            expectedStudioId: "00112233445566778899aabbccddeeff"
+        ))
+        XCTAssertEqual(WailoHostStore.expectedStudioId, "00112233445566778899aabbccddeeff")
+
+        XCTAssertTrue(Wailo.setHost("192.168.1.43", port: 8899))
+        XCTAssertNil(WailoHostStore.expectedStudioId)
+    }
 }

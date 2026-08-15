@@ -359,6 +359,11 @@ Turn on **Only paired devices over Wi-Fi** in Studio's Settings for a shared or 
 device then has to scan the QR or type the code before it is let in. Devices you already trust stay
 connected when you switch it on.
 
+Release candidates run the
+[Identity-First Pairing V3 physical smoke](docs/identity-first-pairing-v3-smoke.md) on both device
+platforms. It covers route and identity replacement, strict enrollment, unilateral Forget on either
+side, downgrade refusal, alias unlinkability, and truthful connection status.
+
 Which desktop gets dialled is decided the same way on both platforms, highest first: an explicit host,
 then a saved override, then discovery, then `localhost`. On Android the explicit host is the `host`
 argument of `Wailo.webSocketSink` and the override is `Wailo.setHost("192.168.1.42")` (`null` clears it

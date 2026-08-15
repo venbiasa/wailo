@@ -217,6 +217,20 @@ final class WailoUsbListenerTests: XCTestCase {
         XCTAssertEqual(Wailo.activeAddress, "127.0.0.1:\(lanPort)")
         XCTAssertEqual(lanHellos, 1)
 
+        let transportChanged = expectation(description: "open panel is notified of USB takeover")
+        transportChanged.assertForOverFulfill = false
+        let observer = NotificationCenter.default.addObserver(
+            forName: Wailo.connectionDidChangeNotification,
+            object: nil,
+            queue: nil
+        ) { _ in
+            if Wailo.activeAddress == "usb:\(Wailo.usbPort)" {
+                XCTAssertTrue(Wailo.isConnected, "LAN must stay live until USB has completed Hello")
+                transportChanged.fulfill()
+            }
+        }
+        defer { NotificationCenter.default.removeObserver(observer) }
+
         let usbClient = try connectUsbStudio()
         defer { usbClient.close() }
 
@@ -224,7 +238,7 @@ final class WailoUsbListenerTests: XCTestCase {
         usbClient.onEnvelope = { envelope in
             if case .hello = envelope.message { usbHello.fulfill() }
         }
-        wait(for: [usbHello], timeout: 10)
+        wait(for: [usbHello, transportChanged], timeout: 10)
 
         waitUntil(timeout: 5) { Wailo.activeAddress == "usb:\(Wailo.usbPort)" }
         XCTAssertEqual(Wailo.configuredHost, "127.0.0.1")

@@ -12,9 +12,10 @@ import Wire
  * to a BreakpointHit with a BreakpointDecision. The receiver keys on which oneof field is set; new kinds
  * are a oneof extension (ADR-0008), so this stays backward-compatible.
  *
- * Over WiFi the exchange above is preceded by the AuthRequest/AuthChallenge/AuthResponse/AuthResult
- * handshake and every frame after it is wrapped in a SealedFrame (ADR-0039). Loopback sessions —
- * Simulator, `adb reverse`, the usbmux tunnel — skip both and start at Hello as before.
+ * Over WiFi the exchange above is preceded by the identity-first v3 handshake (ADR-0060) and every
+ * frame after it is wrapped in a SealedFrame. Loopback sessions — Simulator, `adb reverse`, the
+ * usbmux tunnel — skip both and start at Hello as before. The v2 tags remain reserved so they can
+ * never be reinterpreted as another message, but v3 peers do not expose or admit those message types.
  */
 public struct Envelope {
 
@@ -75,11 +76,13 @@ extension Envelope : Proto3Codable {
             case 10: message = .breakpoint_rules_ack(try protoReader.decode(BreakpointRulesAck.self))
             case 11: message = .breakpoint_hit(try protoReader.decode(BreakpointHit.self))
             case 12: message = .breakpoint_decision(try protoReader.decode(BreakpointDecision.self))
-            case 13: message = .auth_request(try protoReader.decode(AuthRequest.self))
-            case 14: message = .auth_challenge(try protoReader.decode(AuthChallenge.self))
-            case 15: message = .auth_response(try protoReader.decode(AuthResponse.self))
-            case 16: message = .auth_result(try protoReader.decode(AuthResult.self))
             case 17: message = .sealed_frame(try protoReader.decode(SealedFrame.self))
+            case 18: message = .auth_client_hello_v3(try protoReader.decode(AuthClientHelloV3.self))
+            case 19: message = .auth_studio_hello_v3(try protoReader.decode(AuthStudioHelloV3.self))
+            case 20: message = .auth_device_proof_v3(try protoReader.decode(AuthDeviceProofV3.self))
+            case 21: message = .auth_result_v3(try protoReader.decode(AuthResultV3.self))
+            case 22: message = .revoke_device(try protoReader.decode(RevokeDevice.self))
+            case 23: message = .revoke_device_ack(try protoReader.decode(RevokeDeviceAck.self))
             default: try protoReader.readUnknownField(tag: tag)
             }
         }
@@ -146,26 +149,34 @@ extension Envelope : Codable {
             self.message = .breakpoint_decision(breakpoint_decision)
         } else if let breakpoint_decision = try container.decodeIfPresent(BreakpointDecision.self, forKey: "breakpoint_decision") {
             self.message = .breakpoint_decision(breakpoint_decision)
-        } else if let auth_request = try container.decodeIfPresent(AuthRequest.self, forKey: "authRequest") {
-            self.message = .auth_request(auth_request)
-        } else if let auth_request = try container.decodeIfPresent(AuthRequest.self, forKey: "auth_request") {
-            self.message = .auth_request(auth_request)
-        } else if let auth_challenge = try container.decodeIfPresent(AuthChallenge.self, forKey: "authChallenge") {
-            self.message = .auth_challenge(auth_challenge)
-        } else if let auth_challenge = try container.decodeIfPresent(AuthChallenge.self, forKey: "auth_challenge") {
-            self.message = .auth_challenge(auth_challenge)
-        } else if let auth_response = try container.decodeIfPresent(AuthResponse.self, forKey: "authResponse") {
-            self.message = .auth_response(auth_response)
-        } else if let auth_response = try container.decodeIfPresent(AuthResponse.self, forKey: "auth_response") {
-            self.message = .auth_response(auth_response)
-        } else if let auth_result = try container.decodeIfPresent(AuthResult.self, forKey: "authResult") {
-            self.message = .auth_result(auth_result)
-        } else if let auth_result = try container.decodeIfPresent(AuthResult.self, forKey: "auth_result") {
-            self.message = .auth_result(auth_result)
         } else if let sealed_frame = try container.decodeIfPresent(SealedFrame.self, forKey: "sealedFrame") {
             self.message = .sealed_frame(sealed_frame)
         } else if let sealed_frame = try container.decodeIfPresent(SealedFrame.self, forKey: "sealed_frame") {
             self.message = .sealed_frame(sealed_frame)
+        } else if let auth_client_hello_v3 = try container.decodeIfPresent(AuthClientHelloV3.self, forKey: "authClientHelloV3") {
+            self.message = .auth_client_hello_v3(auth_client_hello_v3)
+        } else if let auth_client_hello_v3 = try container.decodeIfPresent(AuthClientHelloV3.self, forKey: "auth_client_hello_v3") {
+            self.message = .auth_client_hello_v3(auth_client_hello_v3)
+        } else if let auth_studio_hello_v3 = try container.decodeIfPresent(AuthStudioHelloV3.self, forKey: "authStudioHelloV3") {
+            self.message = .auth_studio_hello_v3(auth_studio_hello_v3)
+        } else if let auth_studio_hello_v3 = try container.decodeIfPresent(AuthStudioHelloV3.self, forKey: "auth_studio_hello_v3") {
+            self.message = .auth_studio_hello_v3(auth_studio_hello_v3)
+        } else if let auth_device_proof_v3 = try container.decodeIfPresent(AuthDeviceProofV3.self, forKey: "authDeviceProofV3") {
+            self.message = .auth_device_proof_v3(auth_device_proof_v3)
+        } else if let auth_device_proof_v3 = try container.decodeIfPresent(AuthDeviceProofV3.self, forKey: "auth_device_proof_v3") {
+            self.message = .auth_device_proof_v3(auth_device_proof_v3)
+        } else if let auth_result_v3 = try container.decodeIfPresent(AuthResultV3.self, forKey: "authResultV3") {
+            self.message = .auth_result_v3(auth_result_v3)
+        } else if let auth_result_v3 = try container.decodeIfPresent(AuthResultV3.self, forKey: "auth_result_v3") {
+            self.message = .auth_result_v3(auth_result_v3)
+        } else if let revoke_device = try container.decodeIfPresent(RevokeDevice.self, forKey: "revokeDevice") {
+            self.message = .revoke_device(revoke_device)
+        } else if let revoke_device = try container.decodeIfPresent(RevokeDevice.self, forKey: "revoke_device") {
+            self.message = .revoke_device(revoke_device)
+        } else if let revoke_device_ack = try container.decodeIfPresent(RevokeDeviceAck.self, forKey: "revokeDeviceAck") {
+            self.message = .revoke_device_ack(revoke_device_ack)
+        } else if let revoke_device_ack = try container.decodeIfPresent(RevokeDeviceAck.self, forKey: "revoke_device_ack") {
+            self.message = .revoke_device_ack(revoke_device_ack)
         } else {
             self.message = nil
         }
@@ -188,11 +199,13 @@ extension Envelope : Codable {
         case .breakpoint_rules_ack(let breakpoint_rules_ack): try container.encode(breakpoint_rules_ack, forKey: preferCamelCase ? "breakpointRulesAck" : "breakpoint_rules_ack")
         case .breakpoint_hit(let breakpoint_hit): try container.encode(breakpoint_hit, forKey: preferCamelCase ? "breakpointHit" : "breakpoint_hit")
         case .breakpoint_decision(let breakpoint_decision): try container.encode(breakpoint_decision, forKey: preferCamelCase ? "breakpointDecision" : "breakpoint_decision")
-        case .auth_request(let auth_request): try container.encode(auth_request, forKey: preferCamelCase ? "authRequest" : "auth_request")
-        case .auth_challenge(let auth_challenge): try container.encode(auth_challenge, forKey: preferCamelCase ? "authChallenge" : "auth_challenge")
-        case .auth_response(let auth_response): try container.encode(auth_response, forKey: preferCamelCase ? "authResponse" : "auth_response")
-        case .auth_result(let auth_result): try container.encode(auth_result, forKey: preferCamelCase ? "authResult" : "auth_result")
         case .sealed_frame(let sealed_frame): try container.encode(sealed_frame, forKey: preferCamelCase ? "sealedFrame" : "sealed_frame")
+        case .auth_client_hello_v3(let auth_client_hello_v3): try container.encode(auth_client_hello_v3, forKey: preferCamelCase ? "authClientHelloV3" : "auth_client_hello_v3")
+        case .auth_studio_hello_v3(let auth_studio_hello_v3): try container.encode(auth_studio_hello_v3, forKey: preferCamelCase ? "authStudioHelloV3" : "auth_studio_hello_v3")
+        case .auth_device_proof_v3(let auth_device_proof_v3): try container.encode(auth_device_proof_v3, forKey: preferCamelCase ? "authDeviceProofV3" : "auth_device_proof_v3")
+        case .auth_result_v3(let auth_result_v3): try container.encode(auth_result_v3, forKey: preferCamelCase ? "authResultV3" : "auth_result_v3")
+        case .revoke_device(let revoke_device): try container.encode(revoke_device, forKey: preferCamelCase ? "revokeDevice" : "revoke_device")
+        case .revoke_device_ack(let revoke_device_ack): try container.encode(revoke_device_ack, forKey: preferCamelCase ? "revokeDeviceAck" : "revoke_device_ack")
         case Optional.none: break
         }
     }
@@ -219,15 +232,17 @@ extension Envelope {
         case breakpoint_rules_ack(BreakpointRulesAck)
         case breakpoint_hit(BreakpointHit)
         case breakpoint_decision(BreakpointDecision)
-        case auth_request(AuthRequest)
-        case auth_challenge(AuthChallenge)
-        case auth_response(AuthResponse)
-        case auth_result(AuthResult)
         /**
          * Not `sealed`: that is a Kotlin modifier, and Wire escapes it to `sealed_` on that side only,
          * leaving the two generated APIs spelling the same field differently.
          */
         case sealed_frame(SealedFrame)
+        case auth_client_hello_v3(AuthClientHelloV3)
+        case auth_studio_hello_v3(AuthStudioHelloV3)
+        case auth_device_proof_v3(AuthDeviceProofV3)
+        case auth_result_v3(AuthResultV3)
+        case revoke_device(RevokeDevice)
+        case revoke_device_ack(RevokeDeviceAck)
 
         fileprivate func encode(to protoWriter: ProtoWriter) throws {
             switch self {
@@ -243,11 +258,13 @@ extension Envelope {
             case .breakpoint_rules_ack(let breakpoint_rules_ack): try protoWriter.encode(tag: 10, value: breakpoint_rules_ack)
             case .breakpoint_hit(let breakpoint_hit): try protoWriter.encode(tag: 11, value: breakpoint_hit)
             case .breakpoint_decision(let breakpoint_decision): try protoWriter.encode(tag: 12, value: breakpoint_decision)
-            case .auth_request(let auth_request): try protoWriter.encode(tag: 13, value: auth_request)
-            case .auth_challenge(let auth_challenge): try protoWriter.encode(tag: 14, value: auth_challenge)
-            case .auth_response(let auth_response): try protoWriter.encode(tag: 15, value: auth_response)
-            case .auth_result(let auth_result): try protoWriter.encode(tag: 16, value: auth_result)
             case .sealed_frame(let sealed_frame): try protoWriter.encode(tag: 17, value: sealed_frame)
+            case .auth_client_hello_v3(let auth_client_hello_v3): try protoWriter.encode(tag: 18, value: auth_client_hello_v3)
+            case .auth_studio_hello_v3(let auth_studio_hello_v3): try protoWriter.encode(tag: 19, value: auth_studio_hello_v3)
+            case .auth_device_proof_v3(let auth_device_proof_v3): try protoWriter.encode(tag: 20, value: auth_device_proof_v3)
+            case .auth_result_v3(let auth_result_v3): try protoWriter.encode(tag: 21, value: auth_result_v3)
+            case .revoke_device(let revoke_device): try protoWriter.encode(tag: 22, value: revoke_device)
+            case .revoke_device_ack(let revoke_device_ack): try protoWriter.encode(tag: 23, value: revoke_device_ack)
             }
         }
 

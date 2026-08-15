@@ -36,7 +36,7 @@ internal class WailoFrameCodec(
 
     private val key = SecretKeySpec(sessionKey, "AES")
     private var nextSeq = 0L
-    private var lastOpened: Long? = null
+    private var nextOpeningSeq = 0L
 
     data class Sealed(val seq: Long, val ciphertext: ByteArray)
 
@@ -52,15 +52,15 @@ internal class WailoFrameCodec(
 
     @Synchronized
     fun open(seq: Long, ciphertext: ByteArray): ByteArray {
-        val last = lastOpened
-        // Over TCP frames arrive in order, so a counter that does not advance is a replay.
-        if (last != null && seq <= last) throw FrameRejected("frame $seq is not newer than $last")
+        // WebSocket frames over TCP cannot skip or reorder. Accepting a gap would permanently discard
+        // a frame while keeping a session whose two sides no longer agree about its history.
+        if (seq != nextOpeningSeq) throw FrameRejected("expected frame $nextOpeningSeq, received $seq")
         val cipher = Cipher.getInstance(TRANSFORMATION).apply {
             init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(TAG_BITS, nonce(opening, seq)))
         }
         val plaintext = runCatching { cipher.doFinal(ciphertext) }
             .getOrElse { throw FrameRejected("frame $seq failed authentication") }
-        lastOpened = seq
+        nextOpeningSeq++
         return plaintext
     }
 

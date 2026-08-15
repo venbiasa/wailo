@@ -4,6 +4,15 @@ import WailoProtocol
 import UIKit
 #endif
 
+public enum WailoConnectionPhase: Sendable {
+    case stopped
+    case dialling
+    case authenticating
+    case connected
+    case refused
+    case identityMismatch
+}
+
 /// Entry point for the iOS SDK. Call `Wailo.start()` once at launch (e.g. in
 /// `application(_:didFinishLaunchingWithOptions:)`). This registers the interceptor and begins
 /// streaming captured exchanges to the desktop.
@@ -91,8 +100,12 @@ public enum Wailo {
     /// Takes effect without a rebuild — that is the point (ADR-0035). A `host` passed to `start` still
     /// outranks this for the current process.
     @discardableResult
-    public static func setHost(_ host: String?, port: Int? = nil) -> Bool {
-        WailoCoordinator.shared.setHost(host, port: port)
+    public static func setHost(
+        _ host: String?,
+        port: Int? = nil,
+        expectedStudioId: String? = nil
+    ) -> Bool {
+        WailoCoordinator.shared.setHost(host, port: port, expectedStudioId: expectedStudioId)
     }
 
     /// Move the USB listener to another port and persist the choice; `nil` restores [defaultUsbPort].
@@ -120,8 +133,18 @@ public enum Wailo {
     /// desktop; the client retries forever, so "started" says nothing.
     public static var isConnected: Bool { WailoCoordinator.shared.isConnected }
 
-    /// Desktops currently advertising `_wailo._tcp` on the LAN. Empty unless discovery is running.
+    public static var connectionPhase: WailoConnectionPhase {
+        WailoCoordinator.shared.connectionPhase
+    }
+
+    /// Desktops currently advertising `_wailo._tcp` on the LAN while Wailo is running.
     public static var discoveredDesktops: [WailoService] { WailoCoordinator.shared.discoveredDesktops }
+
+    /// Re-resolves currently advertised desktops. Results arrive through
+    /// [discoveryDidChangeNotification] if a route changed.
+    public static func refreshDiscovery() {
+        WailoCoordinator.shared.refreshDiscovery()
+    }
 
     // MARK: - Pairing
 
@@ -165,10 +188,9 @@ public enum Wailo {
         WailoCoordinator.shared.forgetAllPairings()
     }
 
-    /// Set when a Studio answered that it does not recognise this device — usually because it was
-    /// forgotten there. The device stops retrying until [retryPairing] is called, because the refusal
-    /// arrives before anything is authenticated and reconnecting into it forever would be a gift to
-    /// anyone able to forge one.
+    /// Set after Studio signs a refusal — usually because it forgot this device. The device stops
+    /// retrying until [retryPairing] is called; repeating the same authenticated failure cannot repair
+    /// the relationship.
     public static var pairingRefusal: String? { WailoCoordinator.shared.refusalMessage }
 
     public static func retryPairing() {

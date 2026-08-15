@@ -14,6 +14,7 @@ import com.venbiasa.wailo.protocol.HttpExchange
 import com.venbiasa.wailo.protocol.HttpRequest
 import com.venbiasa.wailo.protocol.HttpResponse
 import com.venbiasa.wailo.protocol.RuleAck
+import com.venbiasa.wailo.protocol.RevokeDevice
 import com.venbiasa.wailo.protocol.SealedFrame
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.cio.CIO
@@ -29,6 +30,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
@@ -55,7 +57,7 @@ import java.util.concurrent.TimeUnit
  * It also decides *which* desktop to dial, re-resolved on every attempt (see [WailoEndpointResolver]),
  * and how much it has to prove to talk to it. A loopback peer — `adb reverse`, the emulator — is this
  * machine by construction and starts at `Hello` as it always did; anything else is WiFi and must
- * complete the handshake of ADR-0039/0040 first, after which every frame is sealed. Because the
+ * complete the identity-first handshake of ADR-0060 first, after which every frame is sealed. Because the
  * endpoint and the trust are read fresh per attempt rather than captured at construction, a first
  * contact that succeeds is simply found in the store by the next reconnect — the reconnect failure
  * ADR-0046 records on iOS cannot arise here.
@@ -106,11 +108,17 @@ class WailoClient(
     // coroutine.
     private val pending = ConcurrentHashMap<String, CompletableFuture<BodyResponse?>>()
     private val pendingBreakpoints = ConcurrentHashMap<String, CompletableFuture<BreakpointDecision?>>()
+    private val pendingRevocations = ConcurrentHashMap<String, () -> Unit>()
+
+    @Volatile
+    private var activeStudioId: String? = null
 
     private val lock = Any()
 
     /** Set by [pair], cleared once the handshake it authorises succeeds. Outranks everything else. */
     private var pendingInvite: WailoPairingInvite? = null
+    private val forgetting = mutableSetOf<String>()
+    private var forgettingAll = false
 
     /**
      * Hosts the user has said "yes, that new identity is fine" about, cleared once one is taken. In
@@ -121,6 +129,9 @@ class WailoClient(
 
     /** The address a refusal came from, so the 2-second loop stops walking back into the same "no". */
     private var refusedHost: String? = null
+
+    /** Forget is a stop action; only a later explicit Connect/pair action may resume dialling. */
+    private var connectionSuppressedAfterForget = false
 
     private var discovery: WailoDiscovery? = null
 
@@ -179,6 +190,7 @@ class WailoClient(
         dropCachedRules()
         drainPending()
         drainBreakpoints()
+        drainRevocations()
         scope.cancel()
         client.close()
         // Only the client the status describes may blank it — a replaced sink is stopped *after* its
@@ -198,20 +210,22 @@ class WailoClient(
      * working address has to survive a typo, and above all a value that cannot be dialled must never
      * reach preferences, where every later launch would read it back (ADR-0035).
      */
-    fun setHost(host: String?, port: Int? = null): Boolean {
+    fun setHost(host: String?, port: Int? = null, expectedStudioId: String? = null): Boolean {
         if (port != null && port !in WailoAddress.PORT_RANGE) return false
         val address = if (host == null) null else WailoAddress.parse(host) ?: return false
         synchronized(lock) {
+            connectionSuppressedAfterForget = false
             WailoHostStore.host = address?.host
             // A port typed into the address itself is the more specific answer, and splitting it out
             // here keeps the store holding a bare host — the shape everything downstream expects.
             WailoHostStore.port = address?.port ?: port
+            WailoHostStore.expectedStudioId = if (address == null) null else expectedStudioId
             // A warning about a different address has nothing to say about this one, and leaving it up
             // would attach it to whatever the user typed next.
             if (_status.value.identityChange?.host != address?.host) clearIdentityChangeLocked()
             refusedHost = null
         }
-        _status.update { it.copy(refusal = null) }
+        _status.update { it.copy(refusal = null, phase = WailoConnectionPhase.DIALLING) }
         refreshSettings()
         redial()
         return true
@@ -224,44 +238,115 @@ class WailoClient(
      */
     fun pair(invite: WailoPairingInvite) {
         synchronized(lock) {
+            connectionSuppressedAfterForget = false
             pendingInvite = invite
             refusedHost = null
             // A pinned manual address would otherwise outrank the invite we were just handed.
             WailoHostStore.host = null
+            WailoHostStore.expectedStudioId = null
         }
-        _status.update { it.copy(refusal = null) }
+        _status.update { it.copy(refusal = null, phase = WailoConnectionPhase.DIALLING) }
         refreshSettings()
         redial()
     }
 
     fun forget(studioId: String) {
+        val shouldRevoke = synchronized(lock) {
+            if (forgettingAll) return
+            if (!forgetting.add(studioId)) return
+            connectionSuppressedAfterForget = true
+            activeStudioId == studioId
+        }
+        val finish = { finishForget(studioId) }
+        if (shouldRevoke) revokeThen(finish) else finish()
+    }
+
+    private fun finishForget(studioId: String) {
         synchronized(lock) {
+            if (!forgetting.remove(studioId)) return
+            connectionSuppressedAfterForget = true
             unpinAddressLocked(listOfNotNull(WailoPairingStore.pairing(studioId)))
             WailoPairingStore.forget(studioId)
             if (pendingInvite?.studioId == studioId) pendingInvite = null
             refusedHost = null
+            _status.value.identityChange?.takeIf { it.expected == studioId }?.let { change ->
+                acceptedIdentityChanges -= change.host
+                clearIdentityChangeLocked()
+            }
         }
-        _status.update { it.copy(refusal = null) }
+        activeStudioId = null
+        _status.update {
+            it.copy(
+                connected = false,
+                activeAddress = null,
+                handshakeWaived = false,
+                refusal = null,
+                phase = WailoConnectionPhase.STOPPED,
+            )
+        }
         refreshSettings()
         redial()
     }
 
     fun forgetAllPairings() {
+        val shouldRevoke = synchronized(lock) {
+            if (forgettingAll) return
+            forgettingAll = true
+            connectionSuppressedAfterForget = true
+            activeStudioId != null
+        }
+        val finish = ::finishForgetAll
+        if (shouldRevoke) revokeThen(finish) else finish()
+    }
+
+    private fun finishForgetAll() {
         synchronized(lock) {
+            if (!forgettingAll) return
+            forgettingAll = false
+            forgetting.clear()
+            connectionSuppressedAfterForget = true
             unpinAddressLocked(WailoPairingStore.all())
             WailoPairingStore.forgetAll()
             pendingInvite = null
             refusedHost = null
+            acceptedIdentityChanges.clear()
+            clearIdentityChangeLocked()
         }
-        _status.update { it.copy(refusal = null) }
+        activeStudioId = null
+        _status.update {
+            it.copy(
+                connected = false,
+                activeAddress = null,
+                handshakeWaived = false,
+                refusal = null,
+                phase = WailoConnectionPhase.STOPPED,
+            )
+        }
         refreshSettings()
         redial()
     }
 
+    private fun revokeThen(finish: () -> Unit) {
+        val requestId = UUID.randomUUID().toString()
+        val channel = control
+        if (channel == null) {
+            finish()
+            return
+        }
+        pendingRevocations[requestId] = finish
+        if (channel.trySend(Envelope(revoke_device = RevokeDevice(request_id = requestId))).isFailure) {
+            pendingRevocations.remove(requestId)?.invoke()
+            return
+        }
+        scope.launch {
+            delay(REVOKE_TIMEOUT_MS)
+            pendingRevocations.remove(requestId)?.invoke()
+        }
+    }
+
     /**
      * Clears the "this Studio does not know you" latch so the device tries once more. Deliberately a
-     * human action: the refusal arrives unauthenticated, so retrying on a timer would hand anyone a way
-     * to hold the device in a re-pair loop.
+     * human action because repeated signed refusals still need a different action, usually Forget.
      */
     fun retryAfterRefusal() {
         synchronized(lock) {
@@ -270,7 +355,7 @@ class WailoClient(
                 if (pairing.refused) WailoPairingStore.save(pairing.copy(refused = false))
             }
         }
-        _status.update { it.copy(refusal = null) }
+        _status.update { it.copy(refusal = null, phase = WailoConnectionPhase.DIALLING) }
         refreshSettings()
         redial()
     }
@@ -286,6 +371,7 @@ class WailoClient(
             acceptedIdentityChanges += change.host
             clearIdentityChangeLocked()
         }
+        _status.update { it.copy(phase = WailoConnectionPhase.DIALLING) }
         redial()
     }
 
@@ -297,8 +383,10 @@ class WailoClient(
             clearIdentityChangeLocked()
             // Hand the address back to discovery, which only reconnects to identities already known.
             if (WailoHostStore.host == change.host) WailoHostStore.host = null
+            if (WailoHostStore.host == null) WailoHostStore.expectedStudioId = null
         }
         refreshSettings()
+        _status.update { it.copy(phase = WailoConnectionPhase.STOPPED) }
         redial()
     }
 
@@ -416,18 +504,33 @@ class WailoClient(
             if (attempt == null) {
                 // Nothing worth saying to whoever is on the other end, so do not open the socket at all
                 // — even a `Hello` names the app and the device to it.
-                _status.update { it.copy(connected = false, activeAddress = null, handshakeWaived = false) }
+                _status.update {
+                    it.copy(
+                        connected = false,
+                        activeAddress = null,
+                        handshakeWaived = false,
+                        phase = when {
+                            it.refusal != null -> WailoConnectionPhase.REFUSED
+                            it.identityChange != null -> WailoConnectionPhase.IDENTITY_MISMATCH
+                            else -> WailoConnectionPhase.STOPPED
+                        },
+                    )
+                }
             } else {
                 _status.update {
                     it.copy(
                         activeAddress = attempt.endpoint.toString(),
                         handshakeWaived = attempt.handshake == null,
+                        phase = WailoConnectionPhase.DIALLING,
                     )
                 }
                 try {
                     connect(attempt)
                 } catch (e: CancellationException) {
-                    throw e
+                    // `redial` cancels only the live WebSocket session. That surfaces here as the
+                    // same exception used to stop this client's scope, so distinguish the two or the
+                    // first settings change/Forget would kill the reconnect loop permanently.
+                    if (!scope.isActive) throw e
                 } catch (_: Exception) {
                     // Never established or the link dropped before the block ran: ensure caches/holds
                     // are cleared (idempotent with the finally below) then back off and retry.
@@ -436,7 +539,17 @@ class WailoClient(
                     drainPending()
                     drainBreakpoints()
                 }
-                _status.update { it.copy(connected = false) }
+                _status.update {
+                    it.copy(
+                        connected = false,
+                        phase = when {
+                            it.refusal != null -> WailoConnectionPhase.REFUSED
+                            it.identityChange != null -> WailoConnectionPhase.IDENTITY_MISMATCH
+                            else -> WailoConnectionPhase.DIALLING
+                        },
+                    )
+                }
+                activeStudioId = null
             }
             if (scope.isActive) withTimeoutOrNull(RECONNECT_DELAY_MS) { wake.receive() }
         }
@@ -451,7 +564,10 @@ class WailoClient(
      */
     private fun nextAttempt(): Attempt? {
         val discovered = _status.value.discovered
-        val invite = synchronized(lock) { pendingInvite }
+        val invite = synchronized(lock) {
+            if (connectionSuppressedAfterForget) return null
+            pendingInvite
+        }
         val endpoint = if (invite != null) {
             WailoEndpoint(invite.host, invite.port, invite.studioId)
         } else {
@@ -460,7 +576,7 @@ class WailoClient(
 
         // Loopback proves itself: `adb reverse` and the emulator both land here, and the kernel already
         // guarantees the peer is this machine. Resolved the same way the engine resolves it, so the two
-        // ends never disagree about whether the session opens with `AuthRequest` or `Hello`.
+        // ends never disagree about whether the session opens with `AuthClientHelloV3` or `Hello`.
         if (!forcesHandshakeForTesting && endpoint.isLoopback()) return Attempt(endpoint, null)
 
         synchronized(lock) {
@@ -470,18 +586,24 @@ class WailoClient(
                 return null
             }
             val accepted = endpoint.host in acceptedIdentityChanges
-            val pairing = WailoEndpointResolver.pairingFor(endpoint.host, endpoint.studioId, discovered)
-                ?.takeIf { !it.refused && !accepted }
+            val expectedPairing = endpoint.studioId?.let(WailoPairingStore::pairing)
+            if (!accepted && expectedPairing?.refused == true) return null
+            val pairing = expectedPairing?.takeIf { !accepted }
             val trust = WailoHandshake.trustFor(
                 pairing = pairing,
                 invite = invite?.takeIf { it.host == endpoint.host },
-                deviceId = WailoHostStore.deviceId,
+                candidates = if (isChosen(endpoint) && pairing == null) {
+                    WailoPairingStore.all().filter { !it.refused }
+                } else {
+                    emptyList()
+                },
+                expectedStudioId = endpoint.studioId?.takeUnless { accepted },
             )
             // An address nobody chose, that nothing is known about, is not worth a word. Discovery is
             // already filtered to trusted desktops, so this only ever catches a programming error —
             // but the cost of getting it wrong is naming the app to a stranger.
-            if (trust == WailoHandshake.Trust.FirstContact && !isChosen(endpoint)) return null
-            return Attempt(endpoint, WailoHandshake(trust, WailoHostStore.deviceId, endpoint.host))
+            if (trust is WailoHandshake.Trust.FirstContact && !isChosen(endpoint)) return null
+            return Attempt(endpoint, WailoHandshake(trust, endpoint.host))
         }
     }
 
@@ -511,7 +633,7 @@ class WailoClient(
                 // Send Hello first, then start draining, so Hello is always the opening frame after
                 // whatever the handshake needed.
                 if (!trySendFrame(session, Envelope(hello = hello), codec)) return@webSocket
-                _status.update { it.copy(connected = true) }
+                _status.update { it.copy(connected = true, phase = WailoConnectionPhase.CONNECTED) }
                 val exchangeDrainer = launch {
                     for (exchange in exchanges) {
                         if (!trySendFrame(session, Envelope(exchange = exchange), codec)) break
@@ -549,6 +671,7 @@ class WailoClient(
                 dropCachedRules()
                 drainPending()
                 drainBreakpoints()
+                drainRevocations()
             }
         }
     }
@@ -565,6 +688,7 @@ class WailoClient(
         handshake: WailoHandshake,
         endpoint: WailoEndpoint,
     ): WailoFrameCodec? {
+        _status.update { it.copy(phase = WailoConnectionPhase.AUTHENTICATING) }
         // Auth frames bypass sealing (there is no session key yet) and must not flip `connected`.
         session.send(Frame.Binary(true, handshake.begin().encode()))
         for (frame in session.incoming) {
@@ -573,7 +697,7 @@ class WailoClient(
             when (val step = handshake.handle(envelope)) {
                 is WailoHandshake.Step.Send -> session.send(Frame.Binary(true, step.envelope.encode()))
                 is WailoHandshake.Step.Done -> {
-                    established(step.established.pairing)
+                    if (!established(step.established.pairing)) return null
                     return WailoFrameCodec(
                         sessionKey = step.established.sessionKey,
                         sealing = WailoFrameCodec.Direction.DEVICE_TO_STUDIO,
@@ -598,8 +722,11 @@ class WailoClient(
         return null
     }
 
-    private fun established(pairing: WailoPairing) {
+    private fun established(pairing: WailoPairing): Boolean {
         synchronized(lock) {
+            // Forget may race the last result frame. The latch check and persistence must share this
+            // lock with Forget or a completed handshake could resurrect the relationship and send Hello.
+            if (connectionSuppressedAfterForget) return false
             // A previous entry for this address is stale the moment a different identity is accepted
             // there; leaving it would keep resolving the host back to a Studio that has moved on.
             if (acceptedIdentityChanges.remove(pairing.lastHost)) {
@@ -610,6 +737,10 @@ class WailoClient(
                 }
             }
             WailoPairingStore.save(pairing)
+            if (WailoHostStore.host == pairing.lastHost) {
+                WailoHostStore.expectedStudioId = pairing.studioId
+            }
+            activeStudioId = pairing.studioId
             if (pendingInvite?.studioId == pairing.studioId) pendingInvite = null
             refusedHost = null
         }
@@ -620,12 +751,12 @@ class WailoClient(
             )
         }
         refreshSettings()
+        return true
     }
 
     /**
-     * Studio will not take this device. The key stays: the refusal is unauthenticated, so deleting on
-     * it would be a lever anyone could pull to force a re-pair. Only the retrying stops, until a human
-     * clears it in the panel.
+     * Studio will not take this device. The key stays until the human chooses Forget; Retry keeps the
+     * relationship and makes one deliberate new attempt.
      */
     private fun refused(reason: String, endpoint: WailoEndpoint) {
         synchronized(lock) {
@@ -634,12 +765,17 @@ class WailoClient(
                 ?.let { WailoPairingStore.save(it.copy(refused = true)) }
             pendingInvite = null
         }
-        _status.update { it.copy(refusal = reason) }
+        _status.update { it.copy(refusal = reason, phase = WailoConnectionPhase.REFUSED) }
         refreshSettings()
     }
 
     private fun identityChanged(host: String, expected: String, actual: String) {
-        _status.update { it.copy(identityChange = WailoIdentityChange(host, expected, actual)) }
+        _status.update {
+            it.copy(
+                identityChange = WailoIdentityChange(host, expected, actual),
+                phase = WailoConnectionPhase.IDENTITY_MISMATCH,
+            )
+        }
     }
 
     // MARK: - discovery
@@ -725,6 +861,9 @@ class WailoClient(
         envelope.breakpoint_decision?.let { decision ->
             pendingBreakpoints.remove(decision.correlation_id)?.complete(decision)
         }
+        envelope.revoke_device_ack?.let { ack ->
+            pendingRevocations.remove(ack.request_id)?.invoke()
+        }
     }
 
     // MARK: - housekeeping
@@ -756,11 +895,15 @@ class WailoClient(
      *
      * A pinned address outranks everything else, and a first contact at an address the user named is
      * taken at its word (ADR-0040) — so dropping only the key would re-trust the same desktop on the
-     * next dial two seconds later, and Forget would read as a button that does nothing.
+     * next dial two seconds later. The separate suppression latch keeps Forget stopped until another
+     * explicit Connect (ADR-0060).
      */
     private fun unpinAddressLocked(pairings: List<WailoPairing>) {
         val pinned = WailoHostStore.host ?: return
-        if (pairings.any { it.lastHost == pinned }) WailoHostStore.host = null
+        if (pairings.any { it.lastHost == pinned }) {
+            WailoHostStore.host = null
+            WailoHostStore.expectedStudioId = null
+        }
     }
 
     /**
@@ -785,11 +928,16 @@ class WailoClient(
         for (id in pendingBreakpoints.keys.toList()) pendingBreakpoints.remove(id)?.complete(null)
     }
 
+    private fun drainRevocations() {
+        for (id in pendingRevocations.keys.toList()) pendingRevocations.remove(id)?.invoke()
+    }
+
     companion object {
         const val DEFAULT_PORT: Int = 8899
         private const val DEFAULT_BUFFER: Int = 512
         private const val DEFAULT_BODY_TIMEOUT_MS: Long = 10_000L
         private const val RECONNECT_DELAY_MS: Long = 2000L
+        private const val REVOKE_TIMEOUT_MS: Long = 350L
         private const val PING_INTERVAL_MS: Long = 20_000L
         private const val PATH: String = "/"
 

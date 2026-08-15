@@ -105,7 +105,7 @@ struct WailoSettingsView: View {
             VStack(alignment: .leading, spacing: WailoTokens.Spacing.x3) {
                 pairingForm
 
-                if let message = model.pairingError {
+                if let message = model.pairingError ?? model.refusal {
                     Text(message)
                         .font(WailoTokens.Typography.bodySmall)
                         .foregroundColor(WailoTokens.error)
@@ -147,9 +147,18 @@ struct WailoSettingsView: View {
             .frame(width: 96)
         }
 
-        // A code says nothing about who is offering it, so the desktop has to be named. Only shown
-        // when the choice is real — with one candidate it is already made.
-        if model.pairableDesktops.count > 1 {
+        // A code says nothing about who is offering it, so the desktop has to advertise an identity.
+        // Keep the target visible even when there is only one; otherwise a missing discovery result
+        // looks like a broken button with no recovery path.
+        if model.pairableDesktops.isEmpty {
+            Text("No desktop on this network is advertising a fingerprint yet, so there is nothing to aim a code at. Scanning the QR works without one.")
+                .font(WailoTokens.Typography.bodySmall)
+                .foregroundColor(WailoTokens.onSurfaceDisabled)
+                .fixedSize(horizontal: false, vertical: true)
+        } else {
+            Text("Showing on")
+                .font(WailoTokens.Typography.labelSmall)
+                .foregroundColor(WailoTokens.onSurfaceVariant)
             ForEach(model.pairableDesktops) { desktop in
                 CodeTargetRow(
                     name: desktop.name,

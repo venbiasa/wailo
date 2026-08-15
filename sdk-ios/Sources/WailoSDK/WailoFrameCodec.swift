@@ -2,7 +2,7 @@ import CryptoKit
 import Foundation
 
 enum WailoFrameError: Error {
-    /// A `seq` that did not advance. Over TCP frames arrive in order, so this is a replay or an
+    /// A `seq` that was not exactly next. Over TCP frames arrive in order, so this is a replay or an
     /// injection rather than a network hiccup, and the session is not worth continuing.
     case outOfOrder
     case malformed
@@ -34,7 +34,7 @@ final class WailoFrameCodec {
     private let sealing: Direction
     private let opening: Direction
     private var nextSeq: UInt64 = 0
-    private var lastOpened: UInt64?
+    private var nextOpeningSeq: UInt64 = 0
 
     init(sessionKey: SymmetricKey, sealing: Direction, opening: Direction) {
         self.key = sessionKey
@@ -57,7 +57,7 @@ final class WailoFrameCodec {
     }
 
     func open(seq: UInt64, ciphertext: Data) throws -> Data {
-        if let lastOpened, seq <= lastOpened { throw WailoFrameError.outOfOrder }
+        guard seq == nextOpeningSeq else { throw WailoFrameError.outOfOrder }
         guard ciphertext.count > Self.tagLength else { throw WailoFrameError.malformed }
 
         let split = ciphertext.index(ciphertext.endIndex, offsetBy: -Self.tagLength)
@@ -67,7 +67,7 @@ final class WailoFrameCodec {
             tag: ciphertext[split...]
         )
         let plaintext = try AES.GCM.open(box, using: key)
-        lastOpened = seq
+        nextOpeningSeq += 1
         return plaintext
     }
 

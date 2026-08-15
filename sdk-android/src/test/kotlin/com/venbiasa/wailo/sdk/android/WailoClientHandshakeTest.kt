@@ -3,6 +3,7 @@ package com.venbiasa.wailo.sdk.android
 import com.venbiasa.wailo.protocol.Envelope
 import com.venbiasa.wailo.protocol.Hello
 import com.venbiasa.wailo.protocol.MapLocalRule
+import com.venbiasa.wailo.protocol.RevokeDeviceAck
 import com.venbiasa.wailo.protocol.RuleSet
 import com.venbiasa.wailo.protocol.SealedFrame
 import io.ktor.server.application.install
@@ -19,6 +20,7 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import okio.ByteString.Companion.toByteString
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -87,7 +89,7 @@ class WailoClientHandshakeTest {
         try {
             val hello = withTimeout(TIMEOUT_MS) { hellos.receive() }
             assertEquals("com.test", hello.app_id)
-            assertEquals(DEVICE_ID_LENGTH, studio.lastDeviceId?.length ?: 0)
+            assertEquals(DEVICE_ALIAS_LENGTH, studio.lastDeviceAlias?.length ?: 0)
             assertTrue(studio.lastFirstContact)
 
             assertEquals(7L, withTimeout(TIMEOUT_MS) { acks.receive() })
@@ -95,6 +97,7 @@ class WailoClientHandshakeTest {
 
             val status = client.status.value
             assertTrue(status.connected)
+            assertEquals(WailoConnectionPhase.CONNECTED, status.phase)
             assertEquals("localhost:$port", status.activeAddress)
             assertEquals(1, status.pairings.size)
             assertTrue(status.pairings.single().trustedOnFirstUse)
@@ -130,7 +133,7 @@ class WailoClientHandshakeTest {
                 withTimeout(RECONNECT_TIMEOUT_MS) { firstContacts.receive() },
             )
             assertEquals(2L, studio.lastSessionCounter)
-            assertFalse(client.status.value.pairings.single().trustedOnFirstUse)
+            assertTrue(client.status.value.pairings.single().trustedOnFirstUse)
         } finally {
             client.stop()
             server.stop(0, 0)
@@ -159,6 +162,7 @@ class WailoClientHandshakeTest {
             delay(RECONNECT_TIMEOUT_MS)
             assertEquals(seen, connections.get())
             assertFalse(client.status.value.connected)
+            assertEquals(WailoConnectionPhase.REFUSED, client.status.value.phase)
 
             // Clearing it is a human action, and the device tries exactly once more.
             client.retryAfterRefusal()
@@ -187,6 +191,95 @@ class WailoClientHandshakeTest {
         }
     }
 
+    @Test
+    fun aFilledTargetCarriesExpectedIdentityAndManualEditClearsIt() = runBlocking {
+        val client = WailoClient(hello = hello(), port = 18983)
+        try {
+            assertTrue(client.setHost("10.0.0.9", expectedStudioId = "aaaa"))
+            assertEquals("aaaa", WailoHostStore.expectedStudioId)
+
+            assertTrue(client.setHost("10.0.0.10"))
+            assertNull(WailoHostStore.expectedStudioId)
+        } finally {
+            client.stop()
+        }
+    }
+
+    @Test
+    fun anOpenSocketNeverReportsConnectedBeforeAuthentication() = runBlocking {
+        val port = 18986
+        val server = embeddedServer(CIO, port = port) {
+            install(WebSockets)
+            routing {
+                webSocket("/") {
+                    for (frame in incoming) {
+                        if (frame is Frame.Binary) Unit
+                    }
+                }
+            }
+        }.also { it.start(wait = false) }
+        val client = WailoClient(hello = hello(), port = port)
+        assertTrue(client.setHost("localhost"))
+        client.start()
+        try {
+            withTimeout(TIMEOUT_MS) {
+                while (client.status.value.phase != WailoConnectionPhase.AUTHENTICATING) delay(25)
+            }
+            assertFalse(client.status.value.connected)
+        } finally {
+            client.stop()
+            server.stop(0, 0)
+        }
+    }
+
+    @Test
+    fun identityMismatchStopsWithoutHelloAndForgetClearsIt() = runBlocking {
+        val port = 18987
+        val impostor = FakeStudio()
+        val connections = AtomicInteger()
+        val hellos = Channel<Hello>(Channel.UNLIMITED)
+        WailoPairingStore.save(
+            WailoPairing(
+                studioId = studio.studioId,
+                deviceAlias = "00112233445566778899aabbccddeeff",
+                deviceKey = ByteArray(32) { 1 },
+                publicKey = studio.publicKey,
+                sessionCounter = 1,
+                refused = false,
+                lastHost = "localhost",
+                trustedOnFirstUse = true,
+            ),
+        )
+        val server = studioServer(
+            port = port,
+            fakeStudio = impostor,
+            onOpen = { connections.incrementAndGet() },
+        ) { _, _, envelope -> envelope.hello?.let(hellos::trySend) }
+        val client = WailoClient(hello = hello(), port = port)
+        assertTrue(client.setHost("localhost", expectedStudioId = studio.studioId))
+        client.start()
+        try {
+            withTimeout(TIMEOUT_MS) {
+                while (client.status.value.identityChange == null) delay(25)
+            }
+            assertEquals(WailoConnectionPhase.IDENTITY_MISMATCH, client.status.value.phase)
+            assertFalse(client.status.value.connected)
+            assertNull(hellos.tryReceive().getOrNull())
+            val seen = connections.get()
+            delay(RECONNECT_TIMEOUT_MS)
+            assertEquals(seen, connections.get())
+
+            client.forget(studio.studioId)
+            withTimeout(TIMEOUT_MS) {
+                while (client.status.value.identityChange != null || client.status.value.pairings.isNotEmpty()) delay(25)
+            }
+            assertEquals(WailoConnectionPhase.STOPPED, client.status.value.phase)
+        } finally {
+            client.stop()
+            server.stop(0, 0)
+        }
+    }
+
     /**
      * Forget has to let go of the address too. A pinned address outranks discovery and a first contact
      * at an address the user named is taken at its word, so dropping only the key would re-trust the
@@ -200,6 +293,7 @@ class WailoClientHandshakeTest {
             WailoPairingStore.save(
                 WailoPairing(
                     studioId = "aaaa",
+                    deviceAlias = "00112233445566778899aabbccddeeff",
                     deviceKey = ByteArray(32) { 1 },
                     publicKey = ByteArray(65) { 2 },
                     sessionCounter = 1,
@@ -216,6 +310,47 @@ class WailoClientHandshakeTest {
         }
     }
 
+    @Test
+    fun onlineForgetRevokesThenReconnectsWithAFreshAlias() = runBlocking {
+        val port = 18985
+        val hellos = Channel<Unit>(Channel.UNLIMITED)
+        val server = studioServer(port) { session, codec, envelope ->
+            envelope.hello?.let { hellos.trySend(Unit) }
+            envelope.revoke_device?.let { revoke ->
+                studio.lastDeviceAlias?.let(studio.known::remove)
+                session.sendSealed(
+                    codec,
+                    Envelope(revoke_device_ack = RevokeDeviceAck(request_id = revoke.request_id)),
+                )
+            }
+        }
+        val client = WailoClient(hello = hello(), port = port)
+        assertTrue(client.setHost("localhost"))
+        client.start()
+        try {
+            withTimeout(TIMEOUT_MS) { hellos.receive() }
+            val first = client.status.value.pairings.single()
+            assertTrue(studio.known.containsKey(first.deviceAlias))
+
+            client.forget(first.studioId)
+            val forgotten = withTimeoutOrNull(TIMEOUT_MS) {
+                while (client.status.value.pairings.isNotEmpty() || client.status.value.connected) delay(25)
+            }
+            assertTrue("Forget stalled at ${client.status.value}", forgotten != null)
+            assertFalse(studio.known.containsKey(first.deviceAlias))
+            delay(2_250)
+            assertNull("Forget must not reconnect until explicit Connect", hellos.tryReceive().getOrNull())
+
+            assertTrue(client.setHost("localhost"))
+            withTimeout(TIMEOUT_MS) { hellos.receive() }
+            val replacement = client.status.value.pairings.single()
+            assertFalse(first.deviceAlias == replacement.deviceAlias)
+        } finally {
+            client.stop()
+            server.stop(0, 0)
+        }
+    }
+
     // MARK: - fixture
 
     private fun hello() = Hello(device_name = "test", app_id = "com.test", platform = "android")
@@ -226,6 +361,7 @@ class WailoClientHandshakeTest {
      */
     private fun studioServer(
         port: Int,
+        fakeStudio: FakeStudio = studio,
         onOpen: () -> Unit = {},
         onEnvelope: suspend (DefaultWebSocketServerSession, WailoFrameCodec, Envelope) -> Unit,
     ) = embeddedServer(CIO, port = port) {
@@ -233,7 +369,7 @@ class WailoClientHandshakeTest {
         routing {
             webSocket("/") {
                 onOpen()
-                val handshake = FakeStudioSession(studio)
+                val handshake = FakeStudioSession(fakeStudio)
                 var codec: WailoFrameCodec? = null
                 for (frame in incoming) {
                     if (frame !is Frame.Binary) continue
@@ -278,6 +414,6 @@ class WailoClientHandshakeTest {
         const val RECONNECT_TIMEOUT_MS = 8_000L
 
         /** [WailoHostStore] mints 16 random bytes as hex. */
-        const val DEVICE_ID_LENGTH = 32
+        const val DEVICE_ALIAS_LENGTH = 32
     }
 }

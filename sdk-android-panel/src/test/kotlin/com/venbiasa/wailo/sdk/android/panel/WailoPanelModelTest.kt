@@ -1,5 +1,6 @@
 package com.venbiasa.wailo.sdk.android.panel
 
+import com.venbiasa.wailo.sdk.android.WailoConnectionPhase
 import com.venbiasa.wailo.sdk.android.WailoDesktop
 import com.venbiasa.wailo.sdk.android.WailoStatus
 import org.junit.Assert.assertEquals
@@ -23,7 +24,12 @@ class WailoPanelModelTest {
     @Test
     fun `a waived handshake is named as the cable, and never reported as paired`() {
         val model = model(
-            WailoStatus(connected = true, activeAddress = "localhost:9099", handshakeWaived = true),
+            WailoStatus(
+                connected = true,
+                activeAddress = "localhost:9099",
+                handshakeWaived = true,
+                phase = WailoConnectionPhase.CONNECTED,
+            ),
         )
 
         assertEquals("Connected", model.statusTitle)
@@ -49,6 +55,22 @@ class WailoPanelModelTest {
         assertEquals("Not started", model.statusTitle)
         assertNull(model.transportLabel)
         assertTrue(model.statusDetail.contains("Wailo.webSocketSink"))
+    }
+
+    @Test
+    fun `a stopped client keeps the authenticated refusal or identity mismatch explanation`() {
+        val mismatch = model(WailoStatus(phase = WailoConnectionPhase.IDENTITY_MISMATCH))
+        assertEquals("Identity mismatch", mismatch.statusTitle)
+        assertTrue(mismatch.statusDetail.contains("different Studio"))
+
+        val refusal = model(
+            WailoStatus(
+                phase = WailoConnectionPhase.REFUSED,
+                refusal = "Only paired devices may connect.",
+            ),
+        )
+        assertEquals("Refused", refusal.statusTitle)
+        assertEquals("Only paired devices may connect.", refusal.statusDetail)
     }
 
     @Test

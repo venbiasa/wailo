@@ -11,8 +11,8 @@ import okio.ByteString.Companion.toByteString
  *
  * The record is `|`-separated with every non-numeric field Base64-encoded, the same primitive-KV idiom
  * the studio's layout codecs use (ADR-0019/0026) — a line whose shape does not parse is dropped rather
- * than failing the load, which is what makes adding a field backward-compatible. iOS took the same
- * "drop rather than crash" stance when its record gained `trustedOnFirstUse` (ADR-0040).
+ * than failing the load. V3 deliberately changed that shape so records containing the old global
+ * device id cannot be mistaken for Studio-scoped aliases (ADR-0060).
  */
 internal object WailoPairingStore {
 
@@ -24,6 +24,9 @@ internal object WailoPairingStore {
     fun save(pairing: WailoPairing) {
         storage.put(pairing.studioId, encode(pairing))
     }
+
+    fun newDeviceAlias(): String =
+        WailoCrypto.randomNonce().copyOf(16).toByteString().hex()
 
     fun forget(studioId: String) {
         storage.put(studioId, null)
@@ -38,6 +41,7 @@ internal object WailoPairingStore {
 
     private fun encode(pairing: WailoPairing): String = listOf(
         pairing.studioId,
+        pairing.deviceAlias,
         pairing.deviceKey.toByteString().base64(),
         pairing.publicKey.toByteString().base64(),
         pairing.sessionCounter.toString(),
@@ -50,18 +54,25 @@ internal object WailoPairingStore {
         val parts = line.split(SEPARATOR)
         if (parts.size != FIELDS) return null
         return runCatching {
+            require(
+                parts[1].length == DEVICE_ALIAS_LENGTH &&
+                    parts[1].all { it in '0'..'9' || it in 'a'..'f' },
+            )
             WailoPairing(
                 studioId = parts[0],
-                deviceKey = parts[1].decodeBase64()!!.toByteArray(),
-                publicKey = parts[2].decodeBase64()!!.toByteArray(),
-                sessionCounter = parts[3].toLong(),
-                refused = parts[4] == "1",
-                lastHost = String(parts[5].decodeBase64()!!.toByteArray()),
-                trustedOnFirstUse = parts[6] == "1",
+                deviceAlias = parts[1],
+                deviceKey = parts[2].decodeBase64()!!.toByteArray(),
+                publicKey = parts[3].decodeBase64()!!.toByteArray(),
+                sessionCounter = parts[4].toLong(),
+                refused = parts[5] == "1",
+                lastHost = String(parts[6].decodeBase64()!!.toByteArray()),
+                trustedOnFirstUse = parts[7] == "1",
             )
         }.getOrNull()
     }
 
     private const val SEPARATOR = "|"
-    private const val FIELDS = 7
+    // The extra alias is also the clean v3 migration: seven-field v2 records no longer decode.
+    private const val FIELDS = 8
+    private const val DEVICE_ALIAS_LENGTH = 32
 }

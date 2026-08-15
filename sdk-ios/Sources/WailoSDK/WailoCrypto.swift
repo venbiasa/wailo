@@ -2,8 +2,9 @@ import CommonCrypto
 import CryptoKit
 import Foundation
 
-/// The primitives behind the WiFi handshake (ADR-0039), and the one place the wire's byte layouts are
-/// decided. `sdk-android` and `engine` reimplement all of this against `java.security`, so every
+/// The primitives behind the identity-first WiFi handshake (ADR-0060), and the one place the wire's
+/// byte layouts are decided. `sdk-android` and `engine` reimplement all of this against
+/// `java.security`, so every
 /// constant, label and concatenation order here is a contract: change one and paired devices stop
 /// authenticating with no useful error. The cross-platform vectors in the test suites exist to catch
 /// exactly that drift.
@@ -33,7 +34,7 @@ enum WailoCrypto {
     ///
     /// Deriving it from the key rather than picking a random string is what makes the Bonjour TXT
     /// record self-authenticating. An impostor can advertise someone else's `sid`, but it would need a
-    /// key that hashes to it in order to sign the challenge — so the device dials it, fails to verify,
+    /// key that hashes to it in order to sign StudioHello — so the device dials it, fails to verify,
     /// and hangs up, instead of racing the real Studio for the device's attention.
     ///
     /// The key is hashed in its X9.63 form (the 65-byte uncompressed point), not X.509 SPKI DER, so
@@ -61,112 +62,44 @@ enum WailoCrypto {
 
     // MARK: - key schedule
 
-    /// The long-term per-device secret for a QR or typed-code pairing. Never transmitted: the invite
-    /// carries `pairingSecret` out of band and both ends derive the same `K` from it, which is why
-    /// pairing needs no extra round trip — the first successful handshake *is* the pairing.
-    static func deviceKey(pairingSecret: Data, studioId: String, deviceId: String) -> SymmetricKey {
+    static func deviceKeyV3(pairingSecret: Data, studioId: String, deviceAlias: String) -> SymmetricKey {
         hkdf(
             keyMaterial: pairingSecret,
             salt: Data(studioId.utf8),
-            info: label("wailo/device-key/v1", Data(deviceId.utf8))
+            info: label("wailo/device-key/v3", Data(deviceAlias.utf8))
         )
     }
 
-    /// The same long-term secret, for a lenient first contact that had no invite (ADR-0040). Both ends
-    /// derive it from the agreed secret of that one connection and keep it, so every later connection
-    /// takes the ordinary paired path. Nothing is transmitted here either.
-    static func tofuDeviceKey(shared: Data, studioId: String, deviceId: String) -> SymmetricKey {
+    static func tofuDeviceKeyV3(shared: Data, studioId: String, deviceAlias: String) -> SymmetricKey {
         hkdf(
             keyMaterial: shared,
             salt: Data(studioId.utf8),
-            info: label("wailo/tofu-device-key/v1", Data(deviceId.utf8))
+            info: label("wailo/tofu-device-key/v3", Data(deviceAlias.utf8))
         )
     }
 
-    /// What every per-connection key descends from: the agreed secret, then the long-term key when
-    /// there is one.
-    ///
-    /// Both, rather than either. The agreed secret alone would let anyone who is merely *present* at a
-    /// handshake derive the session — there would be nothing they had to know. `K` alone would mean a
-    /// key that leaks in a year opens every session recorded before it. Concatenating them needs both.
-    private static func material(shared: Data, deviceKey: SymmetricKey?) -> Data {
-        shared + (deviceKey?.bytes ?? Data())
-    }
-
-    /// Separated from the sealing key so no key is ever used for two purposes.
-    static func authKey(shared: Data, deviceKey: SymmetricKey?) -> SymmetricKey {
+    static func authKeyV3(shared: Data, deviceKey: SymmetricKey) -> SymmetricKey {
         hkdf(
-            keyMaterial: material(shared: shared, deviceKey: deviceKey),
+            keyMaterial: shared + deviceKey.bytes,
             salt: Data(),
-            info: Data("wailo/auth/v2".utf8)
+            info: Data("wailo/auth/v3".utf8)
         )
     }
 
-    /// Fresh for every connection, because the ephemeral keys and both nonces are. That is what lets
-    /// `SealedFrame.seq` restart at zero each time instead of being persisted across the SDK's
-    /// 2-second reconnect loop — a counter that survives reconnects is how GCM nonce reuse happens in
-    /// practice.
-    static func sessionKey(shared: Data, deviceKey: SymmetricKey?, nonceD: Data, nonceS: Data) -> SymmetricKey {
+    static func sessionKeyV3(
+        shared: Data,
+        deviceKey: SymmetricKey,
+        nonceD: Data,
+        nonceS: Data
+    ) -> SymmetricKey {
         hkdf(
-            keyMaterial: material(shared: shared, deviceKey: deviceKey),
+            keyMaterial: shared + deviceKey.bytes,
             salt: nonceD + nonceS,
-            info: Data("wailo/session/v2".utf8)
+            info: Data("wailo/session/v3".utf8)
         )
     }
 
     // MARK: - proofs
-
-    /// What both sides sign or MAC over. The role label is what stops a reflection attack — without it
-    /// an impostor could bounce the device's own challenge back as its answer — and including `sid`
-    /// binds the proof to one Studio identity, so it cannot be replayed at a different one.
-    ///
-    /// The ephemeral keys are in here because otherwise they are the one part of the handshake nobody
-    /// vouches for: anyone in the path could substitute their own into a replayed challenge and agree
-    /// a separate key with each side, which is a man in the middle wearing the real Studio's signature.
-    static func transcript(
-        role: String,
-        studioId: String,
-        nonceD: Data,
-        nonceS: Data,
-        ephemeralD: Data,
-        ephemeralS: Data
-    ) -> Data {
-        label(role, Data(studioId.utf8)) + nonceD + nonceS + ephemeralD + ephemeralS
-    }
-
-    static func deviceProof(
-        authKey: SymmetricKey,
-        studioId: String,
-        nonceD: Data,
-        nonceS: Data,
-        ephemeralD: Data,
-        ephemeralS: Data
-    ) -> Data {
-        let transcript = transcript(
-            role: "wailo/device", studioId: studioId,
-            nonceD: nonceD, nonceS: nonceS, ephemeralD: ephemeralD, ephemeralS: ephemeralS
-        )
-        return Data(HMAC<SHA256>.authenticationCode(for: transcript, using: authKey))
-    }
-
-    /// Studio's second proof, and the only one that means anything during a first pairing over a typed
-    /// code: at that moment the device has no trusted copy of the public key, so a signature would just
-    /// be an impostor signing with its own. This is keyed by the pairing secret, which only the Studio
-    /// that displayed the code knows.
-    static func studioMac(
-        authKey: SymmetricKey,
-        studioId: String,
-        nonceD: Data,
-        nonceS: Data,
-        ephemeralD: Data,
-        ephemeralS: Data
-    ) -> Data {
-        let transcript = transcript(
-            role: "wailo/studio-mac", studioId: studioId,
-            nonceD: nonceD, nonceS: nonceS, ephemeralD: ephemeralD, ephemeralS: ephemeralS
-        )
-        return Data(HMAC<SHA256>.authenticationCode(for: transcript, using: authKey))
-    }
 
     /// Stretches a typed pairing code into the same 32 bytes a QR would have carried directly.
     ///
@@ -187,27 +120,118 @@ enum WailoCrypto {
         return difference == 0
     }
 
-    /// Studio's half. Returns false for a malformed key or signature as readily as for a wrong one:
-    /// every failure here means "this is not the Studio I paired with", and the device treats them
-    /// identically by hanging up.
-    static func isValidStudioSignature(
+    static func deviceProofV3(
+        authKey: SymmetricKey,
+        studioId: String,
+        nonceD: Data,
+        nonceS: Data,
+        ephemeralD: Data,
+        ephemeralS: Data,
+        pairingRequired: Bool,
+        deviceAlias: String,
+        mode: Int32,
+        sessionCounter: UInt64
+    ) -> Data {
+        let transcript = authTranscriptV3(
+            role: "wailo/device-proof/v3",
+            studioId: studioId,
+            nonceD: nonceD,
+            nonceS: nonceS,
+            ephemeralD: ephemeralD,
+            ephemeralS: ephemeralS,
+            pairingRequired: pairingRequired,
+            deviceAlias: deviceAlias,
+            mode: mode,
+            sessionCounter: sessionCounter
+        )
+        return Data(HMAC<SHA256>.authenticationCode(for: transcript, using: authKey))
+    }
+
+    static func studioProofV3(
+        authKey: SymmetricKey,
+        studioId: String,
+        nonceD: Data,
+        nonceS: Data,
+        ephemeralD: Data,
+        ephemeralS: Data,
+        pairingRequired: Bool,
+        deviceAlias: String,
+        mode: Int32,
+        sessionCounter: UInt64,
+        resultCode: Int32
+    ) -> Data {
+        let transcript = resultTranscriptV3(
+            role: "wailo/studio-proof/v3",
+            studioId: studioId,
+            nonceD: nonceD,
+            nonceS: nonceS,
+            ephemeralD: ephemeralD,
+            ephemeralS: ephemeralS,
+            pairingRequired: pairingRequired,
+            deviceAlias: deviceAlias,
+            mode: mode,
+            sessionCounter: sessionCounter,
+            resultCode: resultCode
+        )
+        return Data(HMAC<SHA256>.authenticationCode(for: transcript, using: authKey))
+    }
+
+    static func isValidStudioHelloV3(
         _ signature: Data,
         publicKey: Data,
         studioId: String,
         nonceD: Data,
         nonceS: Data,
         ephemeralD: Data,
-        ephemeralS: Data
+        ephemeralS: Data,
+        pairingRequired: Bool
     ) -> Bool {
-        guard let key = try? P256.Signing.PublicKey(x963Representation: publicKey),
-              let signature = try? P256.Signing.ECDSASignature(rawRepresentation: signature) else {
-            return false
-        }
-        let transcript = transcript(
-            role: "wailo/studio", studioId: studioId,
-            nonceD: nonceD, nonceS: nonceS, ephemeralD: ephemeralD, ephemeralS: ephemeralS
+        verifyV3(
+            signature: signature,
+            publicKey: publicKey,
+            transcript: helloTranscriptV3(
+                role: "wailo/studio-hello/v3",
+                studioId: studioId,
+                nonceD: nonceD,
+                nonceS: nonceS,
+                ephemeralD: ephemeralD,
+                ephemeralS: ephemeralS,
+                pairingRequired: pairingRequired
+            )
         )
-        return key.isValidSignature(signature, for: transcript)
+    }
+
+    static func isValidResultSignatureV3(
+        _ signature: Data,
+        publicKey: Data,
+        studioId: String,
+        nonceD: Data,
+        nonceS: Data,
+        ephemeralD: Data,
+        ephemeralS: Data,
+        pairingRequired: Bool,
+        deviceAlias: String,
+        mode: Int32,
+        sessionCounter: UInt64,
+        resultCode: Int32
+    ) -> Bool {
+        verifyV3(
+            signature: signature,
+            publicKey: publicKey,
+            transcript: resultTranscriptV3(
+                role: "wailo/result-signature/v3",
+                studioId: studioId,
+                nonceD: nonceD,
+                nonceS: nonceS,
+                ephemeralD: ephemeralD,
+                ephemeralS: ephemeralS,
+                pairingRequired: pairingRequired,
+                deviceAlias: deviceAlias,
+                mode: mode,
+                sessionCounter: sessionCounter,
+                resultCode: resultCode
+            )
+        )
     }
 
     static func randomNonce() -> Data {
@@ -226,6 +250,88 @@ enum WailoCrypto {
     /// across two independent implementations.
     private static func label(_ text: String, _ suffix: Data) -> Data {
         Data(text.utf8) + Data([0x00]) + suffix + Data([0x00])
+    }
+
+    private static func helloTranscriptV3(
+        role: String,
+        studioId: String,
+        nonceD: Data,
+        nonceS: Data,
+        ephemeralD: Data,
+        ephemeralS: Data,
+        pairingRequired: Bool
+    ) -> Data {
+        label(role, Data(studioId.utf8)) +
+            nonceD + nonceS + ephemeralD + ephemeralS + Data([pairingRequired ? 1 : 0])
+    }
+
+    private static func authTranscriptV3(
+        role: String,
+        studioId: String,
+        nonceD: Data,
+        nonceS: Data,
+        ephemeralD: Data,
+        ephemeralS: Data,
+        pairingRequired: Bool,
+        deviceAlias: String,
+        mode: Int32,
+        sessionCounter: UInt64
+    ) -> Data {
+        helloTranscriptV3(
+            role: role,
+            studioId: studioId,
+            nonceD: nonceD,
+            nonceS: nonceS,
+            ephemeralD: ephemeralD,
+            ephemeralS: ephemeralS,
+            pairingRequired: pairingRequired
+        ) + label("wailo/device-alias/v3", Data(deviceAlias.utf8)) +
+            fixed(mode) + fixed(sessionCounter)
+    }
+
+    private static func resultTranscriptV3(
+        role: String,
+        studioId: String,
+        nonceD: Data,
+        nonceS: Data,
+        ephemeralD: Data,
+        ephemeralS: Data,
+        pairingRequired: Bool,
+        deviceAlias: String,
+        mode: Int32,
+        sessionCounter: UInt64,
+        resultCode: Int32
+    ) -> Data {
+        authTranscriptV3(
+            role: role,
+            studioId: studioId,
+            nonceD: nonceD,
+            nonceS: nonceS,
+            ephemeralD: ephemeralD,
+            ephemeralS: ephemeralS,
+            pairingRequired: pairingRequired,
+            deviceAlias: deviceAlias,
+            mode: mode,
+            sessionCounter: sessionCounter
+        ) + fixed(resultCode)
+    }
+
+    private static func fixed(_ value: Int32) -> Data {
+        var bigEndian = value.bigEndian
+        return withUnsafeBytes(of: &bigEndian) { Data($0) }
+    }
+
+    private static func fixed(_ value: UInt64) -> Data {
+        var bigEndian = value.bigEndian
+        return withUnsafeBytes(of: &bigEndian) { Data($0) }
+    }
+
+    private static func verifyV3(signature: Data, publicKey: Data, transcript: Data) -> Bool {
+        guard let key = try? P256.Signing.PublicKey(x963Representation: publicKey),
+              let signature = try? P256.Signing.ECDSASignature(rawRepresentation: signature) else {
+            return false
+        }
+        return key.isValidSignature(signature, for: transcript)
     }
 
     /// RFC 5869 HKDF-SHA256, hand-composed because CryptoKit's own `HKDF` is iOS 14 and this package

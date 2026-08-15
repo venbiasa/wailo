@@ -10,8 +10,8 @@ import WailoSDK
 /// draws UI. Phrasing lives here too, so the view renders strings instead of deriving them.
 final class WailoDebugModel: ObservableObject {
 
-    @Published var host: String { didSet { clearManualErrors() } }
-    @Published var port: String { didSet { clearManualErrors() } }
+    @Published var host: String { didSet { targetFieldChanged() } }
+    @Published var port: String { didSet { targetFieldChanged() } }
     @Published var usbPort: String
     /// Why the last Connect didn't take, per field. Reported on submit rather than while typing —
     /// half-typed text is not a mistake — and cleared by the next edit.
@@ -23,6 +23,7 @@ final class WailoDebugModel: ObservableObject {
     @Published private(set) var isUsingDiscovery: Bool
     @Published private(set) var isStarted: Bool
     @Published private(set) var isUsb: Bool
+    @Published private(set) var connectionPhase: WailoConnectionPhase
 
     // MARK: - pairing (ADR-0039)
 
@@ -54,6 +55,8 @@ final class WailoDebugModel: ObservableObject {
     @Published var isScanning = false
 
     private var observers: [NSObjectProtocol] = []
+    private var expectedStudioId: String?
+    private var updatingTargetFields = false
 
     init() {
         host = Wailo.configuredHost ?? ""
@@ -65,6 +68,7 @@ final class WailoDebugModel: ObservableObject {
         isUsingDiscovery = Wailo.configuredHost == nil
         isStarted = Wailo.activeAddress != nil
         isUsb = Wailo.activeAddress?.hasPrefix("usb:") ?? false
+        connectionPhase = Wailo.connectionPhase
         pairings = Wailo.pairings
         refusal = Wailo.pairingRefusal
         codeTarget = Wailo.discoveredDesktops.first { !$0.studioId.isEmpty }
@@ -75,6 +79,7 @@ final class WailoDebugModel: ObservableObject {
             center.addObserver(forName: Wailo.connectionDidChangeNotification, object: nil, queue: .main, using: refresh),
             center.addObserver(forName: Wailo.discoveryDidChangeNotification, object: nil, queue: .main, using: refresh),
         ]
+        Wailo.refreshDiscovery()
     }
 
     deinit {
@@ -84,8 +89,14 @@ final class WailoDebugModel: ObservableObject {
     // MARK: - status wording
 
     var statusTitle: String {
-        if !isStarted { return "Not started" }
-        return isConnected ? "Connected" : "Not connected"
+        switch connectionPhase {
+        case .stopped: return isStarted ? "Not connected" : "Not started"
+        case .dialling: return "Dialling"
+        case .authenticating: return "Authenticating"
+        case .connected: return "Connected"
+        case .refused: return "Refused"
+        case .identityMismatch: return "Identity mismatch"
+        }
     }
 
     var transportLabel: String? {
@@ -94,9 +105,24 @@ final class WailoDebugModel: ObservableObject {
     }
 
     var statusDetail: String {
+        switch connectionPhase {
+        case .identityMismatch:
+            return "The address is now answered by a different Studio. Confirm or reject the replacement."
+        case .refused:
+            return refusal ?? "Studio refused this relationship."
+        case .stopped, .dialling, .authenticating, .connected:
+            break
+        }
         if !isStarted { return "Wailo.start() has not run yet." }
         if isUsb { return "Studio is attached over the cable; the Wi-Fi connection is paused until it unplugs." }
-        if isConnected { return isUsingDiscovery ? "Found over Bonjour." : "Pinned to a manual address." }
+        switch connectionPhase {
+        case .connected:
+            return isUsingDiscovery ? "Found over Bonjour." : "Pinned to a manual address."
+        case .authenticating:
+            return "Studio proved its identity; this device is proving its Studio-scoped relationship."
+        case .dialling, .stopped, .refused, .identityMismatch:
+            break
+        }
         return isUsingDiscovery
             ? "Looking for a desktop over Bonjour. Needs the same Wi-Fi and Local Network permission."
             : "Retrying the pinned address."
@@ -127,9 +153,12 @@ final class WailoDebugModel: ObservableObject {
             resolvedPort = value
         }
 
+        let expectedStudioId = self.expectedStudioId
+        updatingTargetFields = true
         host = address.host
         port = resolvedPort.map(String.init) ?? ""
-        Wailo.setHost(address.host, port: resolvedPort)
+        updatingTargetFields = false
+        Wailo.setHost(address.host, port: resolvedPort, expectedStudioId: expectedStudioId)
         // Dialling is asynchronous, so Connect cannot report success or failure by the time it returns.
         // Saying "dialling" and letting the status line settle is honest; leaving the button looking
         // exactly as it did before the tap is what makes people press it again.
@@ -152,8 +181,11 @@ final class WailoDebugModel: ObservableObject {
     }
 
     func useDiscovery() {
+        expectedStudioId = nil
+        updatingTargetFields = true
         host = ""
         port = ""
+        updatingTargetFields = false
         Wailo.setHost(nil, port: nil)
         attempt = .idle
         refresh()
@@ -169,6 +201,7 @@ final class WailoDebugModel: ObservableObject {
     struct Desktop: Identifiable {
 
         let id: String
+        let studioId: String
         /// The Bonjour instance name while it is advertising, else the address it was last reached at.
         let name: String
         /// What Fill puts in the address field. A remembered desktop that is not advertising has no
@@ -212,6 +245,7 @@ final class WailoDebugModel: ObservableObject {
             if let pairing { matched.insert(pairing.studioId) }
             return Desktop(
                 id: pairing?.studioId ?? service.id,
+                studioId: service.studioId.isEmpty ? (pairing?.studioId ?? "") : service.studioId,
                 name: service.name,
                 host: service.host,
                 port: service.port,
@@ -227,6 +261,7 @@ final class WailoDebugModel: ObservableObject {
             .map { pairing in
                 Desktop(
                     id: pairing.studioId,
+                    studioId: pairing.studioId,
                     name: pairing.lastHost.isEmpty ? "Paired desktop" : pairing.lastHost,
                     host: pairing.lastHost,
                     port: nil,
@@ -243,10 +278,18 @@ final class WailoDebugModel: ObservableObject {
     /// should never happen from a stray tap (ADR-0040).
     func fill(from desktop: Desktop) {
         guard desktop.canFill else { return }
+        updatingTargetFields = true
         host = desktop.host
         port = desktop.port.map(String.init) ?? ""
+        updatingTargetFields = false
+        expectedStudioId = desktop.studioId.isEmpty ? nil : desktop.studioId
         attempt = .idle
         clearManualErrors()
+    }
+
+    private func targetFieldChanged() {
+        clearManualErrors()
+        if !updatingTargetFields { expectedStudioId = nil }
     }
 
     /// Only offered for a port that is both valid and different — re-applying the current one would drop
@@ -383,6 +426,7 @@ final class WailoDebugModel: ObservableObject {
         isUsingDiscovery = Wailo.configuredHost == nil
         isStarted = Wailo.activeAddress != nil
         isUsb = Wailo.activeAddress?.hasPrefix("usb:") ?? false
+        connectionPhase = Wailo.connectionPhase
         pairings = Wailo.pairings
         refusal = Wailo.pairingRefusal
         identityChange = Wailo.identityChange

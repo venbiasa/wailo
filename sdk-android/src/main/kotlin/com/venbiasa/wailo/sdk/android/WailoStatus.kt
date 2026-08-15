@@ -1,5 +1,14 @@
 package com.venbiasa.wailo.sdk.android
 
+enum class WailoConnectionPhase {
+    STOPPED,
+    DIALLING,
+    AUTHENTICATING,
+    CONNECTED,
+    REFUSED,
+    IDENTITY_MISMATCH,
+}
+
 /**
  * A remembered address now answered by a different identity (ADR-0040). Surfaced rather than acted on:
  * this is either a machine that changed hands or someone standing in the path, and from the device's
@@ -19,6 +28,7 @@ data class WailoIdentityChange(
  */
 data class WailoStatus(
     val connected: Boolean = false,
+    val phase: WailoConnectionPhase = WailoConnectionPhase.STOPPED,
     /** `host:port` currently dialled, or null while nothing is being dialled at all. */
     val activeAddress: String? = null,
     /**
@@ -34,10 +44,7 @@ data class WailoStatus(
     val configuredPort: Int? = null,
     val discovered: List<WailoDesktop> = emptyList(),
     val pairings: List<WailoPairing> = emptyList(),
-    /**
-     * Studio said it does not know this device. Latched until a human clears it: `AuthResult` is
-     * unauthenticated, so retrying on a timer would let anyone park the device in a re-pair prompt.
-     */
+    /** Studio's authenticated refusal, latched until a human chooses Retry or Forget. */
     val refusal: String? = null,
     val identityChange: WailoIdentityChange? = null,
 )

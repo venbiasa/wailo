@@ -1,6 +1,6 @@
 package com.venbiasa.wailo.sdk.android
 
-import com.venbiasa.wailo.protocol.AuthChallenge
+import com.venbiasa.wailo.protocol.AuthStudioHelloV3
 import com.venbiasa.wailo.protocol.Envelope
 import com.venbiasa.wailo.protocol.RuleAck
 import okio.ByteString.Companion.toByteString
@@ -18,13 +18,12 @@ import org.junit.Test
  *
  * The reconnect case is the one that earns this file. On iOS the trust was captured when the client was
  * built and never re-read, so every reconnect after a trust-on-first-use pairing re-introduced the
- * device as a stranger and failed the mac check, silently and forever (ADR-0046). It survived because
+ * device as a stranger and failed authentication, silently and forever (ADR-0046). It survived because
  * the only peer a unit test can dial is loopback, which skips the handshake entirely.
  */
 class WailoHandshakeTest {
 
     private companion object {
-        const val DEVICE_ID = "device-0001"
         const val HOST = "10.0.0.2"
     }
 
@@ -37,14 +36,15 @@ class WailoHandshakeTest {
     @Test
     fun aFirstContactPairsAndBothEndsAgreeOnTheSessionKey() {
         val studio = FakeStudio()
-        val exchange = handshake(studio, WailoHandshake.Trust.FirstContact)
+        val exchange = handshake(studio, WailoHandshake.Trust.FirstContact(null))
 
         val done = exchange.step as WailoHandshake.Step.Done
         assertEquals(studio.studioId, done.established.pairing.studioId)
         assertTrue(done.established.pairing.trustedOnFirstUse)
         assertEquals(HOST, done.established.pairing.lastHost)
         assertTrue(studio.lastFirstContact)
-        assertEquals(DEVICE_ID, studio.lastDeviceId)
+        assertEquals(done.established.pairing.deviceAlias, studio.lastDeviceAlias)
+        assertEquals(32, done.established.pairing.deviceAlias.length)
         assertSameSessionKey(done.established.sessionKey, exchange.studioCodec)
     }
 
@@ -55,20 +55,19 @@ class WailoHandshakeTest {
     @Test
     fun aReconnectAfterAFirstContactAuthenticatesAsPaired() {
         val studio = FakeStudio()
-        val first = handshake(studio, WailoHandshake.Trust.FirstContact).step as WailoHandshake.Step.Done
+        val first = handshake(studio, WailoHandshake.Trust.FirstContact(null)).step as WailoHandshake.Step.Done
         WailoPairingStore.save(first.established.pairing)
 
         val trust = WailoHandshake.trustFor(
             pairing = WailoEndpointResolver.pairingFor(HOST, studio.studioId),
             invite = null,
-            deviceId = DEVICE_ID,
         )
         assertTrue(trust is WailoHandshake.Trust.Paired)
 
         val second = handshake(studio, trust)
         val done = second.step as WailoHandshake.Step.Done
         assertFalse(studio.lastFirstContact)
-        assertFalse(done.established.pairing.trustedOnFirstUse)
+        assertTrue(done.established.pairing.trustedOnFirstUse)
         // The counter has to move, or Studio reads two devices sharing one key.
         assertEquals(2L, done.established.pairing.sessionCounter)
         assertEquals(2L, studio.lastSessionCounter)
@@ -81,7 +80,7 @@ class WailoHandshakeTest {
         val invite = WailoPairingInvite.fromQr(studio.qrPayload(HOST, 8899))
         assertNotNull(invite)
 
-        val trust = WailoHandshake.trustFor(pairing = null, invite = invite, deviceId = DEVICE_ID)
+        val trust = WailoHandshake.trustFor(pairing = null, invite = invite)
         val done = handshake(studio, trust).step as WailoHandshake.Step.Done
         // Nothing was trusted on faith: the QR carried both the key and the secret.
         assertFalse(done.established.pairing.trustedOnFirstUse)
@@ -92,42 +91,38 @@ class WailoHandshakeTest {
     @Test
     fun aTypedCodeAuthenticatesOnTheFirstConnection() {
         val code = "ABCDEFGHJK"
-        val studio = FakeStudio().apply { offerCode = code }
+        val studio = FakeStudio().apply {
+            offerCode = code
+            requirePairing = true
+        }
         val invite = WailoPairingInvite.fromCode(code, studio.studioId, HOST, 8899)
         assertNotNull(invite)
 
         val done = handshake(
             studio,
-            WailoHandshake.trustFor(pairing = null, invite = invite, deviceId = DEVICE_ID),
+            WailoHandshake.trustFor(pairing = null, invite = invite),
         ).step as WailoHandshake.Step.Done
         assertFalse(studio.lastFirstContact)
-        // A code cannot carry a key, so the one the challenge offered is pinned — safe only because
-        // the mac proved knowledge of the same code first.
+        // The code-derived proof authenticates the signed identity before its key is pinned.
         assertArrayEquals(studio.publicKey, done.established.pairing.publicKey)
     }
 
     /**
-     * A remembered address answered by someone else. Never resolved down here: that decision is the
-     * entire value of having pinned the key (ADR-0040).
-     *
-     * The impostor answers under an id it was not asked for, which a real Studio never does — and that
-     * is the point. A peer standing in the path, or squatting the address a Mac used to have, has no
-     * reason to honour the `studio_id` in the request, so the pinned key is the only thing that catches
-     * it.
+     * ClientHello stays anonymous. The signed StudioHello reveals who occupies the remembered address,
+     * and the expected identity stops a replacement before the device sends its alias (ADR-0060).
      */
     @Test
     fun aChangedIdentityAtAPinnedAddressStopsTheHandshake() {
         val original = FakeStudio()
-        val paired = handshake(original, WailoHandshake.Trust.FirstContact).step as WailoHandshake.Step.Done
+        val paired = handshake(original, WailoHandshake.Trust.FirstContact(null)).step as WailoHandshake.Step.Done
         WailoPairingStore.save(paired.established.pairing)
 
-        val impostor = FakeStudio().apply { answersAnyIdentity = true }
+        val impostor = FakeStudio()
         val step = handshake(
             impostor,
             WailoHandshake.trustFor(
                 pairing = WailoEndpointResolver.pairingFor(HOST, null),
                 invite = null,
-                deviceId = DEVICE_ID,
             ),
         ).step
 
@@ -139,8 +134,123 @@ class WailoHandshakeTest {
     @Test
     fun aStudioThatOnlyTakesPairedDevicesRefusesWithAReason() {
         val studio = FakeStudio().apply { requirePairing = true }
-        val refused = handshake(studio, WailoHandshake.Trust.FirstContact).step as WailoHandshake.Step.Refused
+        val refused = handshake(studio, WailoHandshake.Trust.FirstContact(null)).step as WailoHandshake.Step.Refused
         assertTrue(refused.reason.isNotEmpty())
+    }
+
+    @Test
+    fun aStrictStudioAcceptsAnInvitedQr() {
+        val studio = FakeStudio().apply {
+            requirePairing = true
+            offer = WailoCrypto.randomSecret()
+        }
+        val invite = requireNotNull(WailoPairingInvite.fromQr(studio.qrPayload(HOST, 8899)))
+
+        val done = handshake(
+            studio,
+            WailoHandshake.trustFor(pairing = null, invite = invite),
+        ).step as WailoHandshake.Step.Done
+
+        assertFalse(done.established.pairing.trustedOnFirstUse)
+    }
+
+    @Test
+    fun anExpiredInviteProducesAnAuthenticatedRefusal() {
+        val studio = FakeStudio().apply {
+            requirePairing = true
+            offer = WailoCrypto.randomSecret()
+        }
+        val invite = requireNotNull(WailoPairingInvite.fromQr(studio.qrPayload(HOST, 8899)))
+        studio.offer = null
+
+        val refused = handshake(
+            studio,
+            WailoHandshake.trustFor(pairing = null, invite = invite),
+        ).step as WailoHandshake.Step.Refused
+
+        assertTrue(refused.reason.contains("expired", ignoreCase = true))
+    }
+
+    @Test
+    fun theSameStudioAuthenticatesAfterItsAddressChanges() {
+        val studio = FakeStudio()
+        val first = handshake(studio, WailoHandshake.Trust.FirstContact(null)).step as WailoHandshake.Step.Done
+
+        val done = handshake(
+            studio,
+            WailoHandshake.Trust.Paired(first.established.pairing),
+            host = "10.0.0.99",
+        ).step as WailoHandshake.Step.Done
+
+        assertEquals(studio.studioId, done.established.pairing.studioId)
+        assertEquals("10.0.0.99", done.established.pairing.lastHost)
+    }
+
+    @Test
+    fun twoStudiosReceiveUnlinkableAliases() {
+        val first = handshake(FakeStudio(), WailoHandshake.Trust.FirstContact(null))
+            .step as WailoHandshake.Step.Done
+        val second = handshake(FakeStudio(), WailoHandshake.Trust.FirstContact(null))
+            .step as WailoHandshake.Step.Done
+
+        assertFalse(first.established.pairing.deviceAlias == second.established.pairing.deviceAlias)
+    }
+
+    @Test
+    fun clientHelloDoesNotRevealThePairedAlias() {
+        val studio = FakeStudio()
+        val pairing = (handshake(studio, WailoHandshake.Trust.FirstContact(null))
+            .step as WailoHandshake.Step.Done).established.pairing
+
+        val hello = WailoHandshake(WailoHandshake.Trust.Paired(pairing), HOST).begin()
+
+        assertNotNull(hello.auth_client_hello_v3)
+        assertFalse(String(hello.encode(), Charsets.ISO_8859_1).contains(pairing.deviceAlias))
+    }
+
+    @Test
+    fun anOfflineForgetReconnectsWithAFreshAliasAndKeepsOtherStudios() {
+        val studio = FakeStudio()
+        val first = handshake(studio, WailoHandshake.Trust.FirstContact(null))
+            .step as WailoHandshake.Step.Done
+        WailoPairingStore.save(first.established.pairing)
+        val otherStudio = FakeStudio()
+        val other = handshake(otherStudio, WailoHandshake.Trust.FirstContact(null))
+            .step as WailoHandshake.Step.Done
+        WailoPairingStore.save(other.established.pairing)
+        val staleAlias = first.established.pairing.deviceAlias
+        assertTrue(studio.known.containsKey(staleAlias))
+
+        WailoPairingStore.forget(studio.studioId)
+        assertEquals(null, WailoPairingStore.pairing(studio.studioId))
+        assertEquals(
+            other.established.pairing.deviceAlias,
+            WailoPairingStore.pairing(otherStudio.studioId)?.deviceAlias,
+        )
+        val second = handshake(studio, WailoHandshake.Trust.FirstContact(studio.studioId))
+            .step as WailoHandshake.Step.Done
+
+        assertFalse(staleAlias == second.established.pairing.deviceAlias)
+        assertTrue(studio.known.containsKey(second.established.pairing.deviceAlias))
+        assertEquals(
+            other.established.pairing.deviceAlias,
+            WailoPairingStore.pairing(otherStudio.studioId)?.deviceAlias,
+        )
+    }
+
+    @Test
+    fun studioSideForgetProducesAnAuthenticatedUnknownDeviceRefusal() {
+        val studio = FakeStudio()
+        val first = handshake(studio, WailoHandshake.Trust.FirstContact(null))
+            .step as WailoHandshake.Step.Done
+        studio.known.remove(first.established.pairing.deviceAlias)
+
+        val refused = handshake(
+            studio,
+            WailoHandshake.Trust.Paired(first.established.pairing),
+        ).step as WailoHandshake.Step.Refused
+
+        assertTrue(refused.reason.contains("no longer", ignoreCase = true))
     }
 
     /**
@@ -150,26 +260,53 @@ class WailoHandshakeTest {
     @Test
     fun aRefusalFromAPeerThatCannotSignIsNotBelieved() {
         val studio = FakeStudio()
-        val device = WailoHandshake(WailoHandshake.Trust.FirstContact, DEVICE_ID, HOST)
+        val device = WailoHandshake(WailoHandshake.Trust.FirstContact(null), HOST)
         device.begin()
 
         val forged = Envelope(
-            auth_challenge = AuthChallenge(
+            auth_studio_hello_v3 = AuthStudioHelloV3(
                 nonce = WailoCrypto.randomNonce().toByteString(),
                 signature = ByteArray(64).toByteString(),
                 public_key = studio.publicKey.toByteString(),
                 ephemeral_key = WailoCrypto.encodePublicKey(WailoCrypto.generateEphemeral().public).toByteString(),
+                pairing_required = false,
             ),
         )
         assertEquals(WailoHandshake.Step.Failed, device.handle(forged))
     }
 
+    @Test
+    fun forgedResultSignatureAndProofAreRejected() {
+        val forgedStudios = listOf(
+            FakeStudio().apply { forgeResultSignature = true },
+            FakeStudio().apply { forgeResultProof = true },
+        )
+
+        for (studio in forgedStudios) {
+            assertEquals(
+                WailoHandshake.Step.Failed,
+                handshake(studio, WailoHandshake.Trust.FirstContact(null)).step,
+            )
+        }
+    }
+
     /** Anything that is not an auth frame, before auth completes, is a peer that skipped the handshake. */
     @Test
     fun aPeerThatSkipsTheHandshakeIsHungUpOn() {
-        val device = WailoHandshake(WailoHandshake.Trust.FirstContact, DEVICE_ID, HOST)
+        val device = WailoHandshake(WailoHandshake.Trust.FirstContact(null), HOST)
         device.begin()
         assertEquals(WailoHandshake.Step.Failed, device.handle(Envelope(rule_ack = RuleAck(epoch = 1))))
+    }
+
+    @Test
+    fun aV2ChallengeIsRejectedAsADowngrade() {
+        val device = WailoHandshake(WailoHandshake.Trust.FirstContact(null), HOST)
+        device.begin()
+
+        assertEquals(
+            WailoHandshake.Step.Failed,
+            device.handle(Envelope.ADAPTER.decode(byteArrayOf(0x72, 0x00))),
+        )
     }
 
     // MARK: - driver
@@ -177,9 +314,13 @@ class WailoHandshakeTest {
     private class Exchange(val step: WailoHandshake.Step, val studioCodec: WailoFrameCodec?)
 
     /** Runs both halves to a terminal step, passing envelopes straight across in memory. */
-    private fun handshake(studio: FakeStudio, trust: WailoHandshake.Trust): Exchange {
+    private fun handshake(
+        studio: FakeStudio,
+        trust: WailoHandshake.Trust,
+        host: String = HOST,
+    ): Exchange {
         val session = FakeStudioSession(studio)
-        val device = WailoHandshake(trust, DEVICE_ID, HOST)
+        val device = WailoHandshake(trust, host)
         val inbound = ArrayDeque(session.handle(device.begin()).out)
         var codec: WailoFrameCodec? = null
         var last: WailoHandshake.Step = WailoHandshake.Step.Ignore

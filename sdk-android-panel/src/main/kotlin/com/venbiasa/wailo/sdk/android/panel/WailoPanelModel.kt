@@ -7,6 +7,7 @@ import androidx.compose.runtime.setValue
 import com.venbiasa.wailo.sdk.android.Wailo
 import com.venbiasa.wailo.sdk.android.WailoAddress
 import com.venbiasa.wailo.sdk.android.WailoDesktop
+import com.venbiasa.wailo.sdk.android.WailoConnectionPhase
 import com.venbiasa.wailo.sdk.android.WailoPairing
 import com.venbiasa.wailo.sdk.android.WailoPairingCode
 import com.venbiasa.wailo.sdk.android.WailoPairingInvite
@@ -38,6 +39,7 @@ internal fun WailoPairing.remembered(): Remembered =
  */
 internal data class PanelDesktop(
     val id: String,
+    val studioId: String?,
     /** The mDNS instance name while it is advertising, else the address it was last reached at. */
     val name: String,
     /**
@@ -93,6 +95,7 @@ internal fun mergeDesktops(discovered: List<WailoDesktop>, pairings: List<Rememb
         if (pairing != null) matched += pairing.studioId
         PanelDesktop(
             id = pairing?.studioId ?: service.address,
+            studioId = service.studioId.takeIf { it.isNotEmpty() } ?: pairing?.studioId,
             name = service.name,
             host = service.host,
             port = service.port,
@@ -108,6 +111,7 @@ internal fun mergeDesktops(discovered: List<WailoDesktop>, pairings: List<Rememb
         .map { pairing ->
             PanelDesktop(
                 id = pairing.studioId,
+                studioId = pairing.studioId,
                 name = pairing.lastHost.ifEmpty { "Paired desktop" },
                 host = pairing.lastHost,
                 port = null,
@@ -161,6 +165,8 @@ internal class WailoPanelModel(initial: WailoStatus = Wailo.status.value) {
     var attempt: ConnectAttempt by mutableStateOf(ConnectAttempt.Idle)
         private set
 
+    private var expectedStudioId: String? = null
+
     var isScanning: Boolean by mutableStateOf(false)
         private set
 
@@ -182,10 +188,13 @@ internal class WailoPanelModel(initial: WailoStatus = Wailo.status.value) {
     val pairableDesktops: List<WailoDesktop> get() = status.discovered.filter { it.studioId.isNotEmpty() }
 
     val statusTitle: String
-        get() = when {
-            !isStarted -> "Not started"
-            status.connected -> "Connected"
-            else -> "Not connected"
+        get() = when (status.phase) {
+            WailoConnectionPhase.STOPPED -> if (isStarted) "Not connected" else "Not started"
+            WailoConnectionPhase.DIALLING -> "Dialling"
+            WailoConnectionPhase.AUTHENTICATING -> "Authenticating"
+            WailoConnectionPhase.CONNECTED -> "Connected"
+            WailoConnectionPhase.REFUSED -> "Refused"
+            WailoConnectionPhase.IDENTITY_MISMATCH -> "Identity mismatch"
         }
 
     val transportLabel: String?
@@ -193,11 +202,17 @@ internal class WailoPanelModel(initial: WailoStatus = Wailo.status.value) {
 
     val statusDetail: String
         get() = when {
+            status.phase == WailoConnectionPhase.REFUSED ->
+                status.refusal ?: "Studio refused this relationship."
+            status.phase == WailoConnectionPhase.IDENTITY_MISMATCH ->
+                "The address is now answered by a different Studio. Confirm or reject the replacement."
             !isStarted -> "No Wailo client is running. Call Wailo.webSocketSink(...).start()."
             status.handshakeWaived ->
                 "Reached on loopback, which is where adb reverse puts the desktop. The cable already " +
                     "proves which machine is on the other end, so nothing here needs pairing."
 
+            status.phase == WailoConnectionPhase.AUTHENTICATING ->
+                "Studio proved its identity; this device is proving its Studio-scoped relationship."
             status.connected && isUsingDiscovery -> "Found on this network."
             status.connected -> "Pinned to a manual address."
             isUsingDiscovery ->
@@ -233,11 +248,13 @@ internal class WailoPanelModel(initial: WailoStatus = Wailo.status.value) {
 
     fun editHost(text: String) {
         host = text
+        expectedStudioId = null
         clearManualErrors()
     }
 
     fun editPort(text: String) {
         port = text
+        expectedStudioId = null
         clearManualErrors()
     }
 
@@ -283,7 +300,7 @@ internal class WailoPanelModel(initial: WailoStatus = Wailo.status.value) {
 
         host = address.host
         port = resolvedPort?.toString().orEmpty()
-        Wailo.setHost(address.host, resolvedPort)
+        Wailo.setHost(address.host, resolvedPort, expectedStudioId)
         // Dialling is asynchronous, so Connect cannot report success or failure by the time it returns.
         // Saying "dialling" and letting the status line settle is honest; leaving the button looking
         // exactly as it did before the tap is what makes people press it again.
@@ -293,6 +310,7 @@ internal class WailoPanelModel(initial: WailoStatus = Wailo.status.value) {
     fun useDiscovery() {
         host = ""
         port = ""
+        expectedStudioId = null
         Wailo.setHost(null, null)
         attempt = ConnectAttempt.Idle
         clearManualErrors()
@@ -307,6 +325,7 @@ internal class WailoPanelModel(initial: WailoStatus = Wailo.status.value) {
         if (!desktop.canFill) return
         host = desktop.host
         port = desktop.port?.toString().orEmpty()
+        expectedStudioId = desktop.studioId
         attempt = ConnectAttempt.Idle
         clearManualErrors()
     }

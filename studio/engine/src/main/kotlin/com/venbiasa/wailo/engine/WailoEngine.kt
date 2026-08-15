@@ -22,6 +22,7 @@ import com.venbiasa.wailo.engine.pairing.PairingManager
 import com.venbiasa.wailo.engine.pairing.RefusedDevice
 import com.venbiasa.wailo.protocol.MapLocalRule
 import com.venbiasa.wailo.protocol.RuleSet
+import com.venbiasa.wailo.protocol.RevokeDeviceAck
 import io.ktor.server.application.install
 import io.ktor.server.cio.CIO
 import io.ktor.server.engine.EmbeddedServer
@@ -29,6 +30,8 @@ import io.ktor.server.engine.embeddedServer
 import io.ktor.server.routing.routing
 import io.ktor.server.websocket.DefaultWebSocketServerSession
 import io.ktor.server.websocket.WebSockets
+import io.ktor.server.websocket.pingPeriod
+import io.ktor.server.websocket.timeout
 import io.ktor.server.websocket.webSocket
 import io.ktor.websocket.Frame
 import io.ktor.websocket.readBytes
@@ -36,6 +39,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -55,6 +59,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 import javax.jmdns.JmDNS
 import javax.jmdns.ServiceInfo
+import kotlin.time.Duration.Companion.seconds
 
 /** One captured exchange plus the identity of the session that produced it. */
 data class CapturedExchange(
@@ -379,7 +384,9 @@ class WailoEngine(
             session.outgoing.send(Frame.Binary(true, bytes))
         }
 
-        override fun close() = Unit
+        override fun close() {
+            session.cancel()
+        }
     }
 
     /**
@@ -479,7 +486,10 @@ class WailoEngine(
 
     private fun buildServer(): EmbeddedServer<*, *> =
         embeddedServer(CIO, port = port) {
-            install(WebSockets)
+            install(WebSockets) {
+                pingPeriod = 15.seconds
+                timeout = 15.seconds
+            }
             routing {
                 webSocket("/") {
                     handleConnection(
@@ -547,6 +557,7 @@ class WailoEngine(
                             key = paired.key,
                             name = it.device_name,
                             sessionCounter = paired.sessionCounter,
+                            trustedOnFirstUse = paired.trustedOnFirstUse,
                         )
                     }
                 }
@@ -559,6 +570,20 @@ class WailoEngine(
                 }
                 envelope.breakpoint_rules_ack?.let { ack ->
                     state.ackedBreakpointEpoch.updateAndGet { cur -> maxOf(cur, ack.epoch) }
+                }
+                val revoke = envelope.revoke_device
+                if (revoke != null && state.pairedDeviceId != null) {
+                    // Ack under the still-live session key, then remove the alias. The local device
+                    // forget does not depend on receiving this best-effort cleanup (ADR-0060).
+                    connection.send(
+                        Envelope(
+                            revoke_device_ack = RevokeDeviceAck(request_id = revoke.request_id),
+                        ).encode(),
+                    )
+                    pairings.forget(state.pairedDeviceId)
+                    dismissRefusal(state.pairedDeviceId)
+                    dismissCloneWarning(state.pairedDeviceId)
+                    break
                 }
                 // Keep a slow body read off this connection's receive loop.
                 envelope.body_request?.let { request -> launch { serveBody(connection, request) } }

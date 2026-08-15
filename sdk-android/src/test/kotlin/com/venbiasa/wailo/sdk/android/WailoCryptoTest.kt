@@ -32,11 +32,9 @@ class WailoCryptoTest {
 
     private val pairingSecret = ByteArray(32) { it.toByte() }
     private val studioId = "0123456789abcdef0123456789abcdef"
-    private val deviceId = "device-0001"
+    private val deviceAlias = "00112233445566778899aabbccddeeff"
     private val nonceD = ByteArray(32) { (0x40 + it).toByte() }
     private val nonceS = ByteArray(32) { (0x60 + it).toByte() }
-
-    private val deviceKey = WailoCrypto.deviceKey(pairingSecret, studioId, deviceId)
 
     private val scalarD = ByteArray(32) { (it + 1).toByte() }
     private val ephemeralD = (
@@ -48,11 +46,6 @@ class WailoCryptoTest {
             "9eec995a08b1fa7704df3dcc0b50a9665263fb7711f95f9f8a449c5096e47c892b"
         ).bytes()
     private val shared by lazy { WailoCrypto.agree(privateKey(scalarD), ephemeralS)!! }
-
-    @Test
-    fun deviceKeyMatchesTheSharedVector() {
-        assertEquals("0f5f735ac79ff7b5174adb12a2d175eeba55e307d27c4c30d52c879bef311c44", deviceKey.hex())
-    }
 
     @Test
     fun keyAgreementMatchesTheSharedVector() {
@@ -71,53 +64,75 @@ class WailoCryptoTest {
     }
 
     @Test
-    fun tofuDeviceKeyMatchesTheSharedVector() {
+    fun v3KeyScheduleMatchesTheSharedVectors() {
+        val v3DeviceKey = WailoCrypto.deviceKeyV3(pairingSecret, studioId, deviceAlias)
         assertEquals(
-            "b504b4985c3055c9b4d07e9800b8d3234b802ba3dcf1fafea26fabd877cdd1df",
-            WailoCrypto.tofuDeviceKey(shared, studioId, deviceId).hex(),
+            "df6ad188cc1263df05a07b927dc4cf11c4ab8a6131fef1109f6b1cc7e7b66c17",
+            v3DeviceKey.hex(),
+        )
+        assertEquals(
+            "792e0d6856885a4cd6205927f8f43858fcac1c8fa61d9f2bf90a215e61bf0bf3",
+            WailoCrypto.tofuDeviceKeyV3(shared, studioId, deviceAlias).hex(),
+        )
+        assertEquals(
+            "8300755de092d366f9cb3562147176965f77df7dff6547b8c88a09979ed12e3b",
+            WailoCrypto.authKeyV3(shared, v3DeviceKey).hex(),
+        )
+        assertEquals(
+            "5d6219803478b15a9a9642e4e0adaa94937a7bae7fc12047a839e32790045b37",
+            WailoCrypto.sessionKeyV3(shared, v3DeviceKey, nonceD, nonceS).hex(),
         )
     }
 
     @Test
-    fun authKeyMatchesTheSharedVector() {
-        assertEquals(
-            "37cfb80bf35ea202e79894afc5babc35aac2d604e6eea05deffe0ea50473a834",
-            WailoCrypto.authKey(shared, null).hex(),
+    fun v3ProofsMatchTheSharedVectors() {
+        val authKey = WailoCrypto.authKeyV3(
+            shared,
+            WailoCrypto.deviceKeyV3(pairingSecret, studioId, deviceAlias),
         )
         assertEquals(
-            "28c5cb8ca5bcc0ab7327bf87088f4e756578abb3e14fdda32d9e4bb509c5153b",
-            WailoCrypto.authKey(shared, deviceKey).hex(),
-        )
-    }
-
-    @Test
-    fun sessionKeyMatchesTheSharedVector() {
-        assertEquals(
-            "feebb90e8f30121c043444b0eb3c4a907d9622a8c3144e532311cf44e289a403",
-            WailoCrypto.sessionKey(shared, null, nonceD, nonceS).hex(),
-        )
-        assertEquals(
-            "895b7888dbd5f197933cd84537169fa3e6aa2aa140660d489054ba6cd3d8c69b",
-            WailoCrypto.sessionKey(shared, deviceKey, nonceD, nonceS).hex(),
-        )
-    }
-
-    @Test
-    fun deviceProofMatchesTheSharedVector() {
-        assertEquals(
-            "e4556159809a931fd61e10aa8252efcabfdd116d465ee347ad5a5b697dbf34a9",
-            WailoCrypto.deviceProof(
-                WailoCrypto.authKey(shared, deviceKey), studioId, nonceD, nonceS, ephemeralD, ephemeralS,
+            "26c6d7a65f27e0613796bcf81c311c8739443bed3be1f8b4a879d51aa0be4e43",
+            WailoCrypto.deviceProofV3(
+                authKey,
+                studioId,
+                nonceD,
+                nonceS,
+                ephemeralD,
+                ephemeralS,
+                true,
+                deviceAlias,
+                1,
+                42,
             ).hex(),
         )
-    }
-
-    @Test
-    fun studioMacMatchesTheSharedVector() {
         assertEquals(
-            "e369baf64bccd686dda614f3cf30ace730fb45944826f91419d9ede32b4d4199",
-            WailoCrypto.studioMac(
-                WailoCrypto.authKey(shared, deviceKey), studioId, nonceD, nonceS, ephemeralD, ephemeralS,
+            "523866c51d880396974b66dc160d3b543f29a6718f3b5682342194744c8ac037",
+            WailoCrypto.studioProofV3(
+                authKey,
+                studioId,
+                nonceD,
+                nonceS,
+                ephemeralD,
+                ephemeralS,
+                true,
+                deviceAlias,
+                1,
+                42,
+                1,
+            ).hex(),
+        )
+        assertEquals(
+            "42ecb4b2b8178ce16267b7a58a1c76f7e700366c56c0fdab35cdef45156caf9b",
+            WailoCrypto.deviceProofV3(
+                authKey, studioId, nonceD, nonceS, ephemeralD, ephemeralS,
+                false, deviceAlias, 1, 42,
+            ).hex(),
+        )
+        assertEquals(
+            "c533d92ab93a2df6fcd2cecd86b982def9dbc516ed5ca312bb1723cfc62ae821",
+            WailoCrypto.studioProofV3(
+                authKey, studioId, nonceD, nonceS, ephemeralD, ephemeralS,
+                false, deviceAlias, 1, 42, 1,
             ).hex(),
         )
     }
@@ -161,79 +176,74 @@ class WailoCryptoTest {
         assertFalse(first.contentEquals(WailoCrypto.stretch("ABCDEFGHJK", "a".repeat(32))))
     }
 
-    /**
-     * Swapping an ephemeral key must change what was signed over. Without this the signature says
-     * nothing about the agreement, and anyone in the path can hold a separate one with each side.
-     */
     @Test
-    fun theTranscriptCoversTheEphemeralKeys() {
-        assertFalse(
-            WailoCrypto.transcript("wailo/studio", studioId, nonceD, nonceS, ephemeralD, ephemeralS)
-                .contentEquals(
-                    WailoCrypto.transcript("wailo/studio", studioId, nonceD, nonceS, ephemeralD, ephemeralD),
-                ),
-        )
-    }
-
-    @Test
-    fun aSignatureVerifiesAgainstItsOwnKey() {
+    fun aV3HelloSignatureVerifiesAgainstItsOwnKey() {
         val studio = FakeStudio()
         assertTrue(
-            WailoCrypto.isValidStudioSignature(
-                studio.sign(nonceD, nonceS, ephemeralD, ephemeralS),
+            WailoCrypto.isValidStudioHelloV3(
+                studio.signHelloV3(nonceD, nonceS, ephemeralD, ephemeralS, true),
                 studio.publicKey,
                 studio.studioId,
                 nonceD,
                 nonceS,
                 ephemeralD,
                 ephemeralS,
+                true,
             ),
         )
     }
 
     /** The property the Bonjour TXT record leans on: claiming an id you cannot sign for gets you nowhere. */
     @Test
-    fun aSignatureDoesNotVerifyAgainstAnotherStudiosKey() {
+    fun aV3HelloSignatureDoesNotVerifyAgainstAnotherStudiosKey() {
         val mine = FakeStudio()
         val theirs = FakeStudio()
         assertFalse(
-            WailoCrypto.isValidStudioSignature(
-                mine.sign(nonceD, nonceS, ephemeralD, ephemeralS),
+            WailoCrypto.isValidStudioHelloV3(
+                mine.signHelloV3(nonceD, nonceS, ephemeralD, ephemeralS, true),
                 theirs.publicKey,
                 mine.studioId,
                 nonceD,
                 nonceS,
                 ephemeralD,
                 ephemeralS,
+                true,
             ),
         )
     }
 
     /** Substituting an ephemeral key is exactly what the signature exists to make detectable. */
     @Test
-    fun aSignatureDoesNotVerifyAgainstASwappedEphemeralKey() {
+    fun aV3HelloSignatureDoesNotVerifyAgainstASwappedEphemeralKey() {
         val studio = FakeStudio()
         assertFalse(
-            WailoCrypto.isValidStudioSignature(
-                studio.sign(nonceD, nonceS, ephemeralD, ephemeralS),
+            WailoCrypto.isValidStudioHelloV3(
+                studio.signHelloV3(nonceD, nonceS, ephemeralD, ephemeralS, true),
                 studio.publicKey,
                 studio.studioId,
                 nonceD,
                 nonceS,
                 ephemeralD,
                 ephemeralD,
+                true,
             ),
         )
     }
 
     /** Raw `r || s` is fixed-width, so a coordinate with a leading zero must not shift the bytes. */
     @Test
-    fun everySignatureIsExactlySixtyFourBytes() {
+    fun everyV3HelloSignatureIsExactlySixtyFourBytes() {
         val studio = FakeStudio()
         repeat(50) {
             assertEquals(
                 64,
-                studio.sign(WailoCrypto.randomNonce(), WailoCrypto.randomNonce(), ephemeralD, ephemeralS).size,
+                studio.signHelloV3(
+                    WailoCrypto.randomNonce(),
+                    WailoCrypto.randomNonce(),
+                    ephemeralD,
+                    ephemeralS,
+                    true,
+                ).size,
             )
         }
     }
@@ -263,6 +273,14 @@ class WailoCryptoTest {
         val sealed = device.seal("once".toByteArray())
         studio.open(sealed.seq, sealed.ciphertext)
         studio.open(sealed.seq, sealed.ciphertext)
+    }
+
+    @Test(expected = FrameRejected::class)
+    fun aSkippedFrameIsRejected() {
+        val (device, studio) = codecPair()
+        device.seal("skipped".toByteArray())
+        val second = device.seal("second".toByteArray())
+        studio.open(second.seq, second.ciphertext)
     }
 
     @Test(expected = FrameRejected::class)

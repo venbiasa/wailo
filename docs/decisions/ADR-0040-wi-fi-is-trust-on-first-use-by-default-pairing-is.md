@@ -7,7 +7,8 @@ date_source: git-commit
 ---
 # ADR-0040 — Wi-Fi is trust-on-first-use by default; pairing is the opt-in strict mode
 
-- Status: Accepted; implemented on iOS and Studio, superseding ADR-0039's mandatory-pairing default. Cross-platform vectors green on both sides. Android still pending, as in ADR-0039.
+- Status: Accepted for deliberate TOFU, strict pairing, and identity-change confirmation on iOS and
+  Android. ADR-0060 supersedes the v2 handshake ordering while retaining these policies.
 - Context: ADR-0039 shipped with pairing required for every Wi-Fi device. Living with it made the cost obvious: the overwhelmingly common case is one developer, one phone, one Mac, on a home or office network, connecting to an address that developer typed themselves — and that case now needs a QR ceremony every time the key store is cleared. Meanwhile the actual leak ADR-0039 was written for was never really "an unpaired device connected". It was **automatic** connection: Bonjour picking a stranger's Studio with nobody deciding anything. Those are separable, and conflating them made everyone pay a ceremony to fix a problem only discovery had.
 - Decision:
   - **Discovery may only reconnect to something already trusted; anything new is a deliberate act.** This, not the ceremony, is the fix. Bonjour's job narrows to finding a desktop this device already holds a key for, wherever DHCP has moved it. Reaching a new desktop always requires the user to type its address or scan its QR.

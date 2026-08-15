@@ -67,3 +67,4 @@ reasoning in the ADR file, not here.
 | [0057](docs/decisions/ADR-0057-mcp-is-a-client-owned-stdio-frontend-with-its-own.md) | 2026-08-13 | accepted | MCP is a client-owned stdio frontend with its own headless capture process (extends ADR-0055/0056) |
 | [0058](docs/decisions/ADR-0058-one-persistent-local-daemon-is-shared-by-studio-cli.md) | 2026-08-13 | accepted | One persistent local daemon is shared by Studio, CLI, and MCP (supersedes ADR-0056/0057 process ownership) |
 | [0059](docs/decisions/ADR-0059-ai-tool-access-is-a-revocable-daemon-setting-with.md) | 2026-08-13 | accepted | AI tool access is a revocable daemon setting with redaction on by default, and the control port is discovered |
+| [0060](docs/decisions/ADR-0060-wi-fi-authentication-is-identity-first-with-per-studio-device-aliases.md) | 2026-08-14 | accepted | Wi-Fi authentication is identity-first, with per-Studio device aliases |

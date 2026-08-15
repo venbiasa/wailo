@@ -9,7 +9,8 @@ import java.util.concurrent.TimeUnit
 
 /**
  * Persists the daemon's identity and paired-device secrets in the macOS login Keychain. The service
- * name remains unchanged so moving ownership out of Studio does not unpair existing devices.
+ * and identity account remain stable, while the device account is versioned so v2 relationships are
+ * ignored without replacing Studio's signing identity (ADR-0060).
  */
 internal class KeychainPairingKeyStore(
     private val service: String = "com.venbiasa.wailo.studio",
@@ -122,7 +123,9 @@ internal class KeychainPairingKeyStore(
 
     companion object {
         private const val IDENTITY_ACCOUNT = "studio-identity"
-        private const val DEVICES_ACCOUNT = "paired-devices"
+        // V3 aliases are Studio-scoped; reading the global-id v2 rows would recreate the exact
+        // one-sided Forget deadlock ADR-0060 removes. The signing identity intentionally stays put.
+        private const val DEVICES_ACCOUNT = "paired-devices-v3"
         private const val TIMEOUT_SECONDS = 10L
 
         val isSupported: Boolean

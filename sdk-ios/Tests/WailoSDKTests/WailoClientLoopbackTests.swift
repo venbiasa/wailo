@@ -493,4 +493,46 @@ final class WailoClientLoopbackTests: XCTestCase {
         client.stopAndWaitForTeardown()
         server2.stop()
     }
+
+    func testMissingPongPublishesDisconnectAndRedials() throws {
+        let server = LoopbackWebSocketServer(autoReplyPing: false)
+        let port = try server.start()
+        let disconnected = expectation(description: "connection status clears after pong timeout")
+        disconnected.assertForOverFulfill = false
+        let redialled = expectation(description: "client retries after pong timeout")
+        redialled.assertForOverFulfill = false
+        let lock = NSLock()
+        var wasConnected = false
+        var reportedDisconnect = false
+        var dialCount = 0
+
+        let client = WailoClient(
+            hello: Hello(device_name: "test", app_id: "com.test", platform: "ios"),
+            url: loopbackURL(port),
+            reconnectDelay: 0.05,
+            pingInterval: 0.05,
+            pingTimeout: 0.1
+        )
+        client.onConnectionChange = { connected in
+            lock.lock()
+            defer { lock.unlock() }
+            if connected {
+                wasConnected = true
+            } else if wasConnected, !reportedDisconnect {
+                reportedDisconnect = true
+                disconnected.fulfill()
+            }
+        }
+        client.onDialling = {
+            lock.lock()
+            defer { lock.unlock() }
+            dialCount += 1
+            if dialCount == 2 { redialled.fulfill() }
+        }
+        client.start()
+
+        wait(for: [disconnected, redialled], timeout: 5)
+        client.stopAndWaitForTeardown()
+        server.stop()
+    }
 }

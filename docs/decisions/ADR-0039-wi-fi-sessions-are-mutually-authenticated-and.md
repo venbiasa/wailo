@@ -7,7 +7,9 @@ date_source: git-commit
 ---
 # ADR-0039 — Wi-Fi sessions are mutually authenticated and encrypted; loopback and USB are not
 
-- Status: Accepted; implemented on iOS and Studio. `sdk-ios` `swift test` and `cd studio && ./gradlew :engine:test` are green, including the cross-platform crypto vectors. Android is not done — `sdk-android` still speaks the pre-handshake protocol and can only reach Studio over `adb reverse` (loopback) until it is.
+- Status: Accepted for the authenticated/encrypted Wi-Fi boundary and local-transport exemption.
+  ADR-0060 supersedes the v2 handshake ordering and identifiers described below; v3 is implemented
+  by Studio, iOS, and Android with no v2 admission fallback.
 - Context: ADR-0035 gave iOS Bonjour discovery, and the SDK dialled whatever `_wailo._tcp` advertisement it found first. On a shared network — an office, a co-working space, a conference — that is a colleague's Studio as readily as your own, and the loser is not the person who misconfigured something: **the device sends `Hello` (device name, bundle id) and then streams full request and response bodies, including auth headers, to a machine nobody chose.** Studio's side is worse, because the moment a socket opened it pushed the rule set, the capture filter, and the breakpoint rules — every intercepted host and every Map Local path — to the peer before it had said a word. Both directions leaked to anyone who could answer an mDNS query.
 - Decision:
   - **Wi-Fi proves both ends; loopback and USB prove neither, deliberately.** The Simulator, `adb reverse`, and the usbmux tunnel all terminate on 127.0.0.1, where the kernel already guarantees the peer is this machine. A key there would protect against nothing and would be one more thing to go wrong in the path people use most. So `isTrusted` short-circuits the whole handshake, and the failure the ADR exists to stop cannot occur on those transports by construction.

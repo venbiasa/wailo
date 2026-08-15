@@ -2,7 +2,7 @@ import CryptoKit
 import XCTest
 @testable import WailoSDK
 
-/// The handshake's byte layouts (ADR-0039), pinned as vectors.
+/// The identity-first handshake's byte layouts (ADR-0060), pinned as vectors.
 ///
 /// `engine` and `sdk-android` reimplement all of this against `java.security` — the two builds cannot
 /// share code — so the only thing keeping them interoperable is that both sides assert the *same*
@@ -13,19 +13,13 @@ final class WailoCryptoTests: XCTestCase {
     // Fixed inputs. Arbitrary, but they must never change.
     static let pairingSecret = Data((0..<32).map { UInt8($0) })
     static let studioId = "0123456789abcdef0123456789abcdef"
-    static let deviceId = "device-0001"
+    static let deviceAlias = "00112233445566778899aabbccddeeff"
     static let nonceD = Data((0..<32).map { UInt8(0x40 + $0) })
     static let nonceS = Data((0..<32).map { UInt8(0x60 + $0) })
     /// Fixed agreement scalars, so the derived point and every key below it are reproducible on both
     /// platforms. Real ones are random per connection; these exist only to be asserted.
     static let scalarD = Data((1...32).map { UInt8($0) })
     static let scalarS = Data((33...64).map { UInt8($0) })
-
-    private var deviceKey: SymmetricKey {
-        WailoCrypto.deviceKey(
-            pairingSecret: Self.pairingSecret, studioId: Self.studioId, deviceId: Self.deviceId
-        )
-    }
 
     private var ephemeralD: Data {
         get throws { try P256.KeyAgreement.PrivateKey(rawRepresentation: Self.scalarD).publicKey.x963Representation }
@@ -40,13 +34,6 @@ final class WailoCryptoTests: XCTestCase {
             let device = try P256.KeyAgreement.PrivateKey(rawRepresentation: Self.scalarD)
             return try XCTUnwrap(WailoCrypto.agree(device, peer: ephemeralS))
         }
-    }
-
-    func testDeviceKeyVector() {
-        XCTAssertEqual(
-            deviceKey.bytes.hexadecimal,
-            "0f5f735ac79ff7b5174adb12a2d175eeba55e307d27c4c30d52c879bef311c44"
-        )
     }
 
     /// The agreed secret, and the two public points it was agreed from. Everything else in this file
@@ -77,76 +64,110 @@ final class WailoCryptoTests: XCTestCase {
         XCTAssertNil(WailoCrypto.agree(device, peer: Data()))
     }
 
-    /// A first contact has no long-term key, so the session rests on the agreement alone.
-    func testTofuDeviceKeyVector() throws {
+    func testV3KeyScheduleVectors() throws {
+        let v3DeviceKey = WailoCrypto.deviceKeyV3(
+            pairingSecret: Self.pairingSecret,
+            studioId: Self.studioId,
+            deviceAlias: Self.deviceAlias
+        )
         XCTAssertEqual(
-            try WailoCrypto.tofuDeviceKey(
-                shared: shared, studioId: Self.studioId, deviceId: Self.deviceId
+            v3DeviceKey.bytes.hexadecimal,
+            "df6ad188cc1263df05a07b927dc4cf11c4ab8a6131fef1109f6b1cc7e7b66c17"
+        )
+        XCTAssertEqual(
+            try WailoCrypto.tofuDeviceKeyV3(
+                shared: shared,
+                studioId: Self.studioId,
+                deviceAlias: Self.deviceAlias
             ).bytes.hexadecimal,
-            "b504b4985c3055c9b4d07e9800b8d3234b802ba3dcf1fafea26fabd877cdd1df"
+            "792e0d6856885a4cd6205927f8f43858fcac1c8fa61d9f2bf90a215e61bf0bf3"
+        )
+        XCTAssertEqual(
+            try WailoCrypto.authKeyV3(shared: shared, deviceKey: v3DeviceKey).bytes.hexadecimal,
+            "8300755de092d366f9cb3562147176965f77df7dff6547b8c88a09979ed12e3b"
+        )
+        XCTAssertEqual(
+            try WailoCrypto.sessionKeyV3(
+                shared: shared,
+                deviceKey: v3DeviceKey,
+                nonceD: Self.nonceD,
+                nonceS: Self.nonceS
+            ).bytes.hexadecimal,
+            "5d6219803478b15a9a9642e4e0adaa94937a7bae7fc12047a839e32790045b37"
         )
     }
 
-    func testAuthKeyVector() throws {
-        XCTAssertEqual(
-            try WailoCrypto.authKey(shared: shared, deviceKey: nil).bytes.hexadecimal,
-            "37cfb80bf35ea202e79894afc5babc35aac2d604e6eea05deffe0ea50473a834"
+    func testV3ProofVectors() throws {
+        let authKey = try WailoCrypto.authKeyV3(
+            shared: shared,
+            deviceKey: WailoCrypto.deviceKeyV3(
+                pairingSecret: Self.pairingSecret,
+                studioId: Self.studioId,
+                deviceAlias: Self.deviceAlias
+            )
         )
         XCTAssertEqual(
-            try WailoCrypto.authKey(shared: shared, deviceKey: deviceKey).bytes.hexadecimal,
-            "28c5cb8ca5bcc0ab7327bf87088f4e756578abb3e14fdda32d9e4bb509c5153b"
-        )
-    }
-
-    func testSessionKeyVector() throws {
-        XCTAssertEqual(
-            try WailoCrypto.sessionKey(
-                shared: shared, deviceKey: nil, nonceD: Self.nonceD, nonceS: Self.nonceS
-            ).bytes.hexadecimal,
-            "feebb90e8f30121c043444b0eb3c4a907d9622a8c3144e532311cf44e289a403"
-        )
-        XCTAssertEqual(
-            try WailoCrypto.sessionKey(
-                shared: shared, deviceKey: deviceKey, nonceD: Self.nonceD, nonceS: Self.nonceS
-            ).bytes.hexadecimal,
-            "895b7888dbd5f197933cd84537169fa3e6aa2aa140660d489054ba6cd3d8c69b"
-        )
-    }
-
-    func testDeviceProofVector() throws {
-        XCTAssertEqual(
-            try WailoCrypto.deviceProof(
-                authKey: WailoCrypto.authKey(shared: shared, deviceKey: deviceKey),
-                studioId: Self.studioId, nonceD: Self.nonceD, nonceS: Self.nonceS,
-                ephemeralD: ephemeralD, ephemeralS: ephemeralS
+            try WailoCrypto.deviceProofV3(
+                authKey: authKey,
+                studioId: Self.studioId,
+                nonceD: Self.nonceD,
+                nonceS: Self.nonceS,
+                ephemeralD: ephemeralD,
+                ephemeralS: ephemeralS,
+                pairingRequired: true,
+                deviceAlias: Self.deviceAlias,
+                mode: 1,
+                sessionCounter: 42
             ).hexadecimal,
-            "e4556159809a931fd61e10aa8252efcabfdd116d465ee347ad5a5b697dbf34a9"
+            "26c6d7a65f27e0613796bcf81c311c8739443bed3be1f8b4a879d51aa0be4e43"
         )
-    }
-
-    func testStudioMacVector() throws {
         XCTAssertEqual(
-            try WailoCrypto.studioMac(
-                authKey: WailoCrypto.authKey(shared: shared, deviceKey: deviceKey),
-                studioId: Self.studioId, nonceD: Self.nonceD, nonceS: Self.nonceS,
-                ephemeralD: ephemeralD, ephemeralS: ephemeralS
+            try WailoCrypto.studioProofV3(
+                authKey: authKey,
+                studioId: Self.studioId,
+                nonceD: Self.nonceD,
+                nonceS: Self.nonceS,
+                ephemeralD: ephemeralD,
+                ephemeralS: ephemeralS,
+                pairingRequired: true,
+                deviceAlias: Self.deviceAlias,
+                mode: 1,
+                sessionCounter: 42,
+                resultCode: 1
             ).hexadecimal,
-            "e369baf64bccd686dda614f3cf30ace730fb45944826f91419d9ede32b4d4199"
+            "523866c51d880396974b66dc160d3b543f29a6718f3b5682342194744c8ac037"
         )
-    }
-
-    /// Swapping an ephemeral key must change what Studio signed over, which is what makes substituting
-    /// one detectable rather than a silent man in the middle.
-    func testTranscriptCoversEphemeralKeys() throws {
-        let baseline = try WailoCrypto.transcript(
-            role: "wailo/studio", studioId: Self.studioId,
-            nonceD: Self.nonceD, nonceS: Self.nonceS, ephemeralD: ephemeralD, ephemeralS: ephemeralS
+        XCTAssertEqual(
+            try WailoCrypto.deviceProofV3(
+                authKey: authKey,
+                studioId: Self.studioId,
+                nonceD: Self.nonceD,
+                nonceS: Self.nonceS,
+                ephemeralD: ephemeralD,
+                ephemeralS: ephemeralS,
+                pairingRequired: false,
+                deviceAlias: Self.deviceAlias,
+                mode: 1,
+                sessionCounter: 42
+            ).hexadecimal,
+            "42ecb4b2b8178ce16267b7a58a1c76f7e700366c56c0fdab35cdef45156caf9b"
         )
-        let swapped = try WailoCrypto.transcript(
-            role: "wailo/studio", studioId: Self.studioId,
-            nonceD: Self.nonceD, nonceS: Self.nonceS, ephemeralD: ephemeralD, ephemeralS: ephemeralD
+        XCTAssertEqual(
+            try WailoCrypto.studioProofV3(
+                authKey: authKey,
+                studioId: Self.studioId,
+                nonceD: Self.nonceD,
+                nonceS: Self.nonceS,
+                ephemeralD: ephemeralD,
+                ephemeralS: ephemeralS,
+                pairingRequired: false,
+                deviceAlias: Self.deviceAlias,
+                mode: 1,
+                sessionCounter: 42,
+                resultCode: 1
+            ).hexadecimal,
+            "c533d92ab93a2df6fcd2cecd86b982def9dbc516ed5ca312bb1723cfc62ae821"
         )
-        XCTAssertNotEqual(baseline, swapped)
     }
 
     /// Studio's identity is a hash of the key, which is what lets a device reject an impostor that
@@ -197,6 +218,16 @@ final class WailoCryptoTests: XCTestCase {
         let sealed = try device.seal(Data("once".utf8))
         _ = try studio.open(seq: sealed.seq, ciphertext: sealed.ciphertext)
         XCTAssertThrowsError(try studio.open(seq: sealed.seq, ciphertext: sealed.ciphertext))
+    }
+
+    func testSkippedFrameIsRejected() throws {
+        let key = SymmetricKey(data: Data(repeating: 0x11, count: 32))
+        let device = WailoFrameCodec(sessionKey: key, sealing: .deviceToStudio, opening: .studioToDevice)
+        let studio = WailoFrameCodec(sessionKey: key, sealing: .studioToDevice, opening: .deviceToStudio)
+
+        _ = try device.seal(Data("skipped".utf8))
+        let second = try device.seal(Data("second".utf8))
+        XCTAssertThrowsError(try studio.open(seq: second.seq, ciphertext: second.ciphertext))
     }
 
     func testAlteredCiphertextIsRejected() throws {
