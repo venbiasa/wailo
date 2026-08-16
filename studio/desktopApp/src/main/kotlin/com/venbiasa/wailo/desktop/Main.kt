@@ -42,6 +42,7 @@ import com.venbiasa.wailo.host.HostSeed
 import com.venbiasa.wailo.host.spendSeedOn as spendHostSeedOn
 import com.venbiasa.wailo.protocol.CaptureFilter
 import com.venbiasa.wailo.protocol.Header
+import com.venbiasa.wailo.shared.BreakpointLayoutCodec
 import com.venbiasa.wailo.shared.BreakpointNode
 import com.venbiasa.wailo.shared.BreakpointRuleDef
 import com.venbiasa.wailo.shared.CaptureFilterState
@@ -49,6 +50,7 @@ import com.venbiasa.wailo.shared.DeviceConnectionStatus
 import com.venbiasa.wailo.shared.DeviceInfo
 import com.venbiasa.wailo.shared.DeviceTransportKind
 import com.venbiasa.wailo.shared.FlowEntry
+import com.venbiasa.wailo.shared.MapLocalLayoutCodec
 import com.venbiasa.wailo.shared.MapLocalNode
 import com.venbiasa.wailo.shared.MapLocalRuleDef
 import com.venbiasa.wailo.shared.PairedDeviceInfo
@@ -352,28 +354,41 @@ private fun runWailo(engine: DaemonClient) = application {
     }
     LaunchedEffect(daemonCaptureFilter) {
         val signature = captureFilterSignature(daemonCaptureFilter)
-        if (signature != lastPublishedFilterSignature) {
-            val imported = daemonCaptureFilter.toUiState()
-            captureFilter = imported
-            CaptureFilterStore.save(imported)
-            lastPublishedFilterSignature = signature
+        if (signature == lastPublishedFilterSignature) return@LaunchedEffect
+        val daemonConfigured = daemonCaptureFilter.allow_patterns.isNotEmpty() ||
+            daemonCaptureFilter.block_patterns.isNotEmpty()
+        val localConfigured = captureFilter.allowHosts.isNotEmpty() || captureFilter.blockHosts.isNotEmpty()
+        // An empty daemon snapshot is a restart, not a user-cleared filter. Re-push the authored lists
+        // rather than copying emptiness into prefs (ADR-0061).
+        if (localConfigured && !daemonConfigured) {
+            val on = captureFilter.masterEnabled
+            engine.updateCaptureFilter(
+                allowlistEnabled = on && captureFilter.allowEnabled,
+                allowPatterns = captureFilter.allowHosts,
+                blocklistEnabled = on && captureFilter.blockEnabled,
+                blockPatterns = captureFilter.blockHosts,
+            )
+            lastPublishedFilterSignature = captureFilterSignature(captureFilter)
+            return@LaunchedEffect
         }
+        val imported = daemonCaptureFilter.toUiState()
+        captureFilter = imported
+        CaptureFilterStore.save(imported)
+        lastPublishedFilterSignature = signature
     }
 
-    // Map Local layout (groups + rules, in priority order): host-owned and persisted (like bookmarks).
-    // `shared` renders it and hands back a whole new layout for any structural change; the host is the
-    // only side that reads files and talks to the engine. The tool panel's open state and any row-seeded
-    // draft are the viewer's own transient state now (ADR-0021), so the host only owns the layout.
+    // Map Local layout (groups + rules, in priority order): Studio prefs keep the authored structure;
+    // the daemon persists the compiled snapshot plus that layout string so a restart still serves and
+    // still restores groups (ADR-0061). `shared` only renders the layout.
     val daemonMapLocalRules by engine.mapLocalRules.collectAsState()
     val daemonMapLocalEnabled by engine.mapLocalEnabled.collectAsState()
+    val daemonMapLocalLayout by engine.mapLocalLayout.collectAsState()
+    val storedMapLocal = remember { MapLocalStore.load() }
     val initialDaemonMapRules = remember { engine.mapLocalRules.value }
+    val initialDaemonMapLayout = remember { engine.mapLocalLayout.value }
     var mapLocalNodes by remember {
         mutableStateOf(
-            if (initialDaemonMapRules.isEmpty()) {
-                MapLocalStore.load()
-            } else {
-                importMapLocalRules(initialDaemonMapRules)
-            },
+            initialMapLocalNodes(storedMapLocal, initialDaemonMapLayout, initialDaemonMapRules),
         )
     }
     val onLayoutChange = { next: List<MapLocalNode> ->
@@ -388,7 +403,7 @@ private fun runWailo(engine: DaemonClient) = application {
     // pushed (see below) — the saved layout is untouched, so flipping it back on restores every rule.
     var mapLocalEnabled by remember {
         mutableStateOf(
-            if (initialDaemonMapRules.isEmpty()) MapLocalStore.loadEnabled() else engine.mapLocalEnabled.value,
+            if (storedMapLocal.isNotEmpty()) MapLocalStore.loadEnabled() else engine.mapLocalEnabled.value,
         )
     }
     val onMapLocalEnabledChange = { next: Boolean ->
@@ -402,36 +417,52 @@ private fun runWailo(engine: DaemonClient) = application {
         val rules = withContext(Dispatchers.IO) { mapLocalNodes.toHostMapLocalRules() }
         val signature = mapRuleSignature(rules, mapLocalEnabled)
         if (signature != lastPublishedMapSignature) {
-            engine.replaceMapLocalRules(rules, mapLocalEnabled)
+            engine.replaceMapLocalRules(rules, mapLocalEnabled, MapLocalLayoutCodec.encode(mapLocalNodes))
             lastPublishedMapSignature = signature
         }
     }
-    LaunchedEffect(daemonMapLocalRules, daemonMapLocalEnabled) {
+    LaunchedEffect(daemonMapLocalRules, daemonMapLocalEnabled, daemonMapLocalLayout) {
         val signature = mapRuleSignature(daemonMapLocalRules, daemonMapLocalEnabled)
-        if (signature != lastPublishedMapSignature) {
-            val imported = withContext(Dispatchers.IO) { importMapLocalRules(daemonMapLocalRules) }
-            mapLocalNodes = imported
-            mapLocalEnabled = daemonMapLocalEnabled
-            MapLocalStore.save(imported)
-            MapLocalStore.saveEnabled(daemonMapLocalEnabled)
-            lastPublishedMapSignature = signature
+        if (signature == lastPublishedMapSignature) return@LaunchedEffect
+        // Studio's grouped layout is the authoring copy. An empty daemon is a restart, not a delete —
+        // re-seed it. A non-empty daemon while we already have a layout is a flattened projection of
+        // the same rules (or an MCP upsert); importing it would drop groups and names.
+        if (mapLocalNodes.isNotEmpty()) {
+            if (daemonMapLocalRules.isEmpty()) {
+                val rules = withContext(Dispatchers.IO) { mapLocalNodes.toHostMapLocalRules() }
+                engine.replaceMapLocalRules(rules, mapLocalEnabled, MapLocalLayoutCodec.encode(mapLocalNodes))
+                lastPublishedMapSignature = mapRuleSignature(rules, mapLocalEnabled)
+            }
+            return@LaunchedEffect
         }
+        val imported = if (daemonMapLocalLayout.isNotBlank()) {
+            MapLocalLayoutCodec.decode(daemonMapLocalLayout)
+        } else {
+            importMapLocalRules(daemonMapLocalRules)
+        }
+        if (imported.isEmpty()) return@LaunchedEffect
+        mapLocalNodes = imported
+        mapLocalEnabled = daemonMapLocalEnabled
+        MapLocalStore.save(imported)
+        MapLocalStore.saveEnabled(daemonMapLocalEnabled)
+        lastPublishedMapSignature = signature
     }
 
-    // Breakpoint layout: host-owned and persisted like Map Local (groups + rules in priority order). `shared`
-    // renders it and hands back a whole new layout for any structural change; the host persists it and pushes
-    // the compiled active rules. On a match a device pauses and the engine surfaces it via [pausedExchanges]
-    // below (ADR-0026/0027).
+    // Breakpoint layout: Studio prefs keep the authored structure; the daemon persists the compiled
+    // snapshot plus that layout string so a restart still arms the same rules (ADR-0061).
     val daemonBreakpointRules by engine.breakpointRules.collectAsState()
     val daemonBreakpointsEnabled by engine.breakpointsEnabled.collectAsState()
+    val daemonBreakpointLayout by engine.breakpointLayout.collectAsState()
+    val storedBreakpoints = remember { BreakpointStore.load() }
     val initialDaemonBreakpointRules = remember { engine.breakpointRules.value }
+    val initialDaemonBreakpointLayout = remember { engine.breakpointLayout.value }
     var breakpointNodes by remember {
         mutableStateOf(
-            if (initialDaemonBreakpointRules.isEmpty()) {
-                BreakpointStore.load()
-            } else {
-                importBreakpointRules(initialDaemonBreakpointRules)
-            },
+            initialBreakpointNodes(
+                storedBreakpoints,
+                initialDaemonBreakpointLayout,
+                initialDaemonBreakpointRules,
+            ),
         )
     }
     val onBreakpointLayoutChange = { next: List<BreakpointNode> ->
@@ -442,7 +473,7 @@ private fun runWailo(engine: DaemonClient) = application {
     // while the saved layout stays intact for when it flips back on.
     var breakpointsEnabled by remember {
         mutableStateOf(
-            if (initialDaemonBreakpointRules.isEmpty()) {
+            if (storedBreakpoints.isNotEmpty()) {
                 BreakpointStore.loadEnabled()
             } else {
                 engine.breakpointsEnabled.value
@@ -460,20 +491,40 @@ private fun runWailo(engine: DaemonClient) = application {
         val rules = breakpointNodes.toHostBreakpointRules()
         val signature = breakpointRuleSignature(rules, breakpointsEnabled)
         if (signature != lastPublishedBreakpointSignature) {
-            engine.replaceBreakpointRules(rules, breakpointsEnabled)
+            engine.replaceBreakpointRules(
+                rules,
+                breakpointsEnabled,
+                BreakpointLayoutCodec.encode(breakpointNodes),
+            )
             lastPublishedBreakpointSignature = signature
         }
     }
-    LaunchedEffect(daemonBreakpointRules, daemonBreakpointsEnabled) {
+    LaunchedEffect(daemonBreakpointRules, daemonBreakpointsEnabled, daemonBreakpointLayout) {
         val signature = breakpointRuleSignature(daemonBreakpointRules, daemonBreakpointsEnabled)
-        if (signature != lastPublishedBreakpointSignature) {
-            val imported = importBreakpointRules(daemonBreakpointRules)
-            breakpointNodes = imported
-            breakpointsEnabled = daemonBreakpointsEnabled
-            BreakpointStore.save(imported)
-            BreakpointStore.saveEnabled(daemonBreakpointsEnabled)
-            lastPublishedBreakpointSignature = signature
+        if (signature == lastPublishedBreakpointSignature) return@LaunchedEffect
+        if (breakpointNodes.isNotEmpty()) {
+            if (daemonBreakpointRules.isEmpty()) {
+                val rules = breakpointNodes.toHostBreakpointRules()
+                engine.replaceBreakpointRules(
+                    rules,
+                    breakpointsEnabled,
+                    BreakpointLayoutCodec.encode(breakpointNodes),
+                )
+                lastPublishedBreakpointSignature = breakpointRuleSignature(rules, breakpointsEnabled)
+            }
+            return@LaunchedEffect
         }
+        val imported = if (daemonBreakpointLayout.isNotBlank()) {
+            BreakpointLayoutCodec.decode(daemonBreakpointLayout)
+        } else {
+            importBreakpointRules(daemonBreakpointRules)
+        }
+        if (imported.isEmpty()) return@LaunchedEffect
+        breakpointNodes = imported
+        breakpointsEnabled = daemonBreakpointsEnabled
+        BreakpointStore.save(imported)
+        BreakpointStore.saveEnabled(daemonBreakpointsEnabled)
+        lastPublishedBreakpointSignature = signature
     }
 
     // Seed layout: host-owned and persisted like the two above. Seeds never reach a device — they are
@@ -900,6 +951,16 @@ private fun captureFilterSignature(filter: CaptureFilterState): String {
         "${on && filter.blockEnabled}:${filter.blockHosts.joinToString("\u0000")}"
 }
 
+private fun initialMapLocalNodes(
+    stored: List<MapLocalNode>,
+    daemonLayout: String,
+    daemonRules: List<HostMapLocalRule>,
+): List<MapLocalNode> = when {
+    stored.isNotEmpty() -> stored
+    daemonLayout.isNotBlank() -> MapLocalLayoutCodec.decode(daemonLayout)
+    else -> importMapLocalRules(daemonRules)
+}
+
 private fun List<MapLocalNode>.toHostMapLocalRules(): List<HostMapLocalRule> = allRules().map { rule ->
     val body = MapLocalStore.loadServedBodyOrNull(rule)
     HostMapLocalRule(
@@ -955,6 +1016,16 @@ private fun mapRuleSignature(rules: List<HostMapLocalRule>, enabled: Boolean): S
             append(rule.bodyCopy().contentHashCode())
         }
     }
+
+private fun initialBreakpointNodes(
+    stored: List<BreakpointNode>,
+    daemonLayout: String,
+    daemonRules: List<HostBreakpointRule>,
+): List<BreakpointNode> = when {
+    stored.isNotEmpty() -> stored
+    daemonLayout.isNotBlank() -> BreakpointLayoutCodec.decode(daemonLayout)
+    else -> importBreakpointRules(daemonRules)
+}
 
 private fun List<BreakpointNode>.toHostBreakpointRules(): List<HostBreakpointRule> = allRules().map { rule ->
     HostBreakpointRule(

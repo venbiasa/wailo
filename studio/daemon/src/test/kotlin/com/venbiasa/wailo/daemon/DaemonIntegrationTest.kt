@@ -176,23 +176,69 @@ class DaemonIntegrationTest {
         }
     }
 
-    private fun harness(): Harness {
+    @Test
+    fun mapLocalRulesSurviveADaemonRestart() = runBlocking {
+        val directory = Files.createTempDirectory("wailo-daemon-fixtures")
+        try {
+            harness(directory, deleteDirectory = false).use { first ->
+                val client = first.client()
+                try {
+                    assertTrue(client.awaitReady())
+                    client.replaceMapLocalRules(
+                        listOf(
+                            HostMapLocalRule(
+                                id = "login",
+                                urlPattern = "https://example.com/login",
+                                body = """{"ok":true}""".toByteArray(),
+                            ),
+                        ),
+                        enabled = true,
+                        layout = "R|login|1|aHR0cHM6Ly9leGFtcGxlLmNvbS9sb2dpbg==||200|",
+                    )
+                } finally {
+                    client.close()
+                }
+            }
+            harness(directory, deleteDirectory = false).use { second ->
+                val client = second.client()
+                try {
+                    assertTrue(client.awaitReady())
+                    withTimeout(5_000) {
+                        while (client.mapLocalRules.value.none { it.id == "login" }) delay(25)
+                    }
+                    val rule = client.mapLocalRules.value.single()
+                    assertEquals("https://example.com/login", rule.urlPattern)
+                    assertEquals("""{"ok":true}""", rule.bodyCopy().decodeToString())
+                    assertEquals("R|login|1|aHR0cHM6Ly9leGFtcGxlLmNvbS9sb2dpbg==||200|", client.mapLocalLayout.value)
+                } finally {
+                    client.close()
+                }
+            }
+        } finally {
+            directory.toFile().deleteRecursively()
+        }
+    }
+
+    private fun harness(
+        directory: java.nio.file.Path = Files.createTempDirectory("wailo-daemon-test"),
+        deleteDirectory: Boolean = true,
+    ): Harness {
         val handshakeStore = MemoryDaemonHandshakeStore()
         val host = HeadlessHost.wrap(WailoEngine(port = ServerSocket(0).use { it.localPort }))
-        val directory = Files.createTempDirectory("wailo-daemon-test")
         val runtime = DaemonRuntime(
             host = host,
             usb = NoopUsbController(8900),
             adb = NoopAdbController(),
             settings = DaemonSettings(directory.resolve("settings.properties")),
             pairingSupported = false,
+            fixtures = DaemonFixturesStore(directory),
         )
         val server = DaemonServer(
             runtime = runtime,
             handshakeStore = handshakeStore,
             onStop = {},
         ).also(DaemonServer::start)
-        return Harness(host, runtime, server, handshakeStore, directory)
+        return Harness(host, runtime, server, handshakeStore, directory, deleteDirectory)
     }
 
     private class Harness(
@@ -201,6 +247,7 @@ class DaemonIntegrationTest {
         val server: DaemonServer,
         private val handshakeStore: MemoryDaemonHandshakeStore,
         private val directory: java.nio.file.Path,
+        private val deleteDirectory: Boolean = true,
     ) : AutoCloseable {
         fun client() = DaemonClient(
             rpc = DaemonRpcClient(handshakeStore),
@@ -212,7 +259,7 @@ class DaemonIntegrationTest {
         override fun close() {
             server.close()
             runtime.close()
-            directory.toFile().deleteRecursively()
+            if (deleteDirectory) directory.toFile().deleteRecursively()
         }
     }
 }

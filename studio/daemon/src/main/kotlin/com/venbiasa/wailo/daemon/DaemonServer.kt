@@ -1,6 +1,8 @@
 package com.venbiasa.wailo.daemon
 
 import com.venbiasa.wailo.host.HeadlessHost
+import com.venbiasa.wailo.host.HostBreakpointRule
+import com.venbiasa.wailo.host.HostMapLocalRule
 import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.io.IOException
@@ -54,6 +56,7 @@ internal class DaemonRuntime(
     private val pairingSupported: Boolean,
     mcpAccess: Boolean = true,
     mcpRedactSecrets: Boolean = true,
+    private val fixtures: DaemonFixturesStore = DaemonFixturesStore(),
 ) : AutoCloseable {
     // Daemon-owned rather than engine-owned: neither value changes what is captured, only what an MCP
     // client is allowed to do with it, and both must outlive whichever frontend flipped them.
@@ -61,6 +64,20 @@ internal class DaemonRuntime(
     private val _mcpRedactSecrets = MutableStateFlow(mcpRedactSecrets)
     val mcpAccess: StateFlow<Boolean> = _mcpAccess.asStateFlow()
     val mcpRedactSecrets: StateFlow<Boolean> = _mcpRedactSecrets.asStateFlow()
+
+    // Studio's grouped layout codec, opaque to this module. Loaded with the compiled rules so a restart
+    // can restore groups/names, not just the flattened match-set the engine pushes (ADR-0061).
+    @Volatile
+    var mapLocalLayout: String = ""
+        private set
+
+    @Volatile
+    var breakpointLayout: String = ""
+        private set
+
+    init {
+        restoreFixtures()
+    }
 
     fun poll(request: PollRequest): PollResponse {
         val current = host.listExchanges()
@@ -82,9 +99,9 @@ internal class DaemonRuntime(
         val holds = host.listHolds()
         val holdsHash = hash(holds.map { it.toDto() })
         val mapRules = host.mapLocalRules.value
-        val mapHash = hash(mapRules.map { it.toDto() })
+        val mapHash = hash(listOf(mapLocalLayout, mapRules.map { it.toDto() }))
         val breakpointRules = host.breakpointRules.value
-        val breakpointHash = hash(breakpointRules.map { it.toDto() })
+        val breakpointHash = hash(listOf(breakpointLayout, breakpointRules.map { it.toDto() }))
         val engine = host.engine
         val identity = engine.pairings.identity.value
         val offer = engine.pairings.offer.value
@@ -107,11 +124,13 @@ internal class DaemonRuntime(
             mapLocalEnabled = host.isMapLocalEnabled(),
             mapLocalHash = mapHash,
             mapLocalRules = mapRules.takeUnless { request.mapLocalHash == mapHash }?.map { it.toDto() },
+            mapLocalLayout = this.mapLocalLayout.takeUnless { request.mapLocalHash == mapHash },
             breakpointsEnabled = host.areBreakpointsEnabled(),
             breakpointHash = breakpointHash,
             breakpointRules = breakpointRules
                 .takeUnless { request.breakpointHash == breakpointHash }
                 ?.map { it.toDto() },
+            breakpointLayout = this.breakpointLayout.takeUnless { request.breakpointHash == breakpointHash },
             pairing = PairingDto(
                 supported = pairingSupported,
                 requirePairing = engine.requirePairing.value,
@@ -175,10 +194,121 @@ internal class DaemonRuntime(
         settings.update { it.copy(mcpRedactSecrets = value) }
     }
 
+    suspend fun replaceMapLocal(
+        rules: List<HostMapLocalRule>,
+        enabled: Boolean,
+        layout: String?,
+    ) {
+        host.replaceMapLocalRules(rules, enabled)
+        // A full snapshot: omit means the compiled list is the authority, so drop a stale Studio blob.
+        mapLocalLayout = layout.orEmpty()
+        persistMapLocal()
+    }
+
+    suspend fun upsertMapLocal(rule: HostMapLocalRule) {
+        host.upsertMapLocalRule(rule)
+        persistMapLocal()
+    }
+
+    suspend fun removeMapLocal(id: String): Boolean {
+        val removed = host.removeMapLocalRule(id)
+        if (removed) persistMapLocal()
+        return removed
+    }
+
+    suspend fun setMapLocalEnabled(enabled: Boolean) {
+        host.setMapLocalEnabled(enabled)
+        persistMapLocal()
+    }
+
+    suspend fun replaceBreakpoints(
+        rules: List<HostBreakpointRule>,
+        enabled: Boolean,
+        layout: String?,
+    ) {
+        host.replaceBreakpointRules(rules, enabled)
+        breakpointLayout = layout.orEmpty()
+        persistBreakpoints()
+    }
+
+    suspend fun upsertBreakpoint(rule: HostBreakpointRule) {
+        host.upsertBreakpointRule(rule)
+        persistBreakpoints()
+    }
+
+    suspend fun removeBreakpoint(id: String): Boolean {
+        val removed = host.removeBreakpointRule(id)
+        if (removed) persistBreakpoints()
+        return removed
+    }
+
+    suspend fun setBreakpointsEnabled(enabled: Boolean) {
+        host.setBreakpointsEnabled(enabled)
+        persistBreakpoints()
+    }
+
+    fun updateCaptureFilter(
+        allowlistEnabled: Boolean,
+        allowPatterns: List<String>,
+        blocklistEnabled: Boolean,
+        blockPatterns: List<String>,
+    ) {
+        host.updateCaptureFilter(allowlistEnabled, allowPatterns, blocklistEnabled, blockPatterns)
+        fixtures.saveCaptureFilter(
+            PersistedCaptureFilter(
+                allowlistEnabled = allowlistEnabled,
+                allowPatterns = allowPatterns,
+                blocklistEnabled = blocklistEnabled,
+                blockPatterns = blockPatterns,
+            ),
+        )
+    }
+
     override fun close() {
         usb.close()
         adb.close()
         host.stop()
+    }
+
+    private fun restoreFixtures() {
+        runBlocking {
+            fixtures.loadMapLocalIfPresent()?.let { mapLocal ->
+                mapLocalLayout = mapLocal.layout
+                host.replaceMapLocalRules(mapLocal.rules.map { it.toDomain() }, mapLocal.enabled)
+            }
+            fixtures.loadBreakpointsIfPresent()?.let { breakpoints ->
+                breakpointLayout = breakpoints.layout
+                host.replaceBreakpointRules(breakpoints.rules.map { it.toDomain() }, breakpoints.enabled)
+            }
+            fixtures.loadCaptureFilterIfPresent()?.let { filter ->
+                host.updateCaptureFilter(
+                    filter.allowlistEnabled,
+                    filter.allowPatterns,
+                    filter.blocklistEnabled,
+                    filter.blockPatterns,
+                )
+            }
+        }
+    }
+
+    private fun persistMapLocal() {
+        fixtures.saveMapLocal(
+            PersistedMapLocal(
+                enabled = host.isMapLocalEnabled(),
+                layout = mapLocalLayout,
+                rules = host.mapLocalRules.value.map { it.toDto() },
+            ),
+        )
+    }
+
+    private fun persistBreakpoints() {
+        fixtures.saveBreakpoints(
+            PersistedBreakpoints(
+                enabled = host.areBreakpointsEnabled(),
+                layout = breakpointLayout,
+                rules = host.breakpointRules.value.map { it.toDto() },
+            ),
+        )
     }
 
     private fun hash(value: Any): String {
@@ -319,7 +449,7 @@ internal class DaemonServer(
             }
             "set_capture_filter" -> {
                 val value = request.decode(CaptureFilterRequest.serializer())
-                runtime.host.updateCaptureFilter(
+                runtime.updateCaptureFilter(
                     value.allowlistEnabled,
                     value.allowPatterns,
                     value.blocklistEnabled,
@@ -329,38 +459,42 @@ internal class DaemonServer(
             }
             "replace_map_local" -> {
                 val value = request.decode(ReplaceMapLocalRequest.serializer())
-                runtime.host.replaceMapLocalRules(value.rules.map(MapLocalRuleDto::toDomain), value.enabled)
+                runtime.replaceMapLocal(value.rules.map(MapLocalRuleDto::toDomain), value.enabled, value.layout)
                 success()
             }
             "upsert_map_local" -> {
-                runtime.host.upsertMapLocalRule(request.decode(MapLocalRuleDto.serializer()).toDomain())
+                runtime.upsertMapLocal(request.decode(MapLocalRuleDto.serializer()).toDomain())
                 success()
             }
             "remove_map_local" -> success(
                 DaemonJson.encodeToJsonElement(
-                    BooleanValue(runtime.host.removeMapLocalRule(request.decode(IdRequest.serializer()).id)),
+                    BooleanValue(runtime.removeMapLocal(request.decode(IdRequest.serializer()).id)),
                 ),
             )
             "set_map_local_enabled" -> {
-                runtime.host.setMapLocalEnabled(request.decode(BooleanValue.serializer()).value)
+                runtime.setMapLocalEnabled(request.decode(BooleanValue.serializer()).value)
                 success()
             }
             "replace_breakpoints" -> {
                 val value = request.decode(ReplaceBreakpointsRequest.serializer())
-                runtime.host.replaceBreakpointRules(value.rules.map(BreakpointRuleDto::toDomain), value.enabled)
+                runtime.replaceBreakpoints(
+                    value.rules.map(BreakpointRuleDto::toDomain),
+                    value.enabled,
+                    value.layout,
+                )
                 success()
             }
             "upsert_breakpoint" -> {
-                runtime.host.upsertBreakpointRule(request.decode(BreakpointRuleDto.serializer()).toDomain())
+                runtime.upsertBreakpoint(request.decode(BreakpointRuleDto.serializer()).toDomain())
                 success()
             }
             "remove_breakpoint" -> success(
                 DaemonJson.encodeToJsonElement(
-                    BooleanValue(runtime.host.removeBreakpointRule(request.decode(IdRequest.serializer()).id)),
+                    BooleanValue(runtime.removeBreakpoint(request.decode(IdRequest.serializer()).id)),
                 ),
             )
             "set_breakpoints_enabled" -> {
-                runtime.host.setBreakpointsEnabled(request.decode(BooleanValue.serializer()).value)
+                runtime.setBreakpointsEnabled(request.decode(BooleanValue.serializer()).value)
                 success()
             }
             "resume_hold" -> {

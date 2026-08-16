@@ -62,9 +62,11 @@ internal data class PollResponse(
     val mapLocalEnabled: Boolean,
     val mapLocalHash: String,
     val mapLocalRules: List<MapLocalRuleDto>? = null,
+    val mapLocalLayout: String? = null,
     val breakpointsEnabled: Boolean,
     val breakpointHash: String,
     val breakpointRules: List<BreakpointRuleDto>? = null,
+    val breakpointLayout: String? = null,
     val pairing: PairingDto,
     val mcpAccess: Boolean,
     val mcpRedactSecrets: Boolean,
@@ -257,12 +259,14 @@ internal data class CaptureFilterRequest(
 internal data class ReplaceMapLocalRequest(
     val enabled: Boolean,
     val rules: List<MapLocalRuleDto>,
+    val layout: String? = null,
 )
 
 @Serializable
 internal data class ReplaceBreakpointsRequest(
     val enabled: Boolean,
     val rules: List<BreakpointRuleDto>,
+    val layout: String? = null,
 )
 
 @Serializable

@@ -152,8 +152,11 @@ probe also versions the local control API, so a newer frontend can replace an in
 `wailo-cli` sends one command directly to the daemon; `serve` remains a compatibility command that ensures
 the daemon is running and returns. `wailo-mcp` remains a client-owned stdio process for Cursor/Claude, but
 it is now only a protocol adapter over the daemon. Multiple MCP clients, CLI invocations, and Studio can
-coexist without capture-port conflicts or split state. Map Local response bytes stay in the daemon's host
-registry and are fetched lazily through `MapLocalBodyProvider`.
+coexist without capture-port conflicts or split state. Map Local, breakpoint rules, and the capture filter
+are daemon files under `~/.wailo/` so a restart still serves the same mocks and filter; Studio's grouped
+layouts ride along as opaque strings. Captured traffic and paused holds remain in-memory session state
+(ADR-0061). Map Local response bytes stay in the daemon's host registry and are fetched lazily through
+`MapLocalBodyProvider`.
 
 Two daemon settings govern that adapter rather than its lifecycle (ADR-0059). AI tool access, on by
 default, is a gate: with it off every MCP tool including `status` is refused, while capture, Studio, and the

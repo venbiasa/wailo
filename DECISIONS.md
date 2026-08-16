@@ -68,3 +68,4 @@ reasoning in the ADR file, not here.
 | [0058](docs/decisions/ADR-0058-one-persistent-local-daemon-is-shared-by-studio-cli.md) | 2026-08-13 | accepted | One persistent local daemon is shared by Studio, CLI, and MCP (supersedes ADR-0056/0057 process ownership) |
 | [0059](docs/decisions/ADR-0059-ai-tool-access-is-a-revocable-daemon-setting-with.md) | 2026-08-13 | accepted | AI tool access is a revocable daemon setting with redaction on by default, and the control port is discovered |
 | [0060](docs/decisions/ADR-0060-wi-fi-authentication-is-identity-first-with-per-studio-device-aliases.md) | 2026-08-14 | accepted | Wi-Fi authentication is identity-first, with per-Studio device aliases |
+| [0061](docs/decisions/ADR-0061-map-local-and-breakpoint-rules-persist-on-the-daemon.md) | 2026-08-16 | accepted | Daemon-owned configuration is durable; traffic and holds stay a session |

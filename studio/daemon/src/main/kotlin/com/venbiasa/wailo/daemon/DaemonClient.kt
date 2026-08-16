@@ -101,10 +101,14 @@ class DaemonClient internal constructor(
     val mapLocalRules: StateFlow<List<HostMapLocalRule>> = _mapLocalRules.asStateFlow()
     private val _mapLocalEnabled = MutableStateFlow(true)
     val mapLocalEnabled: StateFlow<Boolean> = _mapLocalEnabled.asStateFlow()
+    private val _mapLocalLayout = MutableStateFlow("")
+    val mapLocalLayout: StateFlow<String> = _mapLocalLayout.asStateFlow()
     private val _breakpointRules = MutableStateFlow<List<HostBreakpointRule>>(emptyList())
     val breakpointRules: StateFlow<List<HostBreakpointRule>> = _breakpointRules.asStateFlow()
     private val _breakpointsEnabled = MutableStateFlow(true)
     val breakpointsEnabled: StateFlow<Boolean> = _breakpointsEnabled.asStateFlow()
+    private val _breakpointLayout = MutableStateFlow("")
+    val breakpointLayout: StateFlow<String> = _breakpointLayout.asStateFlow()
     private val _pairing = MutableStateFlow(DaemonPairingState())
     val pairing: StateFlow<DaemonPairingState> = _pairing.asStateFlow()
     private val _mcpAccess = MutableStateFlow(true)
@@ -247,10 +251,15 @@ class DaemonClient internal constructor(
         )
     }
 
-    suspend fun replaceMapLocalRules(rules: List<HostMapLocalRule>, enabled: Boolean) {
-        command("replace_map_local", ReplaceMapLocalRequest(enabled, rules.map { it.toDto() }))
+    suspend fun replaceMapLocalRules(
+        rules: List<HostMapLocalRule>,
+        enabled: Boolean,
+        layout: String? = null,
+    ) {
+        command("replace_map_local", ReplaceMapLocalRequest(enabled, rules.map { it.toDto() }, layout))
         _mapLocalRules.value = rules.toList()
         _mapLocalEnabled.value = enabled
+        if (layout != null) _mapLocalLayout.value = layout
     }
 
     suspend fun upsertMapLocalRule(rule: HostMapLocalRule) {
@@ -269,10 +278,15 @@ class DaemonClient internal constructor(
         _mapLocalEnabled.value = enabled
     }
 
-    suspend fun replaceBreakpointRules(rules: List<HostBreakpointRule>, enabled: Boolean) {
-        command("replace_breakpoints", ReplaceBreakpointsRequest(enabled, rules.map { it.toDto() }))
+    suspend fun replaceBreakpointRules(
+        rules: List<HostBreakpointRule>,
+        enabled: Boolean,
+        layout: String? = null,
+    ) {
+        command("replace_breakpoints", ReplaceBreakpointsRequest(enabled, rules.map { it.toDto() }, layout))
         _breakpointRules.value = rules.toList()
         _breakpointsEnabled.value = enabled
+        if (layout != null) _breakpointLayout.value = layout
     }
 
     suspend fun upsertBreakpointRule(rule: HostBreakpointRule) {
@@ -386,9 +400,11 @@ class DaemonClient internal constructor(
         holdsHash = response.holdsHash
         _mapLocalEnabled.value = response.mapLocalEnabled
         response.mapLocalRules?.let { _mapLocalRules.value = it.map(MapLocalRuleDto::toDomain) }
+        response.mapLocalLayout?.let { _mapLocalLayout.value = it }
         mapHash = response.mapLocalHash
         _breakpointsEnabled.value = response.breakpointsEnabled
         response.breakpointRules?.let { _breakpointRules.value = it.map(BreakpointRuleDto::toDomain) }
+        response.breakpointLayout?.let { _breakpointLayout.value = it }
         breakpointHash = response.breakpointHash
         _pairing.value = response.pairing.toPublic()
         _mcpAccess.value = response.mcpAccess

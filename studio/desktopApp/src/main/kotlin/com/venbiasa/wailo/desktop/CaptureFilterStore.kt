@@ -20,21 +20,27 @@ object CaptureFilterStore {
     private const val MASTER_ENABLED_KEY = "captureFilterEnabled"
     private const val ALLOW_ENABLED_KEY = "captureAllowEnabled"
     private const val ALLOW_HOSTS_KEY = "captureAllowHosts"
+    // Read as fallback when the current key is empty, then dropped on the next save.
+    private const val LEGACY_ALLOW_HOSTS_KEY = "captureAllowlistHosts"
     private const val BLOCK_ENABLED_KEY = "captureBlockEnabled"
     private const val BLOCK_HOSTS_KEY = "captureBlockHosts"
     private const val SEPARATOR = "\n"
     private val store = createKeyValueStore("desktop")
 
     fun load(): CaptureFilterState {
-        val allowHosts = readHosts(ALLOW_HOSTS_KEY)
+        val fromNew = readHosts(ALLOW_HOSTS_KEY)
+        val allowHosts = fromNew.ifEmpty { readHosts(LEGACY_ALLOW_HOSTS_KEY) }
         val blockHosts = readHosts(BLOCK_HOSTS_KEY)
-        return CaptureFilterState(
+        val filter = CaptureFilterState(
             masterEnabled = store.getBoolean(MASTER_ENABLED_KEY, true),
-            allowEnabled = store.getBoolean(ALLOW_ENABLED_KEY, false) && allowHosts.isNotEmpty(),
+            allowEnabled = (store.getBoolean(ALLOW_ENABLED_KEY, false) || fromNew.isEmpty()) &&
+                allowHosts.isNotEmpty(),
             allowHosts = allowHosts,
             blockEnabled = store.getBoolean(BLOCK_ENABLED_KEY, false) && blockHosts.isNotEmpty(),
             blockHosts = blockHosts,
         )
+        if (fromNew.isEmpty() && allowHosts.isNotEmpty()) save(filter)
+        return filter
     }
 
     fun save(filter: CaptureFilterState) {
@@ -43,6 +49,7 @@ object CaptureFilterStore {
         store.putString(ALLOW_HOSTS_KEY, filter.allowHosts.joinToString(SEPARATOR))
         store.putBoolean(BLOCK_ENABLED_KEY, filter.blockEnabled)
         store.putString(BLOCK_HOSTS_KEY, filter.blockHosts.joinToString(SEPARATOR))
+        store.remove(LEGACY_ALLOW_HOSTS_KEY)
     }
 
     private fun readHosts(key: String): List<String> =
