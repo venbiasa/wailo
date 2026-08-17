@@ -10,6 +10,7 @@ import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.system.exitProcess
 import kotlin.time.Duration.Companion.seconds
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.runBlocking
 
 /** CLI frontend over the shared local daemon (ADR-0058). */
@@ -30,7 +31,10 @@ fun main(args: Array<String>) = runBlocking {
 
 private suspend fun runServe(parsed: ParsedArgs) {
     val daemon = try {
-        DaemonClient.connect(initialCapturePort = parsed.port.takeIf { parsed.portSpecified })
+        DaemonClient.connect(
+            initialCapturePort = parsed.port.takeIf { parsed.portSpecified },
+            holdPresence = parsed.keep,
+        )
     } catch (failure: Exception) {
         System.err.println("Could not start the Wailo daemon: ${failure.message}")
         exitProcess(1)
@@ -44,7 +48,16 @@ private suspend fun runServe(parsed: ParsedArgs) {
         "Wailo daemon is running; capture on ${daemon.capturePort.value}, " +
             "control on 127.0.0.1:${daemon.controlPort ?: 0}",
     )
-    daemon.close()
+    if (!parsed.keep) {
+        daemon.close()
+        return
+    }
+    println("Holding it open; press Ctrl-C to release it.")
+    try {
+        awaitCancellation()
+    } finally {
+        daemon.close()
+    }
 }
 
 private suspend fun runRemote(parsed: ParsedArgs) {
@@ -53,6 +66,9 @@ private suspend fun runRemote(parsed: ParsedArgs) {
             initialCapturePort = parsed.port.takeIf {
                 parsed.portSpecified && parsed.command == "rebind"
             },
+            // The waits are the only commands that outlive a moment, so they are the only ones that may
+            // pin the daemon; a one-shot that did would take it down again the instant it printed.
+            holdPresence = parsed.command in BLOCKING_COMMANDS,
         )
     } catch (failure: Exception) {
         System.err.println("Could not connect to the Wailo daemon: ${failure.message}")
@@ -71,6 +87,8 @@ private suspend fun runRemote(parsed: ParsedArgs) {
     if (result.message.isNotEmpty()) println(result.message)
     exitProcess(result.exitCode)
 }
+
+private val BLOCKING_COMMANDS = setOf("wait_exchange", "wait-exchange", "wait_hold", "wait-hold")
 
 internal data class CommandResult(val message: String, val exitCode: Int = 0)
 
@@ -372,6 +390,7 @@ internal data class ParsedArgs(
     val blockPatterns: List<String> = emptyList(),
     val bodyFile: String? = null,
     val bodyText: String? = null,
+    val keep: Boolean = false,
 )
 
 internal fun parseArgs(args: Array<String>): ParsedArgs? {
@@ -394,6 +413,7 @@ internal fun parseArgs(args: Array<String>): ParsedArgs? {
     val blockPatterns = mutableListOf<String>()
     var bodyFile: String? = null
     var bodyText: String? = null
+    var keep = false
     var i = 1
     while (i < args.size) {
         when (val a = args[i]) {
@@ -417,6 +437,7 @@ internal fun parseArgs(args: Array<String>): ParsedArgs? {
             "--body-text" -> bodyText = args.getOrNull(++i) ?: return null
             "--on" -> flag = true
             "--off" -> flag = false
+            "--keep" -> keep = true
             else -> return null
         }
         i += 1
@@ -442,6 +463,7 @@ internal fun parseArgs(args: Array<String>): ParsedArgs? {
         blockPatterns = blockPatterns,
         bodyFile = bodyFile,
         bodyText = bodyText,
+        keep = keep,
     )
 }
 
@@ -450,7 +472,7 @@ private fun printUsage() {
         """
         wailo-cli — frontend over the persistent shared Wailo daemon
 
-        wailo-cli serve [--port N]
+        wailo-cli serve [--port N] [--keep]
         wailo-cli status
         wailo-cli stop
         wailo-cli list_exchanges [--limit N]
@@ -476,8 +498,9 @@ private fun printUsage() {
         wailo-cli set_mcp_access --on|--off
         wailo-cli set_mcp_redaction --on|--off
 
-        Every invocation auto-starts and attaches to the same daemon. It keeps running after the CLI,
-        Studio, and MCP disconnect; use `wailo-cli stop` to stop it explicitly.
+        Every invocation auto-starts and attaches to the same daemon. It stays up while anything refers
+        to it — an open Studio, an MCP session, a connected app — and exits on its own once nothing has
+        for a while. `serve --keep` holds it open until Ctrl-C; `wailo-cli stop` ends it immediately.
 
         set_mcp_access gates whether AI tools reach this capture at all; set_mcp_redaction decides
         whether what they read has its credentials stripped. Both are also in Studio's Settings panel.

@@ -143,11 +143,20 @@ The `daemon` owns one `HeadlessHost`, the capture port, pairing Keychain, adb re
 usbmuxd connections. Any frontend starts it on demand if absent, then reads `~/.wailo/daemon.json` — the
 owner-only handshake carrying the OS-chosen control port, the control-protocol version, and the per-run
 token — and sees the same exchanges, devices, rules, filters, and holds. An exclusive lock on
-`~/.wailo/daemon.lock` keeps exactly one daemon publishing that handshake (ADR-0059). It keeps running when
-Studio closes or an MCP client's stdin reaches EOF; `wailo-cli stop` is the explicit shutdown path and
-suppresses relaunch by clients that were already open. A fresh frontend starts it again. The authenticated
+`~/.wailo/daemon.lock` keeps exactly one daemon publishing that handshake (ADR-0059). The authenticated
 probe also versions the local control API, so a newer frontend can replace an incompatible older daemon
 (ADR-0058).
+
+It stays up for exactly as long as something refers to it, where a reference is a socket held open: an
+open Studio, an MCP session, or a blocking `wait_*` CLI command. The OS closes those on a crash as it does
+on a clean exit, so the count cannot leak the way a detach message would. Everything else renews an idle
+window (`idleLingerMinutes`, default 30) instead of pinning the daemon — one-shot CLI commands, which
+would otherwise start a daemon and kill it again per invocation, and **captured traffic**, so a device
+keeps the daemon alive by capturing rather than merely by being plugged in. The window runs from the later
+of the last request, the last captured exchange or hold, and the last reference released. `wailo-cli serve
+--keep` holds it open until Ctrl-C; `wailo-cli stop` is the explicit shutdown path and, unlike an idle
+exit, suppresses relaunch by clients that were already open. A fresh frontend starts it again either way
+(ADR-0062).
 
 `wailo-cli` sends one command directly to the daemon; `serve` remains a compatibility command that ensures
 the daemon is running and returns. `wailo-mcp` remains a client-owned stdio process for Cursor/Claude, but

@@ -95,7 +95,7 @@ import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
 
 fun main() {
-    val daemon = runBlocking { DaemonClient.connect() }
+    val daemon = runBlocking { DaemonClient.connect(holdPresence = true) }
     try {
         runWailo(daemon)
     } finally {

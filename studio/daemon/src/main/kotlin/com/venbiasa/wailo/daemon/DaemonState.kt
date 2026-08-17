@@ -93,7 +93,13 @@ internal data class DaemonConfig(
     val requirePairing: Boolean,
     val mcpAccess: Boolean,
     val mcpRedactSecrets: Boolean,
+    val idleLingerMinutes: Int,
 )
+
+/** Long enough that stepping away between CLI commands does not cost the session; 0 disables the exit. */
+internal const val DEFAULT_IDLE_LINGER_MINUTES = 30
+
+internal const val MAX_IDLE_LINGER_MINUTES = 1_440
 
 internal class DaemonSettings(
     private val path: Path = wailoStateDir().resolve("daemon.properties"),
@@ -119,6 +125,13 @@ internal class DaemonSettings(
             // reads is redacted until the user decides otherwise (ADR-0059).
             mcpAccess = values.getProperty(MCP_ACCESS)?.toBooleanStrictOrNull() ?: true,
             mcpRedactSecrets = values.getProperty(MCP_REDACT_SECRETS)?.toBooleanStrictOrNull() ?: true,
+            idleLingerMinutes = System.getenv("WAILO_IDLE_LINGER_MINUTES")
+                ?.toIntOrNull()
+                ?.takeIf { it in 0..MAX_IDLE_LINGER_MINUTES }
+                ?: values.getProperty(IDLE_LINGER_MINUTES)
+                    ?.toIntOrNull()
+                    ?.takeIf { it in 0..MAX_IDLE_LINGER_MINUTES }
+                ?: DEFAULT_IDLE_LINGER_MINUTES,
         )
     }
 
@@ -132,6 +145,7 @@ internal class DaemonSettings(
             setProperty(REQUIRE_PAIRING, config.requirePairing.toString())
             setProperty(MCP_ACCESS, config.mcpAccess.toString())
             setProperty(MCP_REDACT_SECRETS, config.mcpRedactSecrets.toString())
+            setProperty(IDLE_LINGER_MINUTES, config.idleLingerMinutes.toString())
         }
         Files.createDirectories(path.parent)
         setOwnerOnly(path.parent, directory = true)
@@ -174,6 +188,7 @@ internal class DaemonSettings(
         const val REQUIRE_PAIRING = "requirePairing"
         const val MCP_ACCESS = "mcpAccess"
         const val MCP_REDACT_SECRETS = "mcpRedactSecrets"
+        const val IDLE_LINGER_MINUTES = "idleLingerMinutes"
     }
 }
 

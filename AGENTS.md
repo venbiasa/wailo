@@ -102,6 +102,7 @@ cd studio && ./gradlew :daemon:test :cli:test :mcp:test # shared service + headl
 cd studio && ./gradlew :cli:installDist
 cd studio && ./cli/build/install/wailo-cli/bin/wailo-cli status # auto-starts the daemon; reports the MCP gate
 cd studio && ./cli/build/install/wailo-cli/bin/wailo-cli set_mcp_access --off # revoke AI tool access (ADR-0059)
+cd studio && ./cli/build/install/wailo-cli/bin/wailo-cli serve --keep # pin the daemon until Ctrl-C (ADR-0062)
 cd studio && ./cli/build/install/wailo-cli/bin/wailo-cli stop   # explicit daemon shutdown
 cd studio && ./gradlew :mcp:installDist
 cd studio && ./mcp/build/install/wailo-mcp/bin/wailo-mcp # stdio adapter; stdout is protocol-only
@@ -120,6 +121,12 @@ WAILO_HOME=$(mktemp -d) WAILO_CAPTURE_PORT=8991 ./cli/build/install/wailo-cli/bi
 
 `WAILO_HOME` isolates daemon files and settings. A test that also needs an independent Studio
 identity/pairing Keychain must set `WAILO_KEYCHAIN_SERVICE` to a unique disposable service name.
+
+The daemon now exits on its own once nothing refers to it — no open frontend, and no captured traffic for
+`WAILO_IDLE_LINGER_MINUTES` (default 30; `0` disables it). A connected-but-quiet app does not keep it up.
+A scripted run whose steps are one-shot CLI commands with long gaps should either hold it with
+`wailo-cli serve --keep &` or set that to `0`, or it will find a fresh, empty daemon partway through
+(ADR-0062).
 
 ## Conventions
 

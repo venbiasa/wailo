@@ -69,3 +69,4 @@ reasoning in the ADR file, not here.
 | [0059](docs/decisions/ADR-0059-ai-tool-access-is-a-revocable-daemon-setting-with.md) | 2026-08-13 | accepted | AI tool access is a revocable daemon setting with redaction on by default, and the control port is discovered |
 | [0060](docs/decisions/ADR-0060-wi-fi-authentication-is-identity-first-with-per-studio-device-aliases.md) | 2026-08-14 | accepted | Wi-Fi authentication is identity-first, with per-Studio device aliases |
 | [0061](docs/decisions/ADR-0061-map-local-and-breakpoint-rules-persist-on-the-daemon.md) | 2026-08-16 | accepted | Daemon-owned configuration is durable; traffic and holds stay a session |
+| [0062](docs/decisions/ADR-0062-the-daemon-exits-once-nothing-refers-to-it.md) | 2026-08-16 | accepted | The daemon exits once nothing refers to it, and a reference is a held socket |

@@ -5,6 +5,8 @@ import com.venbiasa.wailo.host.HeadlessHost
 import com.venbiasa.wailo.host.HostMapLocalRule
 import java.net.ServerSocket
 import java.nio.file.Files
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -219,6 +221,66 @@ class DaemonIntegrationTest {
         }
     }
 
+    @Test
+    fun aFrontendRefersToTheDaemonForExactlyAsLongAsItIsOpen() = runBlocking {
+        harness().use { harness ->
+            val client = harness.presentClient()
+            try {
+                assertTrue(client.awaitReady())
+                withTimeout(5_000) {
+                    while (harness.server.references == 0) delay(25)
+                }
+            } finally {
+                client.close()
+            }
+
+            withTimeout(5_000) {
+                while (harness.server.references > 0) delay(25)
+            }
+            assertEquals(0, harness.server.references)
+        }
+    }
+
+    @Test
+    fun aOneShotClientNeverRefersToTheDaemon() = runBlocking {
+        harness().use { harness ->
+            val client = harness.client()
+            try {
+                assertTrue(client.awaitReady())
+                client.setCapturing(false)
+
+                assertEquals(0, harness.server.references)
+            } finally {
+                client.close()
+            }
+        }
+    }
+
+    @Test
+    fun stopsItselfOnceTheLastFrontendCloses() = runBlocking {
+        harness().use { harness ->
+            val idle = CountDownLatch(1)
+            val watchdog = DaemonIdleWatchdog(
+                lingerMillis = 1_000,
+                referenced = { harness.server.references > 0 },
+                lastActivityAtMillis = { harness.server.lastActivityAtMillis },
+                onIdle = { idle.countDown() },
+                checkIntervalMillis = 25,
+            ).also(DaemonIdleWatchdog::start)
+            try {
+                val client = harness.presentClient()
+                assertTrue(client.awaitReady())
+                assertFalse(idle.await(500, TimeUnit.MILLISECONDS))
+
+                client.close()
+
+                assertTrue(idle.await(5, TimeUnit.SECONDS))
+            } finally {
+                watchdog.close()
+            }
+        }
+    }
+
     private fun harness(
         directory: java.nio.file.Path = Files.createTempDirectory("wailo-daemon-test"),
         deleteDirectory: Boolean = true,
@@ -252,6 +314,12 @@ class DaemonIntegrationTest {
         fun client() = DaemonClient(
             rpc = DaemonRpcClient(handshakeStore),
             autoRestart = false,
+        )
+
+        fun presentClient() = DaemonClient(
+            rpc = DaemonRpcClient(handshakeStore),
+            autoRestart = false,
+            holdsPresence = true,
         )
 
         fun rpc() = DaemonRpcClient(handshakeStore)

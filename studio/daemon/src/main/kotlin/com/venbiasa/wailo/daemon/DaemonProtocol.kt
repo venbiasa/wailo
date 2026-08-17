@@ -20,7 +20,15 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import okio.ByteString.Companion.toByteString
 
-internal const val DAEMON_CONTROL_PROTOCOL_VERSION = 1
+internal const val DAEMON_CONTROL_PROTOCOL_VERSION = 2
+
+/**
+ * The one command whose socket is not answered and closed. The daemon holds it open and counts it as a
+ * reference for as long as the peer lives, so a client that is SIGKILLed releases its reference the way
+ * a clean shutdown does — which an explicit detach message would miss, leaking the count forever
+ * (ADR-0062).
+ */
+internal const val PRESENCE_COMMAND = "presence"
 
 @Serializable
 internal data class RpcRequest(

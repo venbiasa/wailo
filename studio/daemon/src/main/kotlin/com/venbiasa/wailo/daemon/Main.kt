@@ -51,8 +51,10 @@ fun main() {
     val stopped = CountDownLatch(1)
     val stopping = AtomicBoolean()
     lateinit var server: DaemonServer
+    lateinit var idleWatchdog: DaemonIdleWatchdog
     val stop = {
         if (stopping.compareAndSet(false, true)) {
+            runCatching { idleWatchdog.close() }
             runCatching { server.close() }
             runtime.close()
             runCatching { instanceLock.close() }
@@ -67,6 +69,18 @@ fun main() {
         System.err.println("wailo-daemon: could not publish the control channel: ${failure.message}")
         exitProcess(1)
     }
+    val captureActivity = DaemonCaptureActivity(host.engine.exchanges, host.engine.pausedExchanges)
+    idleWatchdog = DaemonIdleWatchdog(
+        lingerMillis = config.idleLingerMinutes * 60_000L,
+        referenced = { server.references > 0 },
+        // A capturing app extends the window the same way a CLI command does, rather than pinning the
+        // daemon outright: what earns the process its life is traffic, not a socket a silent app happens
+        // to be holding.
+        lastActivityAtMillis = { maxOf(server.lastActivityAtMillis, captureActivity.lastCaptureAtMillis()) },
+        // Deliberately not DaemonStopMarker: nothing asked for this, so the next frontend to open must be
+        // free to start a daemon again without first clearing an explicit stop.
+        onIdle = stop,
+    ).also(DaemonIdleWatchdog::start)
     DaemonStopMarker.clear()
     Runtime.getRuntime().addShutdownHook(Thread(stop, "wailo-daemon-shutdown"))
     try {

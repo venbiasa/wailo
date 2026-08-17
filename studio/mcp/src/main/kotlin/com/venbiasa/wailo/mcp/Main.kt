@@ -32,6 +32,7 @@ fun main(args: Array<String>) {
             DaemonClient.connect(
                 initialCapturePort = config.port,
                 initialMaxRetained = config.maxRetained,
+                holdPresence = true,
             ).also { client ->
                 config.port?.let {
                     check(client.rebind(it)) { "could not bind shared capture daemon to port $it" }

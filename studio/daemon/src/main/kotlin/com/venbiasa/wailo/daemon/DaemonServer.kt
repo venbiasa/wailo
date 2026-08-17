@@ -18,6 +18,7 @@ import java.nio.file.attribute.PosixFilePermission
 import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.HexFormat
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
@@ -345,9 +346,19 @@ internal class DaemonServer(
     private val executor: ExecutorService = Executors.newVirtualThreadPerTaskExecutor()
     private val closed = AtomicBoolean()
     private val token = ByteArray(TOKEN_BYTES).also(SecureRandom()::nextBytes)
+    private val presenceSockets: MutableSet<Socket> = ConcurrentHashMap.newKeySet()
+
+    @Volatile
+    private var lastActivityAt = System.currentTimeMillis()
 
     /** The port actually bound, which callers need because [AUTO_PORT] lets the OS choose one. */
     val port: Int get() = socket.localPort
+
+    /** Frontends currently holding a presence connection open (ADR-0062). */
+    val references: Int get() = presenceSockets.size
+
+    /** When a request last arrived, which is what the idle linger measures from. */
+    val lastActivityAtMillis: Long get() = lastActivityAt
 
     init {
         socket.reuseAddress = true
@@ -386,22 +397,56 @@ internal class DaemonServer(
         client.use {
             val input = DataInputStream(it.getInputStream())
             val output = DataOutputStream(it.getOutputStream())
-            val response = try {
+            // Throwable, not Exception, on both halves: a request that dies on an Error (a jar swapped out
+            // from under a running daemon during the dev loop is the one that happens) would otherwise kill
+            // this thread and close the socket with no reply, leaving every client to report an unexplained
+            // readiness timeout. One bad request must still produce an answer the caller can quote.
+            val request = try {
                 val framed = DaemonWire.readRequest(input)
-                if (!MessageDigest.isEqual(token, framed.token)) {
-                    RpcResponse(ok = false, error = "Daemon authentication failed")
+                if (MessageDigest.isEqual(token, framed.token)) {
+                    DaemonJson.decodeFromString(RpcRequest.serializer(), framed.json)
                 } else {
-                    runBlocking { dispatch(DaemonJson.decodeFromString(RpcRequest.serializer(), framed.json)) }
+                    reply(output, RpcResponse(ok = false, error = "Daemon authentication failed"))
+                    return@use
                 }
             } catch (failure: Throwable) {
-                // Throwable, not Exception: a request that dies on an Error (a jar swapped out from under
-                // a running daemon during the dev loop is the one that happens) would otherwise kill this
-                // thread and close the socket with no reply, leaving every client to report an unexplained
-                // readiness timeout. One bad request must still produce an answer the caller can quote.
+                reply(output, RpcResponse(ok = false, error = failure.rpcError()))
+                return@use
+            }
+            lastActivityAt = System.currentTimeMillis()
+            if (request.command == PRESENCE_COMMAND) {
+                reply(output, RpcResponse(ok = true))
+                holdPresence(it, input)
+                return@use
+            }
+            val response = try {
+                runBlocking { dispatch(request) }
+            } catch (failure: Throwable) {
                 RpcResponse(ok = false, error = failure.rpcError())
             }
-            DaemonWire.writeResponse(output, DaemonJson.encodeToString(RpcResponse.serializer(), response))
+            reply(output, response)
         }
+    }
+
+    /**
+     * Blocks until the peer's socket dies, which is the reference itself: the OS closes it on a crash or
+     * SIGKILL just as it does on a clean exit, so the count cannot leak the way an unpaired detach would.
+     */
+    private fun holdPresence(client: Socket, input: DataInputStream) {
+        presenceSockets += client
+        try {
+            while (input.read() >= 0) Unit
+        } catch (_: IOException) {
+        } finally {
+            presenceSockets -= client
+            // Releasing a reference is activity too, so the linger is measured from the moment the last
+            // frontend left rather than from whatever it happened to poll before that.
+            lastActivityAt = System.currentTimeMillis()
+        }
+    }
+
+    private fun reply(output: DataOutputStream, response: RpcResponse) {
+        DaemonWire.writeResponse(output, DaemonJson.encodeToString(RpcResponse.serializer(), response))
     }
 
     private suspend fun dispatch(request: RpcRequest): RpcResponse {
@@ -545,6 +590,9 @@ internal class DaemonServer(
     override fun close() {
         if (!closed.compareAndSet(false, true)) return
         runCatching { socket.close() }
+        // Closing the server socket does not touch accepted ones, and a presence reader is parked on a
+        // blocking read that no interrupt reaches.
+        presenceSockets.forEach { runCatching(it::close) }
         executor.shutdownNow()
         handshakeStore.delete(token)
     }

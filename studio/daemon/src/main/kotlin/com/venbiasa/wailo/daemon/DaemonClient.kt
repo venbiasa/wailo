@@ -74,8 +74,11 @@ data class DaemonPairingState(
 class DaemonClient internal constructor(
     private val rpc: DaemonRpcClient,
     private val autoRestart: Boolean,
+    holdsPresence: Boolean = false,
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
 ) : AutoCloseable {
+    private val presence = if (holdsPresence) rpc.presence() else null
+
     private val _connected = MutableStateFlow(false)
     val connected: StateFlow<Boolean> = _connected.asStateFlow()
 
@@ -140,6 +143,7 @@ class DaemonClient internal constructor(
 
     init {
         scope.launch { pollLoop() }
+        presence?.let { connection -> scope.launch { presenceLoop(connection) } }
     }
 
     suspend fun awaitReady(timeout: Duration = 10.seconds): Boolean =
@@ -337,11 +341,26 @@ class DaemonClient internal constructor(
     }
 
     override fun close() {
+        presence?.close()
         scope.cancel()
         _connected.value = false
     }
 
     private suspend fun pairingCommand(request: PairingActionRequest) = command("pairing", request)
+
+    private suspend fun presenceLoop(connection: DaemonPresenceConnection) {
+        while (scope.isActive) {
+            try {
+                // Returns when the connection dies, so a daemon that was restarted or replaced gets
+                // re-referenced without the frontend having to notice either event.
+                withContext(Dispatchers.IO) { connection.hold() }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+            }
+            delay(RECONNECT_INTERVAL_MS)
+        }
+    }
 
     private suspend fun pollLoop() {
         while (scope.isActive) {
@@ -444,10 +463,16 @@ class DaemonClient internal constructor(
         private const val POLL_INTERVAL_MS = 200L
         private const val RECONNECT_INTERVAL_MS = 500L
 
+        /**
+         * [holdPresence] keeps the daemon alive for as long as this client lives (ADR-0062). Frontends
+         * with a real lifetime — Studio, MCP, a blocking CLI wait — pass true; a one-shot command must
+         * not, or it would start a daemon and take it down again on the way out.
+         */
         suspend fun connect(
             autoStart: Boolean = true,
             initialCapturePort: Int? = null,
             initialMaxRetained: Int? = null,
+            holdPresence: Boolean = false,
         ): DaemonClient {
             if (autoStart) {
                 withContext(Dispatchers.IO) {
@@ -457,7 +482,11 @@ class DaemonClient internal constructor(
                     )
                 }
             }
-            val client = DaemonClient(DaemonRpcClient(), autoRestart = autoStart)
+            val client = DaemonClient(
+                DaemonRpcClient(),
+                autoRestart = autoStart,
+                holdsPresence = holdPresence,
+            )
             if (client.awaitReady()) return client
             val reason = client.lastPollFailure?.message?.takeIf { it.isNotBlank() }
             client.close()
@@ -473,6 +502,8 @@ class DaemonClient internal constructor(
 internal class DaemonRpcClient(
     private val handshakeStore: DaemonHandshakeStore = FileDaemonHandshakeStore(),
 ) {
+    fun presence() = DaemonPresenceConnection(handshakeStore)
+
     suspend fun ping(): Boolean = runCatching {
         callRaw("ping")
         true
@@ -530,7 +561,65 @@ internal class DaemonRpcClient(
     }
 }
 
+/**
+ * The client half of the daemon's reference count (ADR-0062): one socket held open for the life of this
+ * frontend. It carries no traffic — the daemon reads it only to learn when it dies — so being killed
+ * releases the reference exactly as a clean exit does, which a detach message would not.
+ */
+internal class DaemonPresenceConnection(private val handshakeStore: DaemonHandshakeStore) : AutoCloseable {
+    @Volatile
+    private var socket: Socket? = null
+
+    @Volatile
+    private var released = false
+
+    /** Opens the connection and blocks until either end drops it. */
+    fun hold() {
+        if (released) return
+        val handshake = handshakeStore.read()
+        val current = Socket()
+        socket = current
+        try {
+            if (released) return
+            current.connect(InetSocketAddress(LOOPBACK, handshake.controlPort), CONNECT_TIMEOUT_MS)
+            current.soTimeout = HANDSHAKE_TIMEOUT_MS
+            DaemonWire.writeRequest(
+                DataOutputStream(current.getOutputStream()),
+                handshake.token,
+                DaemonJson.encodeToString(RpcRequest.serializer(), RpcRequest(PRESENCE_COMMAND)),
+            )
+            val input = DataInputStream(current.getInputStream())
+            val accepted = DaemonJson.decodeFromString(
+                RpcResponse.serializer(),
+                DaemonWire.readResponse(input),
+            )
+            if (!accepted.ok) {
+                throw IOException(accepted.error ?: "Wailo daemon refused the presence connection")
+            }
+            // Idling is the whole point of this socket, so it must not time out the way an RPC does.
+            current.soTimeout = 0
+            while (input.read() >= 0) Unit
+        } finally {
+            runCatching { current.close() }
+            socket = null
+        }
+    }
+
+    override fun close() {
+        released = true
+        // Closing from another thread is what ends the parked read; no interrupt reaches it.
+        runCatching { socket?.close() }
+    }
+
+    private companion object {
+        const val CONNECT_TIMEOUT_MS = 1_500
+        const val HANDSHAKE_TIMEOUT_MS = 5_000
+    }
+}
+
 object DaemonLauncher {
+    private const val RELAUNCH_INTERVAL_MS = 1_000L
+
     private val startLock = Any()
 
     fun ensureRunning(
@@ -557,11 +646,19 @@ object DaemonLauncher {
                         "protocol $DAEMON_CONTROL_PROTOCOL_VERSION; update the frontend",
                 )
             }
+            var launchedAt = System.currentTimeMillis()
             launch(initialCapturePort, initialMaxRetained)
             while (System.currentTimeMillis() < deadline) {
                 when (val runningVersion = runningVersionBlocking()) {
                     DAEMON_CONTROL_PROTOCOL_VERSION -> return
-                    null -> Unit
+                    // A daemon being replaced stops answering well before it releases the single-instance
+                    // lock, since it still has to unwind capture, USB, and adb. The first spawn can find
+                    // the state directory still owned and exit; keep spawning, because a loser costs one
+                    // short-lived JVM while giving up costs the frontend its whole launch.
+                    null -> if (System.currentTimeMillis() - launchedAt >= RELAUNCH_INTERVAL_MS) {
+                        launchedAt = System.currentTimeMillis()
+                        launch(initialCapturePort, initialMaxRetained)
+                    }
                     else -> throw IOException(
                         "Wailo daemon started with control protocol $runningVersion, expected " +
                             DAEMON_CONTROL_PROTOCOL_VERSION,
