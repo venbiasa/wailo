@@ -130,6 +130,11 @@ A scripted run whose steps are one-shot CLI commands with long gaps should eithe
 
 ## Conventions
 
+- **This repo is public.** Never write an employer name, an internal app/package id, a machine hostname, or
+  a local absolute path into code, tests, fixtures, docs, ADRs, or commit messages — name the generic role
+  instead ("the target consumer app"). This binds the *fact*, not just the token: which real app pins the
+  toolchain or whose dependency graph was re-resolved is exactly what must not ship. Scrubbing a leak after
+  a push means rewriting published history, so catch it at write time.
 - Comments explain intent, not narration. Write the *why* — constraints, trade-offs, non-obvious
   decisions a reader can't recover from the code. Never write comments/KDoc that restate what the
   code does or log what an edit changed; if a comment adds no intent, delete it.
