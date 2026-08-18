@@ -965,6 +965,7 @@ private fun List<MapLocalNode>.toHostMapLocalRules(): List<HostMapLocalRule> = a
     val body = MapLocalStore.loadServedBodyOrNull(rule)
     HostMapLocalRule(
         id = rule.id,
+        name = rule.name,
         enabled = isRuleActive(rule.id),
         urlPattern = rule.urlPattern,
         methods = rule.method.split(',')
@@ -980,7 +981,7 @@ private fun List<MapLocalNode>.toHostMapLocalRules(): List<HostMapLocalRule> = a
 private fun importMapLocalRules(rules: List<HostMapLocalRule>): List<MapLocalNode> = rules.map { rule ->
     val definition = MapLocalRuleDef(
         id = rule.id,
-        name = rule.id,
+        name = rule.name.ifBlank { rule.id },
         enabled = rule.enabled,
         urlPattern = rule.urlPattern,
         method = rule.methods.joinToString(","),
@@ -1000,6 +1001,9 @@ private fun mapRuleSignature(rules: List<HostMapLocalRule>, enabled: Boolean): S
         rules.forEach { rule ->
             append('|')
             append(rule.id)
+            append(':')
+            // Included so a rename alone still counts as a change worth republishing to the daemon.
+            append(rule.name)
             append(':')
             append(rule.enabled)
             append(':')

@@ -10,6 +10,11 @@ import com.venbiasa.wailo.protocol.MapLocalRule
  */
 class HostMapLocalRule(
     val id: String,
+    /**
+     * Studio's author-facing label, carried here only so headless frontends can name a rule whose id is
+     * an opaque generated string. Never part of matching, and blank for rules created without one.
+     */
+    val name: String = "",
     val enabled: Boolean = true,
     val urlPattern: String,
     methods: List<String> = emptyList(),

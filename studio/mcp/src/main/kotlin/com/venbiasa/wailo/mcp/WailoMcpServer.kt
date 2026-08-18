@@ -186,6 +186,7 @@ internal object WailoMcpTools {
             "Create or replace an in-memory Map Local response fixture and push its match metadata to connected devices.",
             objectSchema(
                 "id" to string("Stable rule id"),
+                "name" to string("Author-facing label shown in Studio; not used for matching"),
                 "url_pattern" to string("Full-URL wildcard pattern where * matches any characters"),
                 "methods" to stringArray("HTTP methods; empty or omitted means any"),
                 "enabled" to boolean("Whether this rule is active"),
@@ -201,7 +202,23 @@ internal object WailoMcpTools {
             "Remove an in-memory Map Local fixture by id and update connected devices.",
             objectSchema("id" to string("Rule id"), required = listOf("id")),
         ),
-        readTool("list_map_local", "List all in-memory Map Local fixtures and the global enabled state.", objectSchema()),
+        readTool(
+            "list_map_local",
+            "List all in-memory Map Local fixtures and the global enabled state, without body data. Call " +
+                "get_map_local for one fixture's body. A fixture with body_available false never serves " +
+                "even while enabled is true.",
+            objectSchema(),
+        ),
+        readTool(
+            "get_map_local",
+            "Get one Map Local fixture by id with its bounded response body, to check what it actually " +
+                "serves. Text MIME bodies are UTF-8; other bodies are Base64.",
+            objectSchema(
+                "id" to string("Rule id"),
+                "body_bytes" to integer("Maximum bytes returned from the fixture body", minimum = 0, maximum = 1_000_000),
+                required = listOf("id"),
+            ),
+        ),
         McpToolDefinition(
             "set_map_local_enabled",
             "Globally enable or disable all registered Map Local fixtures without deleting them.",

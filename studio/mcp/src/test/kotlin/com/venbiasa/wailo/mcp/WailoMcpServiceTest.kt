@@ -32,6 +32,7 @@ class WailoMcpServiceTest {
                 "set_map_local",
                 "remove_map_local",
                 "list_map_local",
+                "get_map_local",
                 "set_map_local_enabled",
                 "set_capture_filter",
                 "list_capture_filter",
@@ -117,7 +118,51 @@ class WailoMcpServiceTest {
     }
 
     @Test
+    fun onlyGetMapLocalCarriesFixtureBodies() = runBlocking {
+        val host = HeadlessHost.wrap(WailoEngine())
+        val service = WailoMcpService(host, 8899)
+        try {
+            service.call(
+                "set_map_local",
+                mapOf(
+                    "id" to "fixture",
+                    "name" to "Profile 500",
+                    "url_pattern" to "https://example.com/*",
+                    "headers" to listOf(mapOf("name" to "Content-Type", "value" to "text/plain")),
+                    "body_text" to "hello world",
+                ),
+            )
+
+            val listed = service.call("list_map_local", emptyMap()).rules().single()
+            assertFalse(listed.containsKey("body"))
+            assertEquals("Profile 500", listed["name"])
+            assertEquals(11, listed["body_bytes"])
+            assertEquals(true, listed["body_available"])
+
+            val full = service.call("get_map_local", mapOf("id" to "fixture")).body()
+            assertEquals("utf8", full["encoding"])
+            assertEquals("hello world", full["data"])
+            assertEquals(false, full["output_truncated"])
+
+            val bounded = service.call("get_map_local", mapOf("id" to "fixture", "body_bytes" to 5)).body()
+            assertEquals("hello", bounded["data"])
+            assertEquals(true, bounded["output_truncated"])
+
+            assertTrue(service.call("get_map_local", mapOf("id" to "missing")).isError)
+        } finally {
+            host.stop()
+        }
+    }
+
+    @Test
     fun parsesMcpProcessOptions() {
         assertEquals(McpConfig(port = 19001, maxRetained = 500), parseMcpArgs(arrayOf("--port", "19001", "--max-retained", "500")))
     }
 }
+
+@Suppress("UNCHECKED_CAST")
+private fun McpToolResponse.rules(): List<Map<String, Any?>> = data["rules"] as List<Map<String, Any?>>
+
+@Suppress("UNCHECKED_CAST")
+private fun McpToolResponse.body(): Map<String, Any?> =
+    (data["rule"] as Map<String, Any?>)["body"] as Map<String, Any?>

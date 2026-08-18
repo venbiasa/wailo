@@ -156,9 +156,13 @@ internal data class MapLocalRuleDto(
     val headers: List<HeaderDto>,
     val bodyBase64: String,
     val bodyAvailable: Boolean = true,
+    // Defaulted so this stays an additive field: `DaemonJson` ignores unknown keys, so a daemon and a
+    // frontend built either side of this change still talk without a control-protocol bump.
+    val name: String = "",
 ) {
     fun toDomain() = HostMapLocalRule(
         id = id,
+        name = name,
         enabled = enabled,
         urlPattern = urlPattern,
         methods = methods,
@@ -326,6 +330,7 @@ internal fun HostMapLocalRule.toDto() = MapLocalRuleDto(
     headers = headers.map { HeaderDto(it.name, it.value_) },
     bodyBase64 = bodyCopy().encodeBase64(),
     bodyAvailable = bodyAvailable,
+    name = name,
 )
 
 internal fun HostBreakpointRule.toDto() = BreakpointRuleDto(

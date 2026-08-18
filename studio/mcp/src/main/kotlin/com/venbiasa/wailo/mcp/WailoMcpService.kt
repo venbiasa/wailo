@@ -67,6 +67,7 @@ internal class WailoMcpService(
                 "set_map_local" -> setMapLocal(arguments)
                 "remove_map_local" -> removeMapLocal(arguments)
                 "list_map_local" -> listMapLocal()
+                "get_map_local" -> getMapLocal(arguments)
                 "set_map_local_enabled" -> setMapLocalEnabled(arguments)
                 "set_capture_filter" -> setCaptureFilter(arguments)
                 "list_capture_filter" -> listCaptureFilter()
@@ -262,6 +263,7 @@ internal class WailoMcpService(
         backend.upsertMapLocalRule(
             HostMapLocalRule(
                 id = id,
+                name = arguments.string("name").orEmpty(),
                 enabled = arguments.boolean("enabled", true),
                 urlPattern = pattern,
                 methods = arguments.strings("methods"),
@@ -282,19 +284,45 @@ internal class WailoMcpService(
         return success("Map Local rule $id removed", mapOf("id" to id, "removed" to true))
     }
 
+    /**
+     * Deliberately body-free, like [exchangeSummary]: fixtures are a curated set that grows, so carrying
+     * every body here would make the cheap "what is loaded?" call scale with total fixture size.
+     */
+    private fun mapLocalSummary(rule: HostMapLocalRule): Map<String, Any?> = mapOf(
+        "id" to rule.id,
+        // Studio ids are generated, so the author's label is often the only human-readable handle.
+        "name" to rule.name,
+        "enabled" to rule.enabled,
+        "url_pattern" to rule.urlPattern,
+        "methods" to rule.methods,
+        "status_code" to rule.statusCode,
+        "headers" to rule.headers.map(::headerData),
+        "body_bytes" to rule.bodySize,
+        // An enabled rule whose body never loaded silently declines to serve, so without this an
+        // agent asking "why did my fixture not fire" can only misread it as a pattern mismatch.
+        "body_available" to rule.bodyAvailable,
+    )
+
     private fun listMapLocal(): McpToolResponse {
-        val rules = backend.mapLocalRules.map {
-            mapOf(
-                "id" to it.id,
-                "enabled" to it.enabled,
-                "url_pattern" to it.urlPattern,
-                "methods" to it.methods,
-                "status_code" to it.statusCode,
-                "headers" to it.headers.map(::headerData),
-                "body_bytes" to it.bodySize,
-            )
-        }
+        val rules = backend.mapLocalRules.map(::mapLocalSummary)
         return success("${rules.size} Map Local rule(s)", mapOf("enabled" to backend.mapLocalEnabled, "rules" to rules))
+    }
+
+    private fun getMapLocal(arguments: ToolArguments): McpToolResponse {
+        val id = arguments.requiredString("id")
+        val bodyLimit = arguments.int("body_bytes", DEFAULT_BODY_LIMIT).inRange("body_bytes", 0..MAX_BODY_LIMIT)
+        val rule = backend.mapLocalRules.firstOrNull { it.id == id }
+            ?: throw ToolFailure("Map Local rule not found: $id")
+        return success(
+            "Map Local rule $id",
+            mapOf(
+                // A rule can be enabled while the global toggle is off, which looks identical to a
+                // non-matching pattern from the device side.
+                "map_local_enabled" to backend.mapLocalEnabled,
+                "rule" to mapLocalSummary(rule) +
+                    mapOf("body" to renderBody(rule.bodyCopy(), rule.headers, bodyLimit)),
+            ),
+        )
     }
 
     private suspend fun setMapLocalEnabled(arguments: ToolArguments): McpToolResponse {
@@ -468,6 +496,19 @@ internal class WailoMcpService(
         limit: Int,
     ): Map<String, Any?> {
         val bytes = body.toByteArray()
+        return renderBody(bytes, headers, limit) + mapOf(
+            // Sizes describe the captured traffic, not this redacted view of it, so they stay as captured.
+            "captured_bytes" to bytes.size,
+            "declared_bytes" to declaredSize,
+            "source_truncated" to sourceTruncated,
+        )
+    }
+
+    /**
+     * Shared by captured traffic and locally authored Map Local fixtures: a fixture is usually a copy of
+     * a real response, so it has to pass the same redaction gate rather than a laxer one.
+     */
+    private fun renderBody(bytes: ByteArray, headers: List<Header>, limit: Int): Map<String, Any?> {
         val contentType = headers
             .firstOrNull { it.name.equals("Content-Type", ignoreCase = true) }
             ?.value_
@@ -489,10 +530,6 @@ internal class WailoMcpService(
         return mapOf(
             "encoding" to if (textual) "utf8" else "base64",
             "data" to if (textual) selected.toString(Charsets.UTF_8) else Base64.getEncoder().encodeToString(selected),
-            // Sizes describe the captured traffic, not this redacted view of it, so they stay as captured.
-            "captured_bytes" to bytes.size,
-            "declared_bytes" to declaredSize,
-            "source_truncated" to sourceTruncated,
             "output_truncated" to (selected.size < shownBytes.size),
         )
     }
