@@ -148,6 +148,25 @@ class HeadlessHostTest {
         }
     }
 
+    @Test
+    fun seedsMasterDropsTheQueueItDeclinesToFill() = runBlocking {
+        val engine = WailoEngine()
+        val host = HeadlessHost.wrap(engine)
+        try {
+            host.seedResponseProvider = SeedResponseProvider { HttpResponse(code = 200) }
+            host.fillSeeds(listOf(HostSeed(id = "seed", urlPattern = "https://example.com/*")))
+            assertEquals("seed", host.seedQueue.value.single().id)
+
+            // Unlike Map Local and breakpoints, whose masters only withhold the push, this one is
+            // destructive by design: a run it declines is discarded rather than left armed.
+            host.seedsEnabled = false
+            host.fillSeeds()
+            assertTrue(host.seedQueue.value.isEmpty())
+        } finally {
+            host.stop()
+        }
+    }
+
     private class FakeConnection : DeviceConnection {
         override val id = "usb:test"
         override val transport = DeviceTransport.USB

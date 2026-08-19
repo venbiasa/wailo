@@ -43,7 +43,9 @@ studio build (studio/, modern — ADR-0015); consumes wailo-protocol from Maven 
   wailo-protocol <- engine <- host <- daemon <- desktopApp
   wailo-protocol <- engine <- host <- daemon <- cli
   wailo-protocol <- engine <- host <- daemon <- mcp
+  wailo-protocol <- engine <- host <- daemon <- menubar
   wailo-protocol <- shared <- desktopApp
+  menubar <- desktopApp, cli, mcp   (runtimeOnly; spawned by class name — ADR-0065)
 ```
 
 Dependencies point rightward only, and `sdk-*` must not reach `engine`/`host`/`daemon`/`shared`/`desktopApp`/`cli`/`mcp` — now enforced
@@ -55,6 +57,18 @@ Multiplatform (jvm+android, for `sdk-android` and the iOS Swift codegen); `share
 Android target was dropped, ADR-0015); `sdk-android` and `engine` are single-target. `host` is the
 UI-free orchestration layer over `engine`; `daemon` owns its lifecycle, local RPC, pairing Keychain,
 adb, and usbmuxd (ADR-0058). `shared` must not depend on either.
+
+`menubar` is the daemon's companion process: a plain-AWT system tray agent that draws one item for as long
+as a daemon lives, so a headless MCP or CLI session is still visible (ADR-0065). Every frontend carries it
+`runtimeOnly` and `DaemonLauncher` spawns it *by class name*, never by import — nothing calls into it, and
+an install without it still works. Keep it AWT-only (no Compose: it is resident whenever the daemon is) and
+never let it hold a presence reference, or the icon would keep alive the daemon it merely reports. Every row
+must be *daemon* state, since there may be no window: Seeds are spent by Studio, so they cannot appear there
+even though they are a tool (ADR-0066). On macOS
+the icon is a **template image** (`apple.awt.enableTemplateImages`): build the glyph's shape and let the
+system colour it. Never pick that colour here — the menu bar turns dark over a dark wallpaper while the OS
+is still in light mode, so a glyph coloured from `AppleInterfaceStyle` is black on black for exactly the
+users who have one.
 
 `sdk-android-panel` is the on-device panel (Compose + a ZXing QR scanner + a launcher shortcut). It is a
 consumer of `sdk-android`, never the other way round, and hosts wire it as `debugImplementation` so its
@@ -96,7 +110,7 @@ cd sample-ios && xcodegen generate && xcodebuild -scheme WailoSampleiOS -sdk iph
 # KMP sample (iOS framework): ./gradlew :sample-kmp:shared:linkDebugFrameworkIosSimulatorArm64
 #   then: cd sample-kmp/iosApp && xcodegen generate && xcodebuild -scheme WailoKmpSampleiOS -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' build CODE_SIGNING_ALLOWED=NO
 
-# --- studio build (studio/): engine, host, daemon, shared, desktopApp, cli, mcp ---
+# --- studio build (studio/): engine, host, daemon, shared, desktopApp, cli, mcp, menubar ---
 cd studio && ./gradlew build               # consumes wailo-protocol from Maven Local
 cd studio && ./gradlew :daemon:test :cli:test :mcp:test # shared service + headless frontends
 cd studio && ./gradlew :cli:installDist
@@ -121,6 +135,9 @@ WAILO_HOME=$(mktemp -d) WAILO_CAPTURE_PORT=8991 ./cli/build/install/wailo-cli/bi
 
 `WAILO_HOME` isolates daemon files and settings. A test that also needs an independent Studio
 identity/pairing Keychain must set `WAILO_KEYCHAIN_SERVICE` to a unique disposable service name.
+
+Starting a daemon now also puts a menu bar item on screen (ADR-0065), which a scripted or CI run does not
+want: set `WAILO_NO_MENUBAR=1` alongside `WAILO_HOME` to suppress it.
 
 The daemon now exits on its own once nothing refers to it — no open frontend, and no captured traffic for
 `WAILO_IDLE_LINGER_MINUTES` (default 30; `0` disables it). A connected-but-quiet app does not keep it up.

@@ -12,7 +12,7 @@ silently uses the wrong toolchain and fails or misbehaves.
 | Build | Run from | Wrapper | Modules |
 |-------|----------|---------|---------|
 | SDK build | repo root | Gradle 8.11.1 (`./gradlew`) | `protocol`, `sdk-android`, samples, plugin |
-| studio build | `studio/` | Gradle 9.3.1 (`studio/gradlew`) | `engine`, `host`, `daemon`, `shared`, `desktopApp`, `cli`, `mcp` |
+| studio build | `studio/` | Gradle 9.3.1 (`studio/gradlew`) | `engine`, `host`, `daemon`, `shared`, `desktopApp`, `cli`, `mcp`, `menubar` |
 
 ## Rules
 
@@ -20,7 +20,7 @@ silently uses the wrong toolchain and fails or misbehaves.
   parameter alone** — in this environment it is not reliably applied, so `./gradlew` silently
   runs from the repo root (8.11.1) even when `working_directory` says `studio`. Always write
   `cd /abs/path/to/repo/studio && ./gradlew …`.
-- To build/test/run **`engine`, `host`, `daemon`, `shared`, `desktopApp`, `cli`, or `mcp`**, run studio's wrapper. NEVER run
+- To build/test/run **`engine`, `host`, `daemon`, `shared`, `desktopApp`, `cli`, `mcp`, or `menubar`**, run studio's wrapper. NEVER run
   these from the repo root — root's `./gradlew` is 8.11.1 and does not know these modules.
 - `protocol` is the seam: `:protocol:publishToMavenLocal` is a **root** task and must be run
   (from repo root) before the studio build, which consumes `wailo-protocol` from Maven Local.
@@ -64,6 +64,13 @@ every class it had not loaded yet, which now surfaces as
 `Wailo daemon did not become ready (it answered: NoClassDefFoundError: …)`. Studio and the CLI both fail
 that way until the process is gone; SIGTERM may not be enough, since its shutdown hook can die the same
 way. Before reinstalling: `pkill -f com.venbiasa.wailo.daemon.MainKt` (add `-9` if it lingers).
+
+The editor's own Wailo MCP server is one of these long-lived frontends, spawned from
+`mcp/build/install/wailo-mcp` and often hours or days old. It keeps a poll loop that restarts the daemon
+whenever it cannot reach one, so after a protocol bump it will fight a freshly built Studio: Studio stops
+the outdated daemon, the adapter starts another outdated one, and Studio's launch fails. When a build
+changes `DAEMON_CONTROL_PROTOCOL_VERSION`, `pkill -f com.venbiasa.wailo.mcp.MainKt` alongside the daemon
+and re-run `:mcp:installDist`, or the editor keeps resurrecting the old protocol.
 
 Better still, keep end-to-end runs off the user's live daemon entirely — there is one daemon per state
 directory, so point `WAILO_HOME` (plus `WAILO_CAPTURE_PORT`) at a scratch dir and the run gets its own.

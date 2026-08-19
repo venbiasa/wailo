@@ -44,6 +44,9 @@ dependencies {
     // therefore never binds the capture port or owns cable transports itself.
     implementation(projects.daemon)
     implementation(projects.shared)
+    // The menu bar item is its own process now (ADR-0065), spawned by class name. runtimeOnly keeps that a
+    // packaging fact rather than a compile dependency: Studio must not be able to call into it.
+    runtimeOnly(projects.menubar)
     implementation(libs.zxing.core)
 
     testImplementation(kotlin("test"))

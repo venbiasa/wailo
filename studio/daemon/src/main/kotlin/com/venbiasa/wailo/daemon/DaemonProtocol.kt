@@ -20,7 +20,7 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import okio.ByteString.Companion.toByteString
 
-internal const val DAEMON_CONTROL_PROTOCOL_VERSION = 2
+internal const val DAEMON_CONTROL_PROTOCOL_VERSION = 5
 
 /**
  * The one command whose socket is not answered and closed. The daemon holds it open and counts it as a
@@ -29,6 +29,18 @@ internal const val DAEMON_CONTROL_PROTOCOL_VERSION = 2
  * (ADR-0062).
  */
 internal const val PRESENCE_COMMAND = "presence"
+
+/**
+ * What kind of frontend a presence connection belongs to. The count alone answers "is anyone here"
+ * (ADR-0062), but the menu bar agent has to ask a narrower question — is there a *Studio* to raise, or
+ * does Show Studio have to start one (ADR-0065).
+ */
+const val CLIENT_KIND_UNKNOWN = "unknown"
+
+const val CLIENT_KIND_STUDIO = "studio"
+
+@Serializable
+internal data class PresenceRequest(val kind: String = CLIENT_KIND_UNKNOWN)
 
 @Serializable
 internal data class RpcRequest(
@@ -78,6 +90,13 @@ internal data class PollResponse(
     val pairing: PairingDto,
     val mcpAccess: Boolean,
     val mcpRedactSecrets: Boolean,
+    // Whether a Studio is holding a presence connection, so the menu bar agent knows if Show Studio can
+    // raise one or has to launch it (ADR-0065).
+    val studioAttached: Boolean = false,
+    // Monotonic counters rather than events: a frontend acts on an increase, so a request cannot be lost
+    // between polls and a frontend that starts late does not replay an old one.
+    val showStudioRequests: Int = 0,
+    val quitRequests: Int = 0,
     val usbSupported: Boolean,
     val usbPort: Int,
     val usbDevices: List<UsbDeviceDto>,

@@ -23,6 +23,9 @@ application {
 
 dependencies {
     implementation(projects.daemon)
+    // Spawned by class name, never called (ADR-0065). It matters most here: an agent session is exactly
+    // the case where a daemon runs with no window anywhere on screen.
+    runtimeOnly(projects.menubar)
     implementation(libs.mcp.sdk)
     // Tree parsing only (no @Serializable codegen, so no serialization plugin): redaction walks captured
     // JSON bodies structurally, which a regex cannot do for nested or escaped values.

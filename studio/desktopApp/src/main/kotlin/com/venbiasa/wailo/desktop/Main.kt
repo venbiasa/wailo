@@ -1,6 +1,7 @@
 package com.venbiasa.wailo.desktop
 
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -28,7 +29,9 @@ import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
 import com.venbiasa.wailo.daemon.AdbConnectionStatus
 import com.venbiasa.wailo.daemon.AdbDeviceInfo
+import com.venbiasa.wailo.daemon.CLIENT_KIND_STUDIO
 import com.venbiasa.wailo.daemon.DaemonClient
+import com.venbiasa.wailo.daemon.DaemonLauncher
 import com.venbiasa.wailo.daemon.UsbConnectionStatus
 import com.venbiasa.wailo.daemon.UsbDeviceInfo
 import com.venbiasa.wailo.engine.ConnectedDevice
@@ -95,11 +98,28 @@ import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
 
 fun main() {
-    val daemon = runBlocking { DaemonClient.connect(holdPresence = true) }
+    // The kind is what lets the menu bar agent tell "a Studio is here, raise it" from "there is none, start
+    // one" (ADR-0065); the presence connection itself is the daemon's reference count (ADR-0062).
+    val daemon = runBlocking { DaemonClient.connect(holdPresence = true, clientKind = CLIENT_KIND_STUDIO) }
     try {
         runWailo(daemon)
     } finally {
         daemon.close()
+    }
+}
+
+/**
+ * Runs [action] when a daemon-relayed counter goes up, ignoring whatever it already stood at when this
+ * window connected — a request made before Studio existed must not replay at launch (ADR-0065).
+ */
+@Composable
+private fun OnDaemonRequest(counter: Int?, action: () -> Unit) {
+    var seen by remember { mutableStateOf<Int?>(null) }
+    LaunchedEffect(counter) {
+        val value = counter ?: return@LaunchedEffect
+        val previous = seen
+        seen = value
+        if (previous != null && value != previous) action()
     }
 }
 
@@ -424,6 +444,19 @@ private fun runWailo(engine: DaemonClient) = application {
     LaunchedEffect(daemonMapLocalRules, daemonMapLocalEnabled, daemonMapLocalLayout) {
         val signature = mapRuleSignature(daemonMapLocalRules, daemonMapLocalEnabled)
         if (signature == lastPublishedMapSignature) return@LaunchedEffect
+        // The master is one boolean the daemon owns, so the menu bar item or an agent can flip it while
+        // this window is open (ADR-0066). Adopt it up here, before any of the rule-import decisions below
+        // return: a feature still shows its switch with no rules under it, and a stale switch means the
+        // next edit silently republishes the value the user just changed. The exception is a daemon that
+        // came back with nothing while we hold a layout — there its master is a restored default, not a
+        // choice, and the re-seed below sends ours.
+        if (daemonMapLocalRules.isNotEmpty() || mapLocalNodes.isEmpty()) {
+            if (daemonMapLocalEnabled != mapLocalEnabled) {
+                mapLocalEnabled = daemonMapLocalEnabled
+                MapLocalStore.saveEnabled(daemonMapLocalEnabled)
+                lastPublishedMapSignature = signature
+            }
+        }
         // Studio's grouped layout is the authoring copy. An empty daemon is a restart, not a delete —
         // re-seed it. A non-empty daemon while we already have a layout is a flattened projection of
         // the same rules (or an MCP upsert); importing it would drop groups and names.
@@ -502,6 +535,14 @@ private fun runWailo(engine: DaemonClient) = application {
     LaunchedEffect(daemonBreakpointRules, daemonBreakpointsEnabled, daemonBreakpointLayout) {
         val signature = breakpointRuleSignature(daemonBreakpointRules, daemonBreakpointsEnabled)
         if (signature == lastPublishedBreakpointSignature) return@LaunchedEffect
+        // Adopted before the import decisions, and under the same restart exception, as Map Local above.
+        if (daemonBreakpointRules.isNotEmpty() || breakpointNodes.isEmpty()) {
+            if (daemonBreakpointsEnabled != breakpointsEnabled) {
+                breakpointsEnabled = daemonBreakpointsEnabled
+                BreakpointStore.saveEnabled(daemonBreakpointsEnabled)
+                lastPublishedBreakpointSignature = signature
+            }
+        }
         if (breakpointNodes.isNotEmpty()) {
             if (daemonBreakpointRules.isEmpty()) {
                 val rules = breakpointNodes.toHostBreakpointRules()
@@ -716,16 +757,53 @@ private fun runWailo(engine: DaemonClient) = application {
         true
     }
 
+    var windowVisible by remember { mutableStateOf(true) }
+    // Bumped whenever the window should come forward. Showing an already-visible window is a no-op on the
+    // flag above, so "Show Studio" on a buried window would otherwise look broken.
+    var raiseMainWindow by remember { mutableStateOf(0) }
+    // Capture the final geometry before the window goes, in case the last move/resize landed inside the
+    // debounce window and never flushed.
+    val saveMainWindowGeometry = {
+        if (windowState.placement == WindowPlacement.Floating) {
+            WindowStateStore.Main.save(windowState.size, windowState.position)
+        }
+    }
+    val showStudio = {
+        windowVisible = true
+        raiseMainWindow += 1
+    }
+    // Cmd-Q ends this window's process and nothing else. The daemon is not Studio's to stop any more: the
+    // item that stands for it is a separate process and carries the Quit that takes everything down
+    // (ADR-0065), and an unreferenced daemon retires itself anyway (ADR-0062).
+    val quitStudio = {
+        saveMainWindowGeometry()
+        exitApplication()
+    }
+    DisposableEffect(Unit) {
+        val reopened = DesktopAppEvents.addReopenedListener(showStudio)
+        val quit = DesktopAppEvents.setQuitHandler(quitStudio)
+        onDispose {
+            reopened?.close()
+            quit?.close()
+        }
+    }
+    // The menu bar item belongs to its own process now (ADR-0065), so its two rows that reach in here
+    // arrive as counters the daemon relays.
+    OnDaemonRequest(engine.showStudioRequests.collectAsState().value, showStudio)
+    // The agent stops the daemon itself once the frontends are gone, so this only takes Studio down.
+    OnDaemonRequest(engine.quitRequests.collectAsState().value, quitStudio)
+
     Window(
-        // Capture the final geometry on close too, in case the last move/resize landed inside the
-        // debounce window and never flushed.
         onCloseRequest = {
-            if (windowState.placement == WindowPlacement.Floating) {
-                WindowStateStore.Main.save(windowState.size, windowState.position)
-            }
-            exitApplication()
+            saveMainWindowGeometry()
+            // Closing leaves the menu bar item to stand for the daemon — but only if something is actually
+            // drawing one, since hiding the last window with no item to reopen it strands the app. Asked
+            // here rather than at launch because the agent is spawned alongside this window and may not
+            // have claimed its lock yet; by the time a human closes the window, the answer has settled.
+            if (DaemonLauncher.menubarRunning()) windowVisible = false else exitApplication()
         },
         state = windowState,
+        visible = windowVisible,
         title = "Wailo",
         icon = appIconPainter,
         onPreviewKeyEvent = onScaleKeyEvent,
@@ -739,6 +817,14 @@ private fun runWailo(engine: DaemonClient) = application {
                 DefaultWindowSize.width.value.toInt(),
                 DefaultWindowSize.height.value.toInt(),
             )
+        }
+        // Skipped at 0 so launching the app does not fight the OS for foreground; every later bump is a
+        // "Show Studio" that has to win against whatever the user was looking at.
+        LaunchedEffect(raiseMainWindow) {
+            if (raiseMainWindow == 0) return@LaunchedEffect
+            window.toFront()
+            window.requestFocus()
+            DesktopAppEvents.requestForeground()
         }
         WailoApp(
             entries = entries,

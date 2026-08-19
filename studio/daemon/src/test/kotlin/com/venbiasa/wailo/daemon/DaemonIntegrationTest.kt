@@ -281,6 +281,88 @@ class DaemonIntegrationTest {
         }
     }
 
+    @Test
+    fun tellsAStudioApartFromAnyOtherFrontendHoldingAReference() = runBlocking {
+        harness().use { harness ->
+            val tool = harness.presentClient()
+            try {
+                assertTrue(tool.awaitReady())
+                withTimeout(5_000) {
+                    while (harness.server.references == 0) delay(25)
+                }
+                // A reference is a reference, but only a Studio is something Show Studio can raise.
+                assertFalse(harness.server.studioAttached)
+
+                val studio = harness.presentClient(CLIENT_KIND_STUDIO)
+                try {
+                    assertTrue(studio.awaitReady())
+                    withTimeout(5_000) {
+                        while (!harness.server.studioAttached) delay(25)
+                    }
+                } finally {
+                    studio.close()
+                }
+
+                withTimeout(5_000) {
+                    while (harness.server.studioAttached) delay(25)
+                }
+                assertFalse(harness.server.studioAttached)
+            } finally {
+                tool.close()
+            }
+        }
+    }
+
+    @Test
+    fun relaysTheMenuBarAsksToFrontendsThatNeverMetTheAgent() = runBlocking {
+        harness().use { harness ->
+            val agent = harness.client()
+            val studio = harness.presentClient(CLIENT_KIND_STUDIO)
+            try {
+                assertTrue(agent.awaitReady())
+                assertTrue(studio.awaitReady())
+                val show = studio.showStudioRequests.value
+                val quit = studio.quitRequests.value
+
+                agent.requestShowStudio()
+                withTimeout(5_000) {
+                    while (studio.showStudioRequests.value == show) delay(25)
+                }
+                agent.requestQuit()
+                withTimeout(5_000) {
+                    while (studio.quitRequests.value == quit) delay(25)
+                }
+
+                // Counters, not events: what a frontend reacts to is the increase, so an ask cannot be
+                // dropped between two polls.
+                assertEquals(1, studio.showStudioRequests.value)
+                assertEquals(1, studio.quitRequests.value)
+            } finally {
+                agent.close()
+                studio.close()
+            }
+        }
+    }
+
+    @Test
+    fun readsTheMenuBarAgentAsGoneAsSoonAsItsLockIsFree() {
+        val directory = Files.createTempDirectory("wailo-menubar-lock")
+        try {
+            val lockPath = directory.resolve("menubar.lock")
+            assertFalse(DaemonLauncher.lockHeld(lockPath))
+
+            val held = DaemonSingleInstanceLock.tryAcquire(lockPath)
+
+            // Studio's close button leans on this: with no agent there is no item to reopen from, so
+            // hiding the last window would strand the app.
+            assertTrue(DaemonLauncher.lockHeld(lockPath))
+            held?.close()
+            assertFalse(DaemonLauncher.lockHeld(lockPath))
+        } finally {
+            directory.toFile().deleteRecursively()
+        }
+    }
+
     private fun harness(
         directory: java.nio.file.Path = Files.createTempDirectory("wailo-daemon-test"),
         deleteDirectory: Boolean = true,
@@ -316,10 +398,11 @@ class DaemonIntegrationTest {
             autoRestart = false,
         )
 
-        fun presentClient() = DaemonClient(
+        fun presentClient(kind: String = CLIENT_KIND_UNKNOWN) = DaemonClient(
             rpc = DaemonRpcClient(handshakeStore),
             autoRestart = false,
             holdsPresence = true,
+            clientKind = kind,
         )
 
         fun rpc() = DaemonRpcClient(handshakeStore)

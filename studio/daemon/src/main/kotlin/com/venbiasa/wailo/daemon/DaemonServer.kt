@@ -66,6 +66,12 @@ internal class DaemonRuntime(
     val mcpAccess: StateFlow<Boolean> = _mcpAccess.asStateFlow()
     val mcpRedactSecrets: StateFlow<Boolean> = _mcpRedactSecrets.asStateFlow()
 
+    // The menu bar agent cannot reach Studio's window, and Studio cannot be signalled by a process that
+    // did not start it — so the daemon relays both asks as counters every frontend already polls for
+    // (ADR-0065). Session state: a request that nothing was around to act on is not worth replaying.
+    private val _showStudioRequests = MutableStateFlow(0)
+    private val _quitRequests = MutableStateFlow(0)
+
     // Studio's grouped layout codec, opaque to this module. Loaded with the compiled rules so a restart
     // can restore groups/names, not just the flattened match-set the engine pushes (ADR-0061).
     @Volatile
@@ -149,6 +155,8 @@ internal class DaemonRuntime(
             ),
             mcpAccess = _mcpAccess.value,
             mcpRedactSecrets = _mcpRedactSecrets.value,
+            showStudioRequests = _showStudioRequests.value,
+            quitRequests = _quitRequests.value,
             usbSupported = usb.supported,
             usbPort = usb.devicePort.value,
             usbDevices = usb.devices.value.map { UsbDeviceDto(it.udid, it.status.name, it.error) },
@@ -193,6 +201,14 @@ internal class DaemonRuntime(
     fun setMcpRedactSecrets(value: Boolean) {
         _mcpRedactSecrets.value = value
         settings.update { it.copy(mcpRedactSecrets = value) }
+    }
+
+    fun requestShowStudio() {
+        _showStudioRequests.value += 1
+    }
+
+    fun requestQuit() {
+        _quitRequests.value += 1
     }
 
     suspend fun replaceMapLocal(
@@ -346,7 +362,9 @@ internal class DaemonServer(
     private val executor: ExecutorService = Executors.newVirtualThreadPerTaskExecutor()
     private val closed = AtomicBoolean()
     private val token = ByteArray(TOKEN_BYTES).also(SecureRandom()::nextBytes)
-    private val presenceSockets: MutableSet<Socket> = ConcurrentHashMap.newKeySet()
+    // Keyed by socket so a death removes exactly one frontend's claim; the value is only there to answer
+    // "is a Studio here" for the menu bar agent (ADR-0065).
+    private val presenceSockets: MutableMap<Socket, String> = ConcurrentHashMap()
 
     @Volatile
     private var lastActivityAt = System.currentTimeMillis()
@@ -356,6 +374,9 @@ internal class DaemonServer(
 
     /** Frontends currently holding a presence connection open (ADR-0062). */
     val references: Int get() = presenceSockets.size
+
+    /** Whether one of those frontends is a Studio, which is what makes Show Studio a raise and not a launch. */
+    val studioAttached: Boolean get() = presenceSockets.containsValue(CLIENT_KIND_STUDIO)
 
     /** When a request last arrived, which is what the idle linger measures from. */
     val lastActivityAtMillis: Long get() = lastActivityAt
@@ -416,7 +437,11 @@ internal class DaemonServer(
             lastActivityAt = System.currentTimeMillis()
             if (request.command == PRESENCE_COMMAND) {
                 reply(output, RpcResponse(ok = true))
-                holdPresence(it, input)
+                // An older frontend sends no payload at all, which decodes to the unknown kind — it still
+                // counts as a reference, it just cannot be offered up as a Studio to raise.
+                val kind = runCatching { request.decode(PresenceRequest.serializer()).kind }
+                    .getOrDefault(CLIENT_KIND_UNKNOWN)
+                holdPresence(it, input, kind)
                 return@use
             }
             val response = try {
@@ -432,8 +457,8 @@ internal class DaemonServer(
      * Blocks until the peer's socket dies, which is the reference itself: the OS closes it on a crash or
      * SIGKILL just as it does on a clean exit, so the count cannot leak the way an unpaired detach would.
      */
-    private fun holdPresence(client: Socket, input: DataInputStream) {
-        presenceSockets += client
+    private fun holdPresence(client: Socket, input: DataInputStream, kind: String) {
+        presenceSockets[client] = kind
         try {
             while (input.read() >= 0) Unit
         } catch (_: IOException) {
@@ -455,7 +480,12 @@ internal class DaemonServer(
             "ping" -> success(
                 DaemonJson.encodeToJsonElement(IntValue(DAEMON_CONTROL_PROTOCOL_VERSION)),
             )
-            "poll" -> success(DaemonJson.encodeToJsonElement(runtime.poll(request.decode(PollRequest.serializer()))))
+            "poll" -> success(
+                DaemonJson.encodeToJsonElement(
+                    // Who is attached is the server's knowledge, not the runtime's — it owns the sockets.
+                    runtime.poll(request.decode(PollRequest.serializer())).copy(studioAttached = studioAttached),
+                ),
+            )
             "clear" -> {
                 runtime.host.clear()
                 success()
@@ -486,6 +516,14 @@ internal class DaemonServer(
             }
             "set_mcp_redact_secrets" -> {
                 runtime.setMcpRedactSecrets(request.decode(BooleanValue.serializer()).value)
+                success()
+            }
+            "request_show_studio" -> {
+                runtime.requestShowStudio()
+                success()
+            }
+            "request_quit" -> {
+                runtime.requestQuit()
                 success()
             }
             "set_usb_port" -> {
@@ -592,7 +630,7 @@ internal class DaemonServer(
         runCatching { socket.close() }
         // Closing the server socket does not touch accepted ones, and a presence reader is parked on a
         // blocking read that no interrupt reaches.
-        presenceSockets.forEach { runCatching(it::close) }
+        presenceSockets.keys.forEach { runCatching(it::close) }
         executor.shutdownNow()
         handshakeStore.delete(token)
     }

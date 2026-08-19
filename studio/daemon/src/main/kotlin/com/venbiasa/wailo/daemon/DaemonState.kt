@@ -21,7 +21,7 @@ const val DEFAULT_USB_PORT = 8900
  * instead. The launcher hands its environment to the daemon it spawns, so both ends agree without a
  * flag to thread through every frontend.
  */
-internal fun wailoStateDir(): Path =
+fun wailoStateDir(): Path =
     System.getenv("WAILO_HOME")?.takeIf { it.isNotBlank() }?.let { Path.of(it) }
         ?: Path.of(System.getProperty("user.home"), ".wailo")
 
@@ -215,13 +215,14 @@ internal object DaemonStopMarker {
 }
 
 /**
- * Guarantees exactly one daemon owns the handshake file. The capture-port bind used to arbitrate
- * launch races on its own, but the control port is auto-chosen now (ADR-0059), so two daemons started
- * against different capture ports would both bind and the later one would overwrite the handshake —
- * leaving the earlier daemon running with no client able to reach it. An OS file lock is released on
- * crash or kill, which a pid file would not be.
+ * Guarantees exactly one process owns a named piece of the state directory. The daemon holds it for the
+ * handshake file: the capture-port bind used to arbitrate launch races on its own, but the control port is
+ * auto-chosen now (ADR-0059), so two daemons started against different capture ports would both bind and
+ * the later one would overwrite the handshake — leaving the earlier daemon running with no client able to
+ * reach it. The menu bar agent holds its own for the same reason, one icon instead of one handshake
+ * (ADR-0065). An OS file lock is released on crash or kill, which a pid file would not be.
  */
-internal class DaemonSingleInstanceLock private constructor(
+class DaemonSingleInstanceLock private constructor(
     private val channel: FileChannel,
     private val lock: FileLock,
 ) : Closeable {

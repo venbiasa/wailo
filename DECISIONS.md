@@ -70,3 +70,7 @@ reasoning in the ADR file, not here.
 | [0060](docs/decisions/ADR-0060-wi-fi-authentication-is-identity-first-with-per-studio-device-aliases.md) | 2026-08-14 | accepted | Wi-Fi authentication is identity-first, with per-Studio device aliases |
 | [0061](docs/decisions/ADR-0061-map-local-and-breakpoint-rules-persist-on-the-daemon.md) | 2026-08-16 | accepted | Daemon-owned configuration is durable; traffic and holds stay a session |
 | [0062](docs/decisions/ADR-0062-the-daemon-exits-once-nothing-refers-to-it.md) | 2026-08-16 | accepted | The daemon exits once nothing refers to it, and a reference is a held socket |
+| [0063](docs/decisions/ADR-0063-studio-owns-the-menu-bar-item-and-outlives-its-window.md) | 2026-08-20 | superseded | Studio owns the menu bar item and outlives its own window (superseded by ADR-0065) |
+| [0064](docs/decisions/ADR-0064-one-global-tools-gate-above-the-per-feature-masters.md) | 2026-08-20 | superseded | One global tools gate above the per-feature masters, owned by the daemon (superseded by ADR-0066) |
+| [0065](docs/decisions/ADR-0065-the-menu-bar-item-is-the-daemons-own-companion-process.md) | 2026-08-20 | accepted | The menu bar item is the daemon's own companion process, not Studio's window (supersedes ADR-0063) |
+| [0066](docs/decisions/ADR-0066-the-menu-bar-lists-each-daemon-owned-master-instead-of-a-gate.md) | 2026-08-20 | accepted | The menu bar lists each daemon-owned master instead of a gate above them (supersedes ADR-0064) |

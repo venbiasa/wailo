@@ -75,9 +75,10 @@ class DaemonClient internal constructor(
     private val rpc: DaemonRpcClient,
     private val autoRestart: Boolean,
     holdsPresence: Boolean = false,
+    clientKind: String = CLIENT_KIND_UNKNOWN,
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
 ) : AutoCloseable {
-    private val presence = if (holdsPresence) rpc.presence() else null
+    private val presence = if (holdsPresence) rpc.presence(clientKind) else null
 
     private val _connected = MutableStateFlow(false)
     val connected: StateFlow<Boolean> = _connected.asStateFlow()
@@ -118,6 +119,18 @@ class DaemonClient internal constructor(
     val mcpAccess: StateFlow<Boolean> = _mcpAccess.asStateFlow()
     private val _mcpRedactSecrets = MutableStateFlow(true)
     val mcpRedactSecrets: StateFlow<Boolean> = _mcpRedactSecrets.asStateFlow()
+    private val _studioAttached = MutableStateFlow(false)
+    val studioAttached: StateFlow<Boolean> = _studioAttached.asStateFlow()
+
+    /**
+     * Counters the daemon relays between frontends (ADR-0065): the menu bar agent asks, and whichever
+     * Studio is attached sees the number go up on its next poll and acts. Both start wherever the daemon
+     * happens to be, so a frontend that connects late does not act on a request made before it existed.
+     */
+    private val _showStudioRequests = MutableStateFlow<Int?>(null)
+    val showStudioRequests: StateFlow<Int?> = _showStudioRequests.asStateFlow()
+    private val _quitRequests = MutableStateFlow<Int?>(null)
+    val quitRequests: StateFlow<Int?> = _quitRequests.asStateFlow()
     private val _usbSupported = MutableStateFlow(false)
     val usbSupported: StateFlow<Boolean> = _usbSupported.asStateFlow()
     private val _usbPort = MutableStateFlow(8900)
@@ -236,6 +249,12 @@ class DaemonClient internal constructor(
         command("set_mcp_redact_secrets", BooleanValue(enabled))
         _mcpRedactSecrets.value = enabled
     }
+
+    /** Asks whichever Studio is attached to come forward; does nothing if none is (ADR-0065). */
+    suspend fun requestShowStudio() = command("request_show_studio")
+
+    /** Asks every attached frontend to exit. The caller stops the daemon itself, once they are gone. */
+    suspend fun requestQuit() = command("request_quit")
 
     suspend fun updateCaptureFilter(
         allowlistEnabled: Boolean,
@@ -428,6 +447,9 @@ class DaemonClient internal constructor(
         _pairing.value = response.pairing.toPublic()
         _mcpAccess.value = response.mcpAccess
         _mcpRedactSecrets.value = response.mcpRedactSecrets
+        _studioAttached.value = response.studioAttached
+        _showStudioRequests.value = response.showStudioRequests
+        _quitRequests.value = response.quitRequests
         _usbSupported.value = response.usbSupported
         _usbPort.value = response.usbPort
         _usbDevices.value = response.usbDevices.map {
@@ -473,6 +495,7 @@ class DaemonClient internal constructor(
             initialCapturePort: Int? = null,
             initialMaxRetained: Int? = null,
             holdPresence: Boolean = false,
+            clientKind: String = CLIENT_KIND_UNKNOWN,
         ): DaemonClient {
             if (autoStart) {
                 withContext(Dispatchers.IO) {
@@ -486,6 +509,7 @@ class DaemonClient internal constructor(
                 DaemonRpcClient(),
                 autoRestart = autoStart,
                 holdsPresence = holdPresence,
+                clientKind = clientKind,
             )
             if (client.awaitReady()) return client
             val reason = client.lastPollFailure?.message?.takeIf { it.isNotBlank() }
@@ -502,7 +526,7 @@ class DaemonClient internal constructor(
 internal class DaemonRpcClient(
     private val handshakeStore: DaemonHandshakeStore = FileDaemonHandshakeStore(),
 ) {
-    fun presence() = DaemonPresenceConnection(handshakeStore)
+    fun presence(kind: String = CLIENT_KIND_UNKNOWN) = DaemonPresenceConnection(handshakeStore, kind)
 
     suspend fun ping(): Boolean = runCatching {
         callRaw("ping")
@@ -566,7 +590,10 @@ internal class DaemonRpcClient(
  * frontend. It carries no traffic — the daemon reads it only to learn when it dies — so being killed
  * releases the reference exactly as a clean exit does, which a detach message would not.
  */
-internal class DaemonPresenceConnection(private val handshakeStore: DaemonHandshakeStore) : AutoCloseable {
+internal class DaemonPresenceConnection(
+    private val handshakeStore: DaemonHandshakeStore,
+    private val kind: String = CLIENT_KIND_UNKNOWN,
+) : AutoCloseable {
     @Volatile
     private var socket: Socket? = null
 
@@ -586,7 +613,13 @@ internal class DaemonPresenceConnection(private val handshakeStore: DaemonHandsh
             DaemonWire.writeRequest(
                 DataOutputStream(current.getOutputStream()),
                 handshake.token,
-                DaemonJson.encodeToString(RpcRequest.serializer(), RpcRequest(PRESENCE_COMMAND)),
+                DaemonJson.encodeToString(
+                    RpcRequest.serializer(),
+                    RpcRequest(
+                        PRESENCE_COMMAND,
+                        DaemonJson.encodeToJsonElement(PresenceRequest.serializer(), PresenceRequest(kind)),
+                    ),
+                ),
             )
             val input = DataInputStream(current.getInputStream())
             val accepted = DaemonJson.decodeFromString(
@@ -620,6 +653,11 @@ internal class DaemonPresenceConnection(private val handshakeStore: DaemonHandsh
 object DaemonLauncher {
     private const val RELAUNCH_INTERVAL_MS = 1_000L
 
+    private const val MENUBAR_MAIN_CLASS = "com.venbiasa.wailo.menubar.MainKt"
+
+    /** The escape hatch for CI and scripted runs, which want a daemon but no icon on someone's screen. */
+    private const val NO_MENUBAR_ENV = "WAILO_NO_MENUBAR"
+
     private val startLock = Any()
 
     fun ensureRunning(
@@ -627,6 +665,51 @@ object DaemonLauncher {
         initialCapturePort: Int? = null,
         initialMaxRetained: Int? = null,
         startAfterExplicitStop: Boolean = true,
+    ) {
+        ensureDaemon(timeoutMillis, initialCapturePort, initialMaxRetained, startAfterExplicitStop)
+        // Outside the daemon check above on purpose: the daemon is often already up and the agent is what
+        // died, and a frontend has no reason to care which of the two it just supplied.
+        ensureMenubar()
+    }
+
+    /**
+     * Starts the menu bar agent if nothing is drawing the item yet (ADR-0065). Best-effort by design: the
+     * item is how the user *sees* the daemon, so failing to draw it must never be able to stop a frontend
+     * from reaching one.
+     */
+    fun ensureMenubar() {
+        runCatching {
+            if (System.getenv(NO_MENUBAR_ENV)?.isNotBlank() == true) return
+            // Written by an agent that found no system tray, so a headless machine wastes one JVM ever
+            // rather than one per frontend command.
+            if (Files.exists(menubarUnsupportedPath())) return
+            // An install that does not ship the agent is a valid install; spawning its class name anyway
+            // would just fail once per command.
+            if (!menubarOnClasspath()) return
+            // Racing spawns are harmless: the loser cannot take the lock and exits on its own.
+            if (menubarRunning()) return
+            launchMenubar()
+        }
+    }
+
+    /**
+     * Whether an agent is drawing the item right now, probed by trying to take the lock it holds for life —
+     * so succeeding means nobody is there. An OS file lock is released on a crash or a kill, which is what
+     * makes this answer current rather than merely recorded, the way a pid file would be.
+     */
+    fun menubarRunning(): Boolean = lockHeld(menubarLockPath())
+
+    internal fun lockHeld(path: Path): Boolean {
+        val probe = runCatching { DaemonSingleInstanceLock.tryAcquire(path) }.getOrElse { return false }
+        probe?.close()
+        return probe == null
+    }
+
+    private fun ensureDaemon(
+        timeoutMillis: Long,
+        initialCapturePort: Int?,
+        initialMaxRetained: Int?,
+        startAfterExplicitStop: Boolean,
     ) {
         if (startAfterExplicitStop) {
             DaemonStopMarker.clear()
@@ -637,36 +720,48 @@ object DaemonLauncher {
         synchronized(startLock) {
             if (!startAfterExplicitStop && DaemonStopMarker.isMarked()) return
             val deadline = System.currentTimeMillis() + timeoutMillis
-            when (val runningVersion = runningVersionBlocking()) {
-                null -> Unit
-                DAEMON_CONTROL_PROTOCOL_VERSION -> return
-                in 0 until DAEMON_CONTROL_PROTOCOL_VERSION -> stopOutdatedDaemon(deadline, runningVersion)
-                else -> throw IOException(
-                    "Wailo daemon protocol $runningVersion is newer than this frontend's " +
-                        "protocol $DAEMON_CONTROL_PROTOCOL_VERSION; update the frontend",
-                )
-            }
-            var launchedAt = System.currentTimeMillis()
-            launch(initialCapturePort, initialMaxRetained)
-            while (System.currentTimeMillis() < deadline) {
-                when (val runningVersion = runningVersionBlocking()) {
-                    DAEMON_CONTROL_PROTOCOL_VERSION -> return
+            // One loop rather than a replace-then-launch sequence, because the two are not separable: an
+            // update leaves older frontends running (an editor's MCP adapter is the case that bites), and
+            // whichever of them notices the daemon go will start its own. Reaching the wanted protocol has
+            // to be retried until the deadline, or a version bump would crash the frontend the user just
+            // updated while the stale ones carried on.
+            var lastSeen: Int? = null
+            var launchedAt = 0L
+            while (true) {
+                val runningVersion = runningVersionBlocking()
+                when {
+                    runningVersion == DAEMON_CONTROL_PROTOCOL_VERSION -> return
+                    // Nothing this frontend can do: it is the outdated half, and talking down to a daemon
+                    // built after it is exactly what the version check exists to prevent.
+                    runningVersion != null && runningVersion > DAEMON_CONTROL_PROTOCOL_VERSION -> throw IOException(
+                        "Wailo daemon protocol $runningVersion is newer than this frontend's " +
+                            "protocol $DAEMON_CONTROL_PROTOCOL_VERSION; update the frontend",
+                    )
+                    runningVersion != null -> {
+                        lastSeen = runningVersion
+                        stopOutdatedDaemon(deadline)
+                    }
                     // A daemon being replaced stops answering well before it releases the single-instance
                     // lock, since it still has to unwind capture, USB, and adb. The first spawn can find
                     // the state directory still owned and exit; keep spawning, because a loser costs one
                     // short-lived JVM while giving up costs the frontend its whole launch.
-                    null -> if (System.currentTimeMillis() - launchedAt >= RELAUNCH_INTERVAL_MS) {
+                    System.currentTimeMillis() - launchedAt >= RELAUNCH_INTERVAL_MS -> {
                         launchedAt = System.currentTimeMillis()
                         launch(initialCapturePort, initialMaxRetained)
                     }
-                    else -> throw IOException(
-                        "Wailo daemon started with control protocol $runningVersion, expected " +
-                            DAEMON_CONTROL_PROTOCOL_VERSION,
-                    )
                 }
+                if (System.currentTimeMillis() >= deadline) break
                 Thread.sleep(100)
             }
-            throw IOException("Wailo daemon did not start; see ${logPath()}")
+            throw IOException(
+                if (lastSeen != null) {
+                    "Wailo daemon protocol $lastSeen would not give way to " +
+                        "$DAEMON_CONTROL_PROTOCOL_VERSION; another Wailo tool is still running an older " +
+                        "build — close it and retry"
+                } else {
+                    "Wailo daemon did not start; see ${logPath()}"
+                },
+            )
         }
     }
 
@@ -674,47 +769,74 @@ object DaemonLauncher {
         kotlinx.coroutines.runBlocking { DaemonRpcClient().controlProtocolVersion() }
     }.getOrNull()
 
-    private fun stopOutdatedDaemon(deadline: Long, runningVersion: Int) {
-        runCatching {
-            kotlinx.coroutines.runBlocking { DaemonRpcClient().callRaw("stop") }
-        }.getOrElse {
-            throw IOException("Could not replace Wailo daemon protocol $runningVersion", it)
-        }
+    /**
+     * Asks the daemon on the other end to stop and waits for it to go quiet. Best-effort and silent about
+     * failure: the caller re-probes on every pass, so a stop that lands on an already-dead daemon or on one
+     * that refuses is just another turn of the same loop.
+     */
+    private fun stopOutdatedDaemon(deadline: Long) {
+        // Marked here rather than left to the daemon being replaced: it is what suppresses the auto-restart
+        // path of every *other* frontend for the length of the handover, and the build being replaced is by
+        // definition too old to be relied on for that. Never cleared on the way out — the caller launches
+        // the replacement next, and that daemon clears it itself once it is actually answering.
+        DaemonStopMarker.mark()
+        runCatching { kotlinx.coroutines.runBlocking { DaemonRpcClient().callRaw("stop") } }
         while (System.currentTimeMillis() < deadline) {
-            if (runningVersionBlocking() == null) {
-                DaemonStopMarker.clear()
-                return
-            }
+            if (runningVersionBlocking() == null) return
             Thread.sleep(100)
         }
-        throw IOException("Timed out replacing Wailo daemon protocol $runningVersion")
     }
 
     private fun launch(initialCapturePort: Int?, initialMaxRetained: Int?) {
-        val log = logPath()
-        Files.createDirectories(log.parent)
-        val java = Path.of(
-            System.getProperty("java.home"),
-            "bin",
-            if (System.getProperty("os.name").startsWith("Windows", true)) "java.exe" else "java",
-        )
-        val nullDevice = if (System.getProperty("os.name").startsWith("Windows", true)) "NUL" else "/dev/null"
-        val process = ProcessBuilder(
-            java.toString(),
-            "-cp",
-            System.getProperty("java.class.path"),
-            "com.venbiasa.wailo.daemon.MainKt",
-        )
+        val process = jvm("com.venbiasa.wailo.daemon.MainKt")
         initialCapturePort?.let { process.environment()["WAILO_CAPTURE_PORT"] = it.toString() }
         initialMaxRetained?.let { process.environment()["WAILO_MAX_RETAINED"] = it.toString() }
-        process
-            .redirectInput(File(nullDevice))
-            .redirectOutput(ProcessBuilder.Redirect.appendTo(log.toFile()))
-            .redirectError(ProcessBuilder.Redirect.appendTo(log.toFile()))
+        process.redirectTo(logPath()).start()
+    }
+
+    private fun launchMenubar() {
+        // -Dapple.awt.UIElement keeps the agent out of the Dock and the Cmd-Tab list: it is a menu bar
+        // item, and a second Wailo tile beside Studio's would be the opposite of making one daemon legible.
+        jvm(MENUBAR_MAIN_CLASS, "-Dapple.awt.UIElement=true")
+            .redirectTo(menubarLogPath())
             .start()
     }
 
+    private fun jvm(mainClass: String, vararg jvmArgs: String): ProcessBuilder {
+        val java = Path.of(
+            System.getProperty("java.home"),
+            "bin",
+            if (isWindows) "java.exe" else "java",
+        )
+        return ProcessBuilder(
+            listOf(java.toString()) + jvmArgs + listOf("-cp", System.getProperty("java.class.path"), mainClass),
+        )
+    }
+
+    private fun ProcessBuilder.redirectTo(log: Path): ProcessBuilder {
+        Files.createDirectories(log.parent)
+        return redirectInput(File(if (isWindows) "NUL" else "/dev/null"))
+            .redirectOutput(ProcessBuilder.Redirect.appendTo(log.toFile()))
+            .redirectError(ProcessBuilder.Redirect.appendTo(log.toFile()))
+    }
+
+    private fun menubarOnClasspath(): Boolean = runCatching {
+        // Resolve without initializing: this process must not load AWT just to decide whether to spawn.
+        Class.forName(MENUBAR_MAIN_CLASS, false, DaemonLauncher::class.java.classLoader)
+        true
+    }.getOrDefault(false)
+
+    private val isWindows get() = System.getProperty("os.name").startsWith("Windows", true)
+
     internal fun logPath(): Path = wailoStateDir().resolve("daemon.log")
+
+    internal fun menubarLogPath(): Path = wailoStateDir().resolve("menubar.log")
+
+    /** The agent holds this for its lifetime; that is the whole single-instance protocol (ADR-0065). */
+    fun menubarLockPath(): Path = wailoStateDir().resolve("menubar.lock")
+
+    /** Written once by an agent that found no system tray, so this machine stops being asked. */
+    fun menubarUnsupportedPath(): Path = wailoStateDir().resolve("menubar.unsupported")
 }
 
 private fun PairingDto.toPublic() = DaemonPairingState(

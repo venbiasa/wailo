@@ -275,6 +275,7 @@ internal suspend fun dispatch(host: DaemonClient, args: ParsedArgs): CommandResu
         "status", "daemon_status", "daemon-status" -> CommandResult(
             "listening=${host.listening.value} port=${host.capturePort.value} " +
                 "devices=${host.connectedDevices.value.size} exchanges=${host.exchanges.value.size} " +
+                "capturing=${host.capturing.value} " +
                 "mcp_access=${host.mcpAccess.value} mcp_redaction=${host.mcpRedactSecrets.value}",
         )
         "stop", "daemon_stop", "daemon-stop" -> {
