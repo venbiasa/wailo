@@ -5,6 +5,7 @@ import com.venbiasa.wailo.engine.ConnectedDevice
 import com.venbiasa.wailo.engine.PausedExchange
 import com.venbiasa.wailo.host.HostBreakpointRule
 import com.venbiasa.wailo.host.HostMapLocalRule
+import com.venbiasa.wailo.host.HostSeed
 import com.venbiasa.wailo.host.urlPatternMatches
 import com.venbiasa.wailo.protocol.CaptureFilter
 import com.venbiasa.wailo.protocol.HttpRequest
@@ -113,6 +114,26 @@ class DaemonClient internal constructor(
     val breakpointsEnabled: StateFlow<Boolean> = _breakpointsEnabled.asStateFlow()
     private val _breakpointLayout = MutableStateFlow("")
     val breakpointLayout: StateFlow<String> = _breakpointLayout.asStateFlow()
+    private val _seeds = MutableStateFlow<List<HostSeed>>(emptyList())
+    val seeds: StateFlow<List<HostSeed>> = _seeds.asStateFlow()
+    private val _seedsEnabled = MutableStateFlow(true)
+    val seedsEnabled: StateFlow<Boolean> = _seedsEnabled.asStateFlow()
+    private val _seedLayout = MutableStateFlow("")
+    val seedLayout: StateFlow<String> = _seedLayout.asStateFlow()
+
+    /**
+     * The armed queue, resolved against [seeds] from the ids the poll carries. A seed the library no
+     * longer holds simply drops out, which is the same thing the daemon does to it.
+     */
+    private val _seedQueue = MutableStateFlow<List<HostSeed>>(emptyList())
+    val seedQueue: StateFlow<List<HostSeed>> = _seedQueue.asStateFlow()
+
+    /**
+     * The holds the daemon has finished deciding about. A hold in [pausedExchanges] and in here is one
+     * no seed answered, which is a frontend's cue that it needs a human.
+     */
+    private val _triagedHolds = MutableStateFlow<Set<String>>(emptySet())
+    val triagedHolds: StateFlow<Set<String>> = _triagedHolds.asStateFlow()
     private val _pairing = MutableStateFlow(DaemonPairingState())
     val pairing: StateFlow<DaemonPairingState> = _pairing.asStateFlow()
     private val _mcpAccess = MutableStateFlow(true)
@@ -146,6 +167,7 @@ class DaemonClient internal constructor(
 
     private var mapHash: String? = null
     private var breakpointHash: String? = null
+    private var seedHash: String? = null
     private var holdsHash: String? = null
 
     // The poll loop has to keep retrying rather than fail, so the reason it is not connected would
@@ -328,6 +350,45 @@ class DaemonClient internal constructor(
         _breakpointsEnabled.value = enabled
     }
 
+    suspend fun replaceSeeds(
+        seeds: List<HostSeed>,
+        enabled: Boolean,
+        layout: String? = null,
+    ) {
+        command("replace_seeds", ReplaceSeedsRequest(enabled, seeds.map { it.toDto() }, layout))
+        _seeds.value = seeds.toList()
+        _seedsEnabled.value = enabled
+        if (layout != null) _seedLayout.value = layout
+    }
+
+    suspend fun upsertSeed(seed: HostSeed) {
+        command("upsert_seed", seed.toDto())
+        _seeds.value = _seeds.value.filterNot { it.id == seed.id } + seed
+    }
+
+    suspend fun removeSeed(id: String): Boolean {
+        val removed = booleanCommand("remove_seed", IdRequest(id))
+        if (removed) _seeds.value = _seeds.value.filterNot { it.id == id }
+        return removed
+    }
+
+    suspend fun setSeedsEnabled(enabled: Boolean) {
+        command("set_seeds_enabled", BooleanValue(enabled))
+        _seedsEnabled.value = enabled
+    }
+
+    /**
+     * Arms the enabled seed library and sweeps the holds already waiting (ADR-0044), returning how many
+     * seeds are left armed afterwards. The daemon does both, so a Studio-less run scripts a sequence the
+     * same way an open window does.
+     */
+    suspend fun fillSeeds(): Int = rpc.call("fill_seeds", JsonNull, IntValue.serializer()).value
+
+    suspend fun clearSeedQueue() {
+        command("clear_seed_queue")
+        _seedQueue.value = emptyList()
+    }
+
     suspend fun resumeHold(
         correlationId: String,
         editedRequest: HttpRequest? = null,
@@ -408,6 +469,7 @@ class DaemonClient internal constructor(
             hasExchanges = current.isNotEmpty(),
             mapLocalHash = mapHash,
             breakpointHash = breakpointHash,
+            seedHash = seedHash,
             holdsHash = holdsHash,
         )
         val response = rpc.call(
@@ -444,6 +506,16 @@ class DaemonClient internal constructor(
         response.breakpointRules?.let { _breakpointRules.value = it.map(BreakpointRuleDto::toDomain) }
         response.breakpointLayout?.let { _breakpointLayout.value = it }
         breakpointHash = response.breakpointHash
+        _seedsEnabled.value = response.seedsEnabled
+        response.seeds?.let { _seeds.value = it.map(SeedRuleDto::toDomain) }
+        response.seedLayout?.let { _seedLayout.value = it }
+        seedHash = response.seedHash
+        // Resolved after the library above, so a fill that arms a freshly pushed seed is never reported
+        // as an id with nothing behind it.
+        _seedQueue.value = _seeds.value.let { library ->
+            response.armedSeedIds.mapNotNull { id -> library.firstOrNull { it.id == id } }
+        }
+        _triagedHolds.value = response.triagedHoldIds.toSet()
         _pairing.value = response.pairing.toPublic()
         _mcpAccess.value = response.mcpAccess
         _mcpRedactSecrets.value = response.mcpRedactSecrets

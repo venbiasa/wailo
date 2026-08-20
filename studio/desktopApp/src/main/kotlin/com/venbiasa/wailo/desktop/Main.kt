@@ -9,7 +9,6 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.graphics.painter.BitmapPainter
@@ -36,13 +35,11 @@ import com.venbiasa.wailo.daemon.UsbConnectionStatus
 import com.venbiasa.wailo.daemon.UsbDeviceInfo
 import com.venbiasa.wailo.engine.ConnectedDevice
 import com.venbiasa.wailo.engine.DeviceTransport
-import com.venbiasa.wailo.engine.PausedExchange
 import com.venbiasa.wailo.engine.WailoEngine
 import com.venbiasa.wailo.engine.pairing.PairingCode
 import com.venbiasa.wailo.host.HostBreakpointRule
 import com.venbiasa.wailo.host.HostMapLocalRule
 import com.venbiasa.wailo.host.HostSeed
-import com.venbiasa.wailo.host.spendSeedOn as spendHostSeedOn
 import com.venbiasa.wailo.protocol.CaptureFilter
 import com.venbiasa.wailo.protocol.Header
 import com.venbiasa.wailo.shared.BreakpointLayoutCodec
@@ -65,13 +62,13 @@ import com.venbiasa.wailo.shared.PausedFlow
 import com.venbiasa.wailo.shared.PickedFile
 import com.venbiasa.wailo.shared.RuleNode
 import com.venbiasa.wailo.shared.ResponseHeader
+import com.venbiasa.wailo.shared.SeedLayoutCodec
 import com.venbiasa.wailo.shared.SeedNode
 import com.venbiasa.wailo.shared.SeedRuleDef
 import com.venbiasa.wailo.shared.WailoApp
 import com.venbiasa.wailo.shared.WailoBreakpointWindowContent
 import com.venbiasa.wailo.shared.allRules
 import com.venbiasa.wailo.shared.isRuleActive
-import com.venbiasa.wailo.shared.rulesForMatch
 import com.venbiasa.wailo.shared.theme.TextScale
 import com.venbiasa.wailo.desktop.pairing.PairingQr
 import kotlinx.coroutines.Dispatchers
@@ -568,27 +565,89 @@ private fun runWailo(engine: DaemonClient) = application {
         lastPublishedBreakpointSignature = signature
     }
 
-    // Seed layout: host-owned and persisted like the two above. Seeds never reach a device — they are
-    // spent here, on the desktop, to answer a hold — so unlike Map Local and breakpoints there is nothing
-    // to compile or push (ADR-0041).
-    var seedNodes by remember { mutableStateOf(SeedStore.load()) }
+    // Seed layout: Studio prefs keep the authored structure and the body files, and the daemon gets the
+    // flattened library with its bytes inline — a seed is spent by whoever owns the hold, and that is the
+    // daemon whether or not this window exists (ADR-0067). Published and adopted exactly like the two
+    // above; unlike them, nothing reaches a device.
+    val daemonSeeds by engine.seeds.collectAsState()
+    val daemonSeedsEnabled by engine.seedsEnabled.collectAsState()
+    val daemonSeedLayout by engine.seedLayout.collectAsState()
+    val storedSeeds = remember { SeedStore.load() }
+    val initialDaemonSeeds = remember { engine.seeds.value }
+    val initialDaemonSeedLayout = remember { engine.seedLayout.value }
+    var seedNodes by remember {
+        mutableStateOf(initialSeedNodes(storedSeeds, initialDaemonSeedLayout, initialDaemonSeeds))
+    }
     val onSeedLayoutChange = { next: List<SeedNode> ->
         val prev = seedNodes
         seedNodes = next
         SeedStore.reconcileRemovedBodies(prev, next)
         SeedStore.save(next)
     }
-    var seedsEnabled by remember { mutableStateOf(SeedStore.loadEnabled()) }
+    var seedsEnabled by remember {
+        mutableStateOf(if (storedSeeds.isNotEmpty()) SeedStore.loadEnabled() else engine.seedsEnabled.value)
+    }
     val onSeedsEnabledChange = { next: Boolean ->
         seedsEnabled = next
         SeedStore.saveEnabled(next)
     }
+    var lastPublishedSeedSignature by remember {
+        mutableStateOf(seedSignature(initialDaemonSeeds, engine.seedsEnabled.value))
+    }
+    LaunchedEffect(seedNodes, seedsEnabled) {
+        val seeds = withContext(Dispatchers.IO) { seedNodes.toHostSeeds() }
+        val signature = seedSignature(seeds, seedsEnabled)
+        if (signature != lastPublishedSeedSignature) {
+            engine.replaceSeeds(seeds, seedsEnabled, SeedLayoutCodec.encode(seedNodes))
+            lastPublishedSeedSignature = signature
+        }
+    }
+    LaunchedEffect(daemonSeeds, daemonSeedsEnabled, daemonSeedLayout) {
+        val signature = seedSignature(daemonSeeds, daemonSeedsEnabled)
+        if (signature == lastPublishedSeedSignature) return@LaunchedEffect
+        // Adopted before the import decisions, and under the same restart exception, as Map Local above.
+        if (daemonSeeds.isNotEmpty() || seedNodes.isEmpty()) {
+            if (daemonSeedsEnabled != seedsEnabled) {
+                seedsEnabled = daemonSeedsEnabled
+                SeedStore.saveEnabled(daemonSeedsEnabled)
+                lastPublishedSeedSignature = signature
+            }
+        }
+        if (seedNodes.isNotEmpty()) {
+            if (daemonSeeds.isEmpty()) {
+                val seeds = withContext(Dispatchers.IO) { seedNodes.toHostSeeds() }
+                engine.replaceSeeds(seeds, seedsEnabled, SeedLayoutCodec.encode(seedNodes))
+                lastPublishedSeedSignature = seedSignature(seeds, seedsEnabled)
+            }
+            return@LaunchedEffect
+        }
+        val imported = if (daemonSeedLayout.isNotBlank()) {
+            SeedLayoutCodec.decode(daemonSeedLayout)
+        } else {
+            importSeeds(daemonSeeds)
+        }
+        if (imported.isEmpty()) return@LaunchedEffect
+        // A seed authored elsewhere arrives with its bytes, and the panel reads bodies from disk, so the
+        // import has to land them as files or the seed would show and serve as empty here.
+        withContext(Dispatchers.IO) { daemonSeeds.forEach(SeedStore::importHostBody) }
+        seedNodes = imported
+        seedsEnabled = daemonSeedsEnabled
+        SeedStore.save(imported)
+        SeedStore.saveEnabled(daemonSeedsEnabled)
+        lastPublishedSeedSignature = signature
+    }
 
-    // The armed seed queue: what Fill loaded, minus whatever has been spent. Session state on purpose —
-    // it outlives closing and reopening the breakpoint window (so a queue armed for a flow isn't lost to a
-    // stray close) but not a restart, since a half-spent queue is a snapshot of a run in progress, not a
-    // preference (ADR-0041).
-    var seedQueue by remember { mutableStateOf<List<SeedRuleDef>>(emptyList()) }
+    // The armed queue, as the daemon reports it: what Fill loaded, minus whatever has been spent. Session
+    // state on purpose — it outlives closing and reopening the breakpoint window (so a queue armed for a
+    // flow isn't lost to a stray close) but not a daemon restart, since a half-spent queue is a snapshot
+    // of a run in progress, not a preference (ADR-0041).
+    val daemonSeedQueue by engine.seedQueue.collectAsState()
+    val seedQueue = remember(daemonSeedQueue, seedNodes) {
+        val authored = seedNodes.allRules().associateBy { it.id }
+        // Prefer the authored definition so the window lists the seed the way the panel does; a seed
+        // armed from another frontend still shows, rebuilt from what the daemon holds.
+        daemonSeedQueue.map { authored[it.id] ?: it.toSeedRuleDef() }
+    }
     // Bumped after an import so the viewer reveals it by opening the Seed panel.
     var openSeedPanelRequests by remember { mutableStateOf(0) }
     // Copies a Map Local rule into the Seed list (its row's right-click "Seed…"). It lands here rather
@@ -642,41 +701,21 @@ private fun runWailo(engine: DaemonClient) = application {
     // when a hold arrives behind another window.
     var raiseBreakpointWindow by remember { mutableStateOf(0) }
 
-    // Triage each hold once, on arrival: a response-phase hold that a queued seed matches is answered
-    // here and the seed spent; everything else — a request-phase hold, or a response with no matching
-    // seed — needs a human, so the window opens. Only *automatic* matching is arrival-only; Fill sweeps
-    // what's already waiting, because that one is an explicit ask (ADR-0044).
-    val triaged = remember { mutableSetOf<String>() }
-    // Keyed on Unit and fed through a State, rather than keyed on `pausedFlows`: a hold is marked seen
-    // before its body read, so a re-key mid-decision (which a *second* hold arriving would cause) would
-    // cancel the first hold's triage after it had been marked — leaving a device blocked on a hold that
-    // is never resolved and never surfaced. `collect`, not `collectLatest`, for the same reason.
-    val currentPausedFlows = rememberUpdatedState(pausedFlows)
-    LaunchedEffect(Unit) {
-        snapshotFlow { currentPausedFlows.value }.collect { holds ->
-            holds.forEach { hold ->
-                if (!triaged.add(hold.correlationId)) return@forEach
-                val spent = if (seedsEnabled) spendSeedOn(engine, seedQueue, hold) else null
-                if (spent != null) seedQueue = spent else breakpointWindowOpen = true
-            }
-            // Forget resolved holds so the set can't grow unbounded across a long session.
-            triaged.retainAll(holds.mapTo(mutableSetOf()) { it.correlationId })
-        }
+    // The daemon spends seeds, so the only decision left here is whether a hold needs a human. A hold it
+    // has finished deciding about and not answered — a request-phase hold, or a response with no matching
+    // seed — opens the window. Waiting for that verdict rather than opening on first sight is what keeps
+    // a seed-answered hold from flashing a window open (ADR-0067).
+    val triagedHolds by engine.triagedHolds.collectAsState()
+    LaunchedEffect(pausedFlows, triagedHolds) {
+        if (pausedFlows.any { it.correlationId in triagedHolds }) breakpointWindowOpen = true
     }
 
-    // Fill arms the queue from the enabled seeds — flattened out of their groups, in layout order, "don't
-    // bring the group, keep the order" — and then spends it against whatever is already waiting. Arming
-    // late is the normal case: you notice a hold sitting there and only then load the seeds for it, and a
-    // queue that arrives a moment too late to be useful is a queue you'd have to re-trigger the traffic
-    // for (ADR-0044). Re-filling replaces the queue, which is how a partly-spent sequence is reset mid-run.
+    // Fill arms the daemon's enabled library in order and spends it against whatever is already waiting.
+    // Arming late is the normal case: you notice a hold sitting there and only then load the seeds for
+    // it, and a queue that arrives a moment too late to be useful is a queue you'd have to re-trigger the
+    // traffic for (ADR-0044). Re-filling replaces the queue, resetting a partly-spent sequence mid-run.
     val onFillSeeds = {
-        val waiting = pausedFlows
-        scope.launch {
-            seedQueue = if (seedsEnabled) seedNodes.rulesForMatch() else emptyList()
-            // Read the queue back each time rather than folding a local copy: the sweep suspends on each
-            // seed's body read, and a hold arriving in that gap is triaged against the same queue.
-            waiting.forEach { hold -> spendSeedOn(engine, seedQueue, hold)?.let { seedQueue = it } }
-        }
+        scope.launch { engine.fillSeeds() }
         Unit
     }
 
@@ -949,7 +988,7 @@ private fun runWailo(engine: DaemonClient) = application {
                 pausedFlows = pausedFlows,
                 seeds = seedQueue,
                 onFillSeeds = onFillSeeds,
-                onClearSeeds = { seedQueue = emptyList() },
+                onClearSeeds = { scope.launch { engine.clearSeedQueue() } },
                 onLoadSeedBody = { seed -> withContext(Dispatchers.IO) { SeedStore.loadBody(seed) } },
                 onBringToFront = { raiseBreakpointWindow += 1 },
                 darkTheme = darkTheme,
@@ -966,57 +1005,78 @@ private fun runWailo(engine: DaemonClient) = application {
 }
 
 /**
- * Desktop adapter over [spendHostSeedOn]: maps the UI's [SeedRuleDef] / [PausedFlow] to the host types
- * and resolves bodies through [SeedStore]. Shared with CLI/MCP so a seed that answers a hold in the
- * desktop is the same spender headless frontends use (ADR-0055).
- *
- * Three ways to answer nothing, all of them a hold the user has to take: a request-phase hold, since the
- * wire honours an edited response only on a RESPONSE-phase hit; no seed matching the URL/method; or a seed
- * whose body file has gone missing, where resolving the hold with an empty body would be a silent, wrong
- * success.
+ * The daemon's copy of the library: the flattened, in-order rules the panel shows, each carrying the
+ * bytes it will answer with. Bodies ride along rather than being read at spend time, because the daemon
+ * has to answer a hold with no Studio to ask (ADR-0067) — and a seed whose file has gone missing is sent
+ * with [HostSeed.bodyAvailable] false, so it declines the hold instead of answering it empty.
  */
-private suspend fun spendSeedOn(
-    engine: DaemonClient,
-    queue: List<SeedRuleDef>,
-    hold: PausedFlow,
-): List<SeedRuleDef>? {
-    val hostQueue = queue.map { it.toHostSeed() }
-    val spent = spendHostSeedOn(
-        queue = hostQueue,
-        hold = hold.toPausedExchange(),
-        responses = { seed ->
-            val def = queue.first { it.id == seed.id }
-            withContext(Dispatchers.IO) { SeedStore.seedResponse(def) }
-        },
-        resume = { correlationId, response -> engine.resumeHold(correlationId, null, response) },
-    ) ?: return if (engine.pausedExchanges.value.none { it.correlationId == hold.correlationId }) {
-        // The device disconnected while its body was being read. Treat the vanished hold as handled so
-        // the desktop does not open an empty breakpoint window, but keep the seed because nothing spent it.
-        queue
-    } else {
-        null
-    }
-    val remaining = spent.mapTo(HashSet()) { it.id }
-    return queue.filter { it.id in remaining }
+private fun List<SeedNode>.toHostSeeds(): List<HostSeed> = allRules().map { seed ->
+    val body = SeedStore.loadBodyOrNull(seed)
+    HostSeed(
+        id = seed.id,
+        // The whole library goes over, disabled seeds included — Fill is what filters, and a seed that
+        // vanished from the daemon while switched off could not be listed or re-armed from anywhere else.
+        // A seed inside an off group is inactive however its own switch reads, same as Map Local.
+        enabled = isRuleActive(seed.id),
+        urlPattern = seed.urlPattern,
+        method = seed.method,
+        statusCode = seed.statusCode,
+        headers = seed.headers.map { Header(name = it.name, value_ = it.value) },
+        body = body ?: ByteArray(0),
+        bodyAvailable = body != null,
+    )
 }
 
-private fun SeedRuleDef.toHostSeed() = HostSeed(
+private fun HostSeed.toSeedRuleDef() = SeedRuleDef(
     id = id,
+    enabled = enabled,
     urlPattern = urlPattern,
     method = method,
     statusCode = statusCode,
-    headers = headers.map { Header(name = it.name, value_ = it.value) },
+    headers = headers.map { ResponseHeader(name = it.name, value = it.value_) },
 )
 
-private fun PausedFlow.toPausedExchange() = PausedExchange(
-    correlationId = correlationId,
-    deviceName = deviceName,
-    appId = appId,
-    platform = platform,
-    phase = phase,
-    request = request,
-    response = response,
-)
+/** A flat list of seeds from a daemon with no layout string — an MCP/CLI-authored library. */
+private fun importSeeds(seeds: List<HostSeed>): List<SeedNode> =
+    seeds.map { RuleNode(it.toSeedRuleDef()) }
+
+private fun initialSeedNodes(
+    stored: List<SeedNode>,
+    daemonLayout: String,
+    daemonSeeds: List<HostSeed>,
+): List<SeedNode> = when {
+    stored.isNotEmpty() -> stored
+    daemonLayout.isNotBlank() -> SeedLayoutCodec.decode(daemonLayout)
+    else -> importSeeds(daemonSeeds)
+}
+
+/**
+ * Compares what the panel would publish with what the daemon reports, so an echo of our own push is not
+ * mistaken for someone else's edit. Bodies are in it because a body-only edit is still an edit the
+ * daemon has to serve — matching the Map Local signature (ADR-0061).
+ */
+private fun seedSignature(seeds: List<HostSeed>, enabled: Boolean): String =
+    buildString {
+        append(enabled)
+        seeds.forEach { seed ->
+            append('|')
+            append(seed.id)
+            append(':')
+            append(seed.enabled)
+            append(':')
+            append(seed.urlPattern)
+            append(':')
+            append(seed.method)
+            append(':')
+            append(seed.statusCode)
+            append(':')
+            append(seed.headers.joinToString("\u0000") { "${it.name}\u0001${it.value_}" })
+            append(':')
+            append(seed.bodyAvailable)
+            append(':')
+            append(seed.bodyCopy().contentHashCode())
+        }
+    }
 
 private fun CaptureFilter.toUiState() = CaptureFilterState(
     masterEnabled = allowlist_enabled || blocklist_enabled ||

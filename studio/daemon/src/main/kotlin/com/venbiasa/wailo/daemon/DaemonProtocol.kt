@@ -8,6 +8,7 @@ import com.venbiasa.wailo.engine.pairing.PairedDevice
 import com.venbiasa.wailo.engine.pairing.RefusedDevice
 import com.venbiasa.wailo.host.HostBreakpointRule
 import com.venbiasa.wailo.host.HostMapLocalRule
+import com.venbiasa.wailo.host.HostSeed
 import com.venbiasa.wailo.protocol.BreakpointPhase
 import com.venbiasa.wailo.protocol.CaptureFilter
 import com.venbiasa.wailo.protocol.Header
@@ -20,7 +21,7 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import okio.ByteString.Companion.toByteString
 
-internal const val DAEMON_CONTROL_PROTOCOL_VERSION = 5
+internal const val DAEMON_CONTROL_PROTOCOL_VERSION = 6
 
 /**
  * The one command whose socket is not answered and closed. The daemon holds it open and counts it as a
@@ -61,6 +62,7 @@ internal data class PollRequest(
     val hasExchanges: Boolean = false,
     val mapLocalHash: String? = null,
     val breakpointHash: String? = null,
+    val seedHash: String? = null,
     val holdsHash: String? = null,
 )
 
@@ -87,6 +89,17 @@ internal data class PollResponse(
     val breakpointHash: String,
     val breakpointRules: List<BreakpointRuleDto>? = null,
     val breakpointLayout: String? = null,
+    val seedsEnabled: Boolean,
+    val seedHash: String,
+    val seeds: List<SeedRuleDto>? = null,
+    val seedLayout: String? = null,
+    // The armed queue as ids into the library above, not whole seeds: it changes on every spend, so a
+    // poll that carried the bodies again would re-send them on each answered hold. Session state, so it
+    // rides outside the hash-gated snapshot (ADR-0067).
+    val armedSeedIds: List<String> = emptyList(),
+    // Which of [holds] the daemon has finished deciding about, so a frontend can tell a hold no seed
+    // wanted from one whose spend has not run yet (ADR-0067).
+    val triagedHoldIds: List<String> = emptyList(),
     val pairing: PairingDto,
     val mcpAccess: Boolean,
     val mcpRedactSecrets: Boolean,
@@ -211,6 +224,34 @@ internal data class BreakpointRuleDto(
     )
 }
 
+/**
+ * A seed carries its body inline, like [MapLocalRuleDto] and unlike a device-side rule: it is never
+ * pushed anywhere, it is spent here, and the daemon has to be able to answer a hold with no Studio to
+ * ask for the bytes (ADR-0067).
+ */
+@Serializable
+internal data class SeedRuleDto(
+    val id: String,
+    val enabled: Boolean,
+    val urlPattern: String,
+    val method: String,
+    val statusCode: Int,
+    val headers: List<HeaderDto>,
+    val bodyBase64: String,
+    val bodyAvailable: Boolean = true,
+) {
+    fun toDomain() = HostSeed(
+        id = id,
+        enabled = enabled,
+        urlPattern = urlPattern,
+        method = method,
+        statusCode = statusCode,
+        headers = headers.map(HeaderDto::toDomain),
+        body = bodyBase64.decodeBase64(),
+        bodyAvailable = bodyAvailable,
+    )
+}
+
 @Serializable
 internal data class PairingDto(
     val supported: Boolean,
@@ -301,6 +342,13 @@ internal data class ReplaceBreakpointsRequest(
 )
 
 @Serializable
+internal data class ReplaceSeedsRequest(
+    val enabled: Boolean,
+    val rules: List<SeedRuleDto>,
+    val layout: String? = null,
+)
+
+@Serializable
 internal data class ResumeHoldRequest(
     val correlationId: String,
     val editedRequestBase64: String? = null,
@@ -359,6 +407,17 @@ internal fun HostBreakpointRule.toDto() = BreakpointRuleDto(
     methods = methods,
     onRequest = onRequest,
     onResponse = onResponse,
+)
+
+internal fun HostSeed.toDto() = SeedRuleDto(
+    id = id,
+    enabled = enabled,
+    urlPattern = urlPattern,
+    method = method,
+    statusCode = statusCode,
+    headers = headers.map { HeaderDto(it.name, it.value_) },
+    bodyBase64 = bodyCopy().encodeBase64(),
+    bodyAvailable = bodyAvailable,
 )
 
 internal fun PairedDevice.toDto() = PairedDeviceDto(

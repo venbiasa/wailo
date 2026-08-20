@@ -3,6 +3,7 @@ package com.venbiasa.wailo.cli
 import com.venbiasa.wailo.daemon.DaemonClient
 import com.venbiasa.wailo.engine.WailoEngine
 import com.venbiasa.wailo.host.HostMapLocalRule
+import com.venbiasa.wailo.host.HostSeed
 import com.venbiasa.wailo.host.urlPatternMatches
 import com.venbiasa.wailo.host.summarizeExchanges
 import com.venbiasa.wailo.protocol.Header
@@ -163,6 +164,55 @@ internal suspend fun dispatch(host: DaemonClient, args: ParsedArgs): CommandResu
             host.setMapLocalEnabled(enabled)
             CommandResult("map_local_enabled=$enabled")
         }
+        "set_seed", "set-seed" -> setSeed(host, args)
+        "remove_seed", "remove-seed" -> {
+            val id = args.id ?: return CommandResult("remove_seed requires --id", exitCode = 2)
+            if (host.removeSeed(id)) {
+                CommandResult("removed seed $id")
+            } else {
+                CommandResult("seed not found: $id", exitCode = 1)
+            }
+        }
+        "list_seeds", "list-seeds" -> {
+            val seeds = host.seeds.value
+            val armed = host.seedQueue.value.map { it.id }.toSet()
+            CommandResult(
+                buildString {
+                    // The master gates the whole list, so an armed seed under `seeds_enabled=false` is one
+                    // that will not fire — without this line the armed column reads as a promise.
+                    appendLine("seeds_enabled=${host.seedsEnabled.value}")
+                    if (seeds.isEmpty()) {
+                        append("(no seeds)")
+                    } else {
+                        seeds.forEach { seed ->
+                            val method = seed.method.takeIf { it.isNotBlank() } ?: "*"
+                            val state = if (seed.enabled) "on" else "off"
+                            // A seed is spent when it answers a hold, so "in the library" and "still
+                            // waiting to fire" are different questions a scripted run needs both of.
+                            val queued = if (seed.id in armed) "armed" else "-"
+                            appendLine(
+                                "${seed.id}\t$state\t$method\t${seed.statusCode}\t" +
+                                    "${seed.bodySize}B\t$queued\t${seed.urlPattern}",
+                            )
+                        }
+                    }
+                }.trimEnd(),
+            )
+        }
+        "set_seeds_enabled", "set-seeds-enabled" -> {
+            val enabled = args.flag
+                ?: return CommandResult("set_seeds_enabled requires --on or --off", exitCode = 2)
+            host.setSeedsEnabled(enabled)
+            CommandResult("seeds_enabled=$enabled")
+        }
+        "fill_seeds", "fill-seeds" -> {
+            val armed = host.fillSeeds()
+            CommandResult("armed $armed seed(s)")
+        }
+        "clear_seed_queue", "clear-seed-queue" -> {
+            host.clearSeedQueue()
+            CommandResult("seed queue cleared")
+        }
         "set_capture_filter", "set-capture-filter" -> {
             host.updateCaptureFilter(
                 allowlistEnabled = args.allowPatterns.isNotEmpty(),
@@ -287,20 +337,75 @@ internal suspend fun dispatch(host: DaemonClient, args: ParsedArgs): CommandResu
 }
 
 private suspend fun setMapLocal(host: DaemonClient, args: ParsedArgs): CommandResult {
-    val id = args.id ?: return CommandResult("set_map_local requires --id", exitCode = 2)
-    val pattern = args.urlPattern
-        ?: return CommandResult("set_map_local requires --url-pattern", exitCode = 2)
-    if (id.isBlank()) return CommandResult("Map Local id must not be blank", exitCode = 2)
-    if (pattern.isBlank()) return CommandResult("Map Local URL pattern must not be blank", exitCode = 2)
-    val status = args.statusCode ?: 200
-    if (status !in 100..599) {
-        return CommandResult("Map Local status must be between 100 and 599", exitCode = 2)
+    val canned = when (val parsed = parseCannedResponse("set_map_local", "Map Local", args)) {
+        is CannedResponse.Rejected -> return parsed.result
+        is CannedResponse.Parsed -> parsed
     }
+    host.upsertMapLocalRule(
+        HostMapLocalRule(
+            id = canned.id,
+            enabled = args.flag ?: true,
+            urlPattern = canned.urlPattern,
+            methods = args.method?.let(::listOf).orEmpty(),
+            statusCode = canned.statusCode,
+            headers = canned.headers,
+            body = canned.body,
+        ),
+    )
+    return CommandResult("Map Local rule ${canned.id} set (${canned.body.size} bytes)")
+}
+
+/**
+ * Writes a seed into the daemon's library (ADR-0067). Deliberately not armed by this: the library is what
+ * a run configures up front, `fill_seeds` is the moment it decides the sequence starts.
+ */
+private suspend fun setSeed(host: DaemonClient, args: ParsedArgs): CommandResult {
+    val canned = when (val parsed = parseCannedResponse("set_seed", "Seed", args)) {
+        is CannedResponse.Rejected -> return parsed.result
+        is CannedResponse.Parsed -> parsed
+    }
+    host.upsertSeed(
+        HostSeed(
+            id = canned.id,
+            enabled = args.flag ?: true,
+            urlPattern = canned.urlPattern,
+            method = args.method.orEmpty(),
+            statusCode = canned.statusCode,
+            headers = canned.headers,
+            body = canned.body,
+        ),
+    )
+    return CommandResult("seed ${canned.id} set (${canned.body.size} bytes)")
+}
+
+/**
+ * The id / pattern / status / headers / body a Map Local rule and a seed are both authored from — they
+ * are the same canned response, differing only in who serves it.
+ */
+private sealed interface CannedResponse {
+    data class Parsed(
+        val id: String,
+        val urlPattern: String,
+        val statusCode: Int,
+        val headers: List<Header>,
+        val body: ByteArray,
+    ) : CannedResponse
+
+    data class Rejected(val result: CommandResult) : CannedResponse
+}
+
+private fun parseCannedResponse(verb: String, label: String, args: ParsedArgs): CannedResponse {
+    fun reject(message: String, exitCode: Int = 2) = CannedResponse.Rejected(CommandResult(message, exitCode))
+    val id = args.id ?: return reject("$verb requires --id")
+    val pattern = args.urlPattern ?: return reject("$verb requires --url-pattern")
+    if (id.isBlank()) return reject("$label id must not be blank")
+    if (pattern.isBlank()) return reject("$label URL pattern must not be blank")
+    val status = args.statusCode ?: 200
+    if (status !in 100..599) return reject("$label status must be between 100 and 599")
     val body = when {
-        args.bodyFile != null && args.bodyText != null ->
-            return CommandResult("use only one of --body-file or --body-text", exitCode = 2)
+        args.bodyFile != null && args.bodyText != null -> return reject("use only one of --body-file or --body-text")
         args.bodyFile != null -> runCatching { Files.readAllBytes(Path.of(args.bodyFile)) }.getOrElse {
-            return CommandResult("could not read body file ${args.bodyFile}: ${it.message}", exitCode = 1)
+            return reject("could not read body file ${args.bodyFile}: ${it.message}", exitCode = 1)
         }
         else -> args.bodyText.orEmpty().toByteArray(Charsets.UTF_8)
     }
@@ -309,25 +414,20 @@ private suspend fun setMapLocal(host: DaemonClient, args: ParsedArgs): CommandRe
         val separator = raw.indexOf(':')
         val name = raw.substring(0, separator.coerceAtLeast(0)).trim()
         if (separator <= 0 || name.isEmpty()) {
-            return CommandResult("invalid header '$raw'; expected 'Name: value'", exitCode = 2)
+            return reject("invalid header '$raw'; expected 'Name: value'")
         }
         headers += Header(name = name, value_ = raw.substring(separator + 1).trim())
     }
     if (headers.none { it.name.equals("Content-Type", ignoreCase = true) } && args.bodyFile != null) {
         contentTypeFor(args.bodyFile)?.let { headers += Header(name = "Content-Type", value_ = it) }
     }
-    host.upsertMapLocalRule(
-        HostMapLocalRule(
-            id = id,
-            enabled = args.flag ?: true,
-            urlPattern = pattern,
-            methods = args.method?.let(::listOf).orEmpty(),
-            statusCode = status,
-            headers = headers,
-            body = body,
-        ),
+    return CannedResponse.Parsed(
+        id = id,
+        urlPattern = pattern,
+        statusCode = status,
+        headers = headers,
+        body = body,
     )
-    return CommandResult("Map Local rule $id set (${body.size} bytes)")
 }
 
 private fun contentTypeFor(path: String): String? = when (path.substringAfterLast('.', "").lowercase()) {
@@ -354,6 +454,12 @@ internal enum class Command(val verb: String) {
     RemoveMapLocal("remove_map_local"),
     ListMapLocal("list_map_local"),
     SetMapLocalEnabled("set_map_local_enabled"),
+    SetSeed("set_seed"),
+    RemoveSeed("remove_seed"),
+    ListSeeds("list_seeds"),
+    SetSeedsEnabled("set_seeds_enabled"),
+    FillSeeds("fill_seeds"),
+    ClearSeedQueue("clear_seed_queue"),
     SetCaptureFilter("set_capture_filter"),
     ClearCaptureFilter("clear_capture_filter"),
     ListCaptureFilter("list_capture_filter"),
@@ -484,6 +590,13 @@ private fun printUsage() {
         wailo-cli remove_map_local --id ID
         wailo-cli list_map_local
         wailo-cli set_map_local_enabled --on|--off
+        wailo-cli set_seed --id ID --url-pattern GLOB [--method M] [--status C]
+                    [--header "Name: value"]... [--body-file PATH|--body-text TEXT] [--off]
+        wailo-cli remove_seed --id ID
+        wailo-cli list_seeds
+        wailo-cli set_seeds_enabled --on|--off
+        wailo-cli fill_seeds
+        wailo-cli clear_seed_queue
         wailo-cli set_capture_filter [--allow HOST_PATTERN]... [--block HOST_PATTERN]...
         wailo-cli clear_capture_filter
         wailo-cli list_capture_filter
@@ -502,6 +615,10 @@ private fun printUsage() {
         Every invocation auto-starts and attaches to the same daemon. It stays up while anything refers
         to it — an open Studio, an MCP session, a connected app — and exits on its own once nothing has
         for a while. `serve --keep` holds it open until Ctrl-C; `wailo-cli stop` ends it immediately.
+
+        Seeds are canned responses that answer held exchanges in order (ADR-0041). set_seed builds the
+        library; fill_seeds arms every enabled one and sweeps the holds already waiting, and each hold it
+        answers spends a seed. list_seeds shows which are still armed.
 
         set_mcp_access gates whether AI tools reach this capture at all; set_mcp_redaction decides
         whether what they read has its credentials stripped. Both are also in Studio's Settings panel.

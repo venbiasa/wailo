@@ -106,6 +106,9 @@ private fun run(client: DaemonClient, mark: BufferedImage) {
             setBreakpointsEnabled = { enabled ->
                 scope.launch { runCatching { client.setBreakpointsEnabled(enabled) } }
             },
+            setSeedsEnabled = { enabled ->
+                scope.launch { runCatching { client.setSeedsEnabled(enabled) } }
+            },
             // The filter travels as one message, so a list toggle has to resend the other list untouched.
             // Read it at click time rather than from the rendered state: the poll behind the open menu may
             // be a tick old, and re-sending a stale host list would drop hosts added elsewhere.
@@ -164,6 +167,7 @@ private fun run(client: DaemonClient, mark: BufferedImage) {
                     capturing = client.capturing.value,
                     mapLocalEnabled = client.mapLocalEnabled.value,
                     breakpointsEnabled = client.breakpointsEnabled.value,
+                    seedsEnabled = client.seedsEnabled.value,
                     allowlistEnabled = filter.allowlist_enabled,
                     blocklistEnabled = filter.blocklist_enabled,
                     allowlistConfigured = filter.allow_patterns.isNotEmpty(),

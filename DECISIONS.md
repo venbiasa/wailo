@@ -74,3 +74,4 @@ reasoning in the ADR file, not here.
 | [0064](docs/decisions/ADR-0064-one-global-tools-gate-above-the-per-feature-masters.md) | 2026-08-20 | superseded | One global tools gate above the per-feature masters, owned by the daemon (superseded by ADR-0066) |
 | [0065](docs/decisions/ADR-0065-the-menu-bar-item-is-the-daemons-own-companion-process.md) | 2026-08-20 | accepted | The menu bar item is the daemon's own companion process, not Studio's window (supersedes ADR-0063) |
 | [0066](docs/decisions/ADR-0066-the-menu-bar-lists-each-daemon-owned-master-instead-of-a-gate.md) | 2026-08-20 | accepted | The menu bar lists each daemon-owned master instead of a gate above them (supersedes ADR-0064) |
+| [0067](docs/decisions/ADR-0067-the-daemon-owns-the-seed-library-and-spends-it.md) | 2026-08-20 | accepted | The daemon owns the seed library and spends it, so Seeds reach CLI, MCP, and the menu bar (supersedes ADR-0041's desktop-side spend and ADR-0066's Seeds carve-out) |

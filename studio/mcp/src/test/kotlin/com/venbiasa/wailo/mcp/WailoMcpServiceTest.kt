@@ -40,6 +40,13 @@ class WailoMcpServiceTest {
                 "remove_breakpoint",
                 "list_breakpoints",
                 "set_breakpoints_enabled",
+                "set_seed",
+                "remove_seed",
+                "list_seeds",
+                "get_seed",
+                "set_seeds_enabled",
+                "fill_seeds",
+                "clear_seed_queue",
                 "resume_hold",
                 "abort_hold",
             ),
@@ -155,6 +162,43 @@ class WailoMcpServiceTest {
     }
 
     @Test
+    fun aSeedIsWrittenDisarmedAndOnlyFillPutsItInPlay() = runBlocking {
+        val host = HeadlessHost.wrap(WailoEngine())
+        val service = WailoMcpService(host, 8899)
+        try {
+            assertFalse(
+                service.call(
+                    "set_seed",
+                    mapOf(
+                        "id" to "poll-1",
+                        "url_pattern" to "https://example.com/poll",
+                        "status_code" to 202,
+                        "headers" to listOf(mapOf("name" to "Content-Type", "value" to "text/plain")),
+                        "body_text" to "pending",
+                    ),
+                ).isError,
+            )
+            val authored = service.call("list_seeds", emptyMap()).seeds().single()
+            assertFalse(authored.containsKey("body"))
+            assertEquals(false, authored["armed"])
+            assertEquals(7, authored["body_bytes"])
+
+            assertEquals(1, service.call("fill_seeds", emptyMap()).data["armed"])
+            assertEquals(true, service.call("list_seeds", emptyMap()).seeds().single()["armed"])
+            assertEquals("pending", service.call("get_seed", mapOf("id" to "poll-1")).seedBody()["data"])
+
+            assertFalse(service.call("clear_seed_queue", emptyMap()).isError)
+            assertEquals(false, service.call("list_seeds", emptyMap()).seeds().single()["armed"])
+            // Disarming leaves the library alone, so the same sequence can be re-armed.
+            assertEquals("poll-1", host.seeds.value.single().id)
+
+            assertTrue(service.call("remove_seed", mapOf("id" to "missing")).isError)
+        } finally {
+            host.stop()
+        }
+    }
+
+    @Test
     fun parsesMcpProcessOptions() {
         assertEquals(McpConfig(port = 19001, maxRetained = 500), parseMcpArgs(arrayOf("--port", "19001", "--max-retained", "500")))
     }
@@ -166,3 +210,10 @@ private fun McpToolResponse.rules(): List<Map<String, Any?>> = data["rules"] as 
 @Suppress("UNCHECKED_CAST")
 private fun McpToolResponse.body(): Map<String, Any?> =
     (data["rule"] as Map<String, Any?>)["body"] as Map<String, Any?>
+
+@Suppress("UNCHECKED_CAST")
+private fun McpToolResponse.seeds(): List<Map<String, Any?>> = data["seeds"] as List<Map<String, Any?>>
+
+@Suppress("UNCHECKED_CAST")
+private fun McpToolResponse.seedBody(): Map<String, Any?> =
+    (data["seed"] as Map<String, Any?>)["body"] as Map<String, Any?>

@@ -26,6 +26,18 @@ internal data class PersistedBreakpoints(
     val rules: List<BreakpointRuleDto> = emptyList(),
 )
 
+/**
+ * Seeds are configuration like the two above — authored fixtures that must outlive the window that
+ * wrote them (ADR-0067). The *armed queue* is not here on purpose: it is a position in a run, so it
+ * stays session state beside traffic and holds (ADR-0041/0061).
+ */
+@Serializable
+internal data class PersistedSeeds(
+    val enabled: Boolean = true,
+    val layout: String = "",
+    val rules: List<SeedRuleDto> = emptyList(),
+)
+
 @Serializable
 internal data class PersistedCaptureFilter(
     val allowlistEnabled: Boolean = false,
@@ -39,6 +51,7 @@ internal class DaemonFixturesStore(
 ) {
     private val mapLocalPath: Path get() = directory.resolve("map-local.json")
     private val breakpointsPath: Path get() = directory.resolve("breakpoints.json")
+    private val seedsPath: Path get() = directory.resolve("seeds.json")
     private val captureFilterPath: Path get() = directory.resolve("capture-filter.json")
 
     @Synchronized
@@ -60,6 +73,16 @@ internal class DaemonFixturesStore(
 
     @Synchronized
     fun saveBreakpoints(value: PersistedBreakpoints) = write(breakpointsPath, DaemonJson.encodeToString(value))
+
+    @Synchronized
+    fun loadSeeds(): PersistedSeeds = read(seedsPath, PersistedSeeds())
+
+    @Synchronized
+    fun loadSeedsIfPresent(): PersistedSeeds? =
+        if (Files.isRegularFile(seedsPath)) loadSeeds() else null
+
+    @Synchronized
+    fun saveSeeds(value: PersistedSeeds) = write(seedsPath, DaemonJson.encodeToString(value))
 
     @Synchronized
     fun loadCaptureFilter(): PersistedCaptureFilter = read(captureFilterPath, PersistedCaptureFilter())

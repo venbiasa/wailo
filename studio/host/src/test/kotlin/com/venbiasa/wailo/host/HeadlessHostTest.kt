@@ -22,18 +22,16 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
-import okio.ByteString.Companion.toByteString
 
 class HeadlessHostTest {
 
     @Test
-    fun holdRetriesWhenSeedProviderBecomesReady() = runBlocking {
+    fun fillAnswersAHoldThatArrivedBeforeTheSeedsDid() = runBlocking {
         val engine = WailoEngine()
         val host = HeadlessHost.wrap(engine)
         val connection = FakeConnection()
         val serving = launch { engine.attach(connection) }
         try {
-            host.armSeeds(listOf(HostSeed(id = "seed", urlPattern = "https://example.com/*")))
             connection.incoming.send(Envelope(hello = HELLO).encode())
             connection.incoming.send(
                 Envelope(
@@ -50,11 +48,17 @@ class HeadlessHostTest {
                 while (engine.pausedExchanges.value.none { it.correlationId == "hold" }) delay(10)
             }
 
-            // The hold arrived before body resolution was configured. Installing the provider must
-            // retrigger triage rather than leaving the earlier "seen" marker to wedge the device.
-            host.seedResponseProvider = SeedResponseProvider {
-                HttpResponse(code = 202, body = "{}".toByteArray().toByteString())
-            }
+            // Arming after the traffic paused is the ordinary way to reach for seeds, so Fill sweeps
+            // what is already waiting rather than leaving it for a re-trigger (ADR-0044).
+            host.upsertSeed(
+                HostSeed(
+                    id = "seed",
+                    urlPattern = "https://example.com/*",
+                    statusCode = 202,
+                    body = "{}".toByteArray(),
+                ),
+            )
+            host.fillSeeds()
 
             val decision = withTimeout(2_000) {
                 while (true) {
@@ -66,7 +70,10 @@ class HeadlessHostTest {
             assertEquals("hold", decision.correlation_id)
             assertEquals(BreakpointAction.BREAKPOINT_ACTION_PROCEED, decision.action)
             assertEquals(202, decision.edited_response?.code)
+            assertEquals("{}", decision.edited_response?.body?.utf8())
             assertTrue(host.seedQueue.value.isEmpty())
+            // Spending removes it from the run, never from the library it was armed out of.
+            assertEquals("seed", host.seeds.value.single().id)
         } finally {
             connection.incoming.close()
             serving.join()
@@ -149,20 +156,83 @@ class HeadlessHostTest {
     }
 
     @Test
-    fun seedsMasterDropsTheQueueItDeclinesToFill() = runBlocking {
+    fun fillArmsOnlyTheEnabledSeedsAndTheMasterDropsTheQueueItDeclines() = runBlocking {
         val engine = WailoEngine()
         val host = HeadlessHost.wrap(engine)
         try {
-            host.seedResponseProvider = SeedResponseProvider { HttpResponse(code = 200) }
-            host.fillSeeds(listOf(HostSeed(id = "seed", urlPattern = "https://example.com/*")))
-            assertEquals("seed", host.seedQueue.value.single().id)
+            host.replaceSeeds(
+                listOf(
+                    HostSeed(id = "on", urlPattern = "https://example.com/a"),
+                    HostSeed(id = "off", urlPattern = "https://example.com/b", enabled = false),
+                ),
+                enabled = true,
+            )
+            host.fillSeeds()
+            assertEquals("on", host.seedQueue.value.single().id)
 
             // Unlike Map Local and breakpoints, whose masters only withhold the push, this one is
             // destructive by design: a run it declines is discarded rather than left armed.
-            host.seedsEnabled = false
+            host.setSeedsEnabled(false)
             host.fillSeeds()
             assertTrue(host.seedQueue.value.isEmpty())
+            assertEquals(2, host.seeds.value.size)
         } finally {
+            host.stop()
+        }
+    }
+
+    @Test
+    fun editingTheLibraryReprojectsTheArmedQueue() = runBlocking {
+        val engine = WailoEngine()
+        val host = HeadlessHost.wrap(engine)
+        try {
+            host.replaceSeeds(
+                listOf(
+                    HostSeed(id = "a", urlPattern = "https://example.com/a", statusCode = 200),
+                    HostSeed(id = "b", urlPattern = "https://example.com/b"),
+                ),
+                enabled = true,
+            )
+            host.fillSeeds()
+
+            host.upsertSeed(HostSeed(id = "a", urlPattern = "https://example.com/a", statusCode = 503))
+            assertEquals(503, host.seedQueue.value.first { it.id == "a" }.statusCode)
+
+            assertTrue(host.removeSeed("b"))
+            assertEquals(listOf("a"), host.seedQueue.value.map { it.id })
+        } finally {
+            host.stop()
+        }
+    }
+
+    @Test
+    fun aHoldNoSeedAnsweredIsReportedAsDecidedSoAFrontendKnowsItNeedsAHuman() = runBlocking {
+        val engine = WailoEngine()
+        val host = HeadlessHost.wrap(engine)
+        val connection = FakeConnection()
+        val serving = launch { engine.attach(connection) }
+        try {
+            connection.incoming.send(Envelope(hello = HELLO).encode())
+            connection.incoming.send(
+                Envelope(
+                    breakpoint_hit = BreakpointHit(
+                        correlation_id = "unmatched",
+                        rule_id = "bp",
+                        phase = BreakpointPhase.BREAKPOINT_PHASE_RESPONSE,
+                        request = HttpRequest(method = "GET", url = "https://example.com/ping"),
+                        response = HttpResponse(code = 500),
+                    ),
+                ).encode(),
+            )
+
+            withTimeout(2_000) {
+                while ("unmatched" !in host.triagedHolds.value) delay(10)
+            }
+            // Still held: decided means "nothing answered it", which is exactly when a window should open.
+            assertEquals("unmatched", engine.pausedExchanges.value.single().correlationId)
+        } finally {
+            connection.incoming.close()
+            serving.join()
             host.stop()
         }
     }

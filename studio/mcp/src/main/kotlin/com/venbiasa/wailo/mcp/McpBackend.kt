@@ -7,6 +7,7 @@ import com.venbiasa.wailo.engine.PausedExchange
 import com.venbiasa.wailo.host.HeadlessHost
 import com.venbiasa.wailo.host.HostBreakpointRule
 import com.venbiasa.wailo.host.HostMapLocalRule
+import com.venbiasa.wailo.host.HostSeed
 import com.venbiasa.wailo.protocol.CaptureFilter
 import com.venbiasa.wailo.protocol.HttpRequest
 import com.venbiasa.wailo.protocol.HttpResponse
@@ -38,6 +39,13 @@ internal interface McpBackend {
     val mapLocalRules: List<HostMapLocalRule>
     val breakpointsEnabled: Boolean
     val breakpointRules: List<HostBreakpointRule>
+    val seedsEnabled: Boolean
+
+    /** The authored library, in priority order. */
+    val seeds: List<HostSeed>
+
+    /** What is still armed and unspent, which is what decides how the next hold is answered. */
+    val seedQueue: List<HostSeed>
     val captureFilter: CaptureFilter
 
     fun searchTraffic(
@@ -67,6 +75,13 @@ internal interface McpBackend {
     suspend fun upsertBreakpointRule(rule: HostBreakpointRule)
     suspend fun removeBreakpointRule(id: String): Boolean
     suspend fun setBreakpointsEnabled(enabled: Boolean)
+    suspend fun upsertSeed(seed: HostSeed)
+    suspend fun removeSeed(id: String): Boolean
+    suspend fun setSeedsEnabled(enabled: Boolean)
+
+    /** Arms the enabled library and sweeps the waiting holds; returns how many seeds are left armed. */
+    suspend fun fillSeeds(): Int
+    suspend fun clearSeedQueue()
     suspend fun resumeHold(id: String, request: HttpRequest?, response: HttpResponse?): Boolean
     suspend fun abortHold(id: String): Boolean
 }
@@ -91,6 +106,9 @@ internal class DaemonMcpBackend(
     override val mapLocalRules get() = daemon.mapLocalRules.value
     override val breakpointsEnabled get() = daemon.breakpointsEnabled.value
     override val breakpointRules get() = daemon.breakpointRules.value
+    override val seedsEnabled get() = daemon.seedsEnabled.value
+    override val seeds get() = daemon.seeds.value
+    override val seedQueue get() = daemon.seedQueue.value
     override val captureFilter get() = daemon.captureFilter.value
 
     override fun searchTraffic(
@@ -122,6 +140,11 @@ internal class DaemonMcpBackend(
     override suspend fun upsertBreakpointRule(rule: HostBreakpointRule) = daemon.upsertBreakpointRule(rule)
     override suspend fun removeBreakpointRule(id: String) = daemon.removeBreakpointRule(id)
     override suspend fun setBreakpointsEnabled(enabled: Boolean) = daemon.setBreakpointsEnabled(enabled)
+    override suspend fun upsertSeed(seed: HostSeed) = daemon.upsertSeed(seed)
+    override suspend fun removeSeed(id: String) = daemon.removeSeed(id)
+    override suspend fun setSeedsEnabled(enabled: Boolean) = daemon.setSeedsEnabled(enabled)
+    override suspend fun fillSeeds() = daemon.fillSeeds()
+    override suspend fun clearSeedQueue() = daemon.clearSeedQueue()
     override suspend fun resumeHold(id: String, request: HttpRequest?, response: HttpResponse?) =
         daemon.resumeHold(id, request, response)
     override suspend fun abortHold(id: String) = daemon.abortHold(id)
@@ -147,6 +170,9 @@ internal class LocalMcpBackend(
     override val mapLocalRules get() = host.mapLocalRules.value
     override val breakpointsEnabled get() = host.areBreakpointsEnabled()
     override val breakpointRules get() = host.breakpointRules.value
+    override val seedsEnabled get() = host.areSeedsEnabled()
+    override val seeds get() = host.seeds.value
+    override val seedQueue get() = host.seedQueue.value
     override val captureFilter get() = host.engine.captureFilter.value
 
     override fun searchTraffic(
@@ -178,6 +204,11 @@ internal class LocalMcpBackend(
     override suspend fun upsertBreakpointRule(rule: HostBreakpointRule) = host.upsertBreakpointRule(rule)
     override suspend fun removeBreakpointRule(id: String) = host.removeBreakpointRule(id)
     override suspend fun setBreakpointsEnabled(enabled: Boolean) = host.setBreakpointsEnabled(enabled)
+    override suspend fun upsertSeed(seed: HostSeed) = host.upsertSeed(seed)
+    override suspend fun removeSeed(id: String) = host.removeSeed(id)
+    override suspend fun setSeedsEnabled(enabled: Boolean) = host.setSeedsEnabled(enabled)
+    override suspend fun fillSeeds() = host.fillSeeds()
+    override suspend fun clearSeedQueue() = host.clearSeedQueue()
     override suspend fun resumeHold(id: String, request: HttpRequest?, response: HttpResponse?) =
         host.resumeHold(id, request, response)
     override suspend fun abortHold(id: String) = host.abortHold(id)

@@ -16,7 +16,9 @@ persistent local daemon shared by the Kotlin Multiplatform desktop app, CLI, and
  in `engine`, `host`, or `daemon`, and do not let a frontend bind capture or own cable transports.
  What AI tools may reach and see is daemon state, not Studio state (ADR-0059): the MCP access gate and
  secret redaction must keep working with no UI open, so never move either into `desktopApp` — and never
- redact in `engine`, which exists to show real values.
+ redact in `engine`, which exists to show real values. The same test governs interception: an exchange is
+ held, mapped, or answered by a seed on the daemon, so a frontend never resolves a hold on its own
+ (ADR-0067). Studio may author and display; it may not be the only place a feature works.
 3. The interceptor SDK (`sdk-android`, `sdk-ios`) ships inside third-party apps. Keep it small and
    dependency-light. Never make it depend on `engine`, `host`, `daemon`, `shared`, `desktopApp`, `cli`, or `mcp`. `sdk-ios` is native
    Swift and must not embed a Kotlin/Native runtime (ADR-0010). Anything that needs UI, a camera or a
@@ -63,8 +65,8 @@ as a daemon lives, so a headless MCP or CLI session is still visible (ADR-0065).
 `runtimeOnly` and `DaemonLauncher` spawns it *by class name*, never by import — nothing calls into it, and
 an install without it still works. Keep it AWT-only (no Compose: it is resident whenever the daemon is) and
 never let it hold a presence reference, or the icon would keep alive the daemon it merely reports. Every row
-must be *daemon* state, since there may be no window: Seeds are spent by Studio, so they cannot appear there
-even though they are a tool (ADR-0066). On macOS
+must be *daemon* state, since there may be no window — that rule is what admits or excludes a tool, so a
+feature whose master lives only in Studio does not get a row (ADR-0066). On macOS
 the icon is a **template image** (`apple.awt.enableTemplateImages`): build the glyph's shape and let the
 system colour it. Never pick that colour here — the menu bar turns dark over a dark wallpaper while the OS
 is still in light mode, so a glyph coloured from `AppleInterfaceStyle` is black on black for exactly the
@@ -116,6 +118,8 @@ cd studio && ./gradlew :daemon:test :cli:test :mcp:test # shared service + headl
 cd studio && ./gradlew :cli:installDist
 cd studio && ./cli/build/install/wailo-cli/bin/wailo-cli status # auto-starts the daemon; reports the MCP gate
 cd studio && ./cli/build/install/wailo-cli/bin/wailo-cli set_mcp_access --off # revoke AI tool access (ADR-0059)
+cd studio && ./cli/build/install/wailo-cli/bin/wailo-cli set_seed --id s1 --url-pattern 'https://…/poll' --body-text '{}'
+cd studio && ./cli/build/install/wailo-cli/bin/wailo-cli fill_seeds # arm the library + sweep waiting holds (ADR-0067)
 cd studio && ./cli/build/install/wailo-cli/bin/wailo-cli serve --keep # pin the daemon until Ctrl-C (ADR-0062)
 cd studio && ./cli/build/install/wailo-cli/bin/wailo-cli stop   # explicit daemon shutdown
 cd studio && ./gradlew :mcp:installDist

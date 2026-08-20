@@ -222,10 +222,11 @@ fun WailoApp(
  * edits or proceeds unchanged; Abort fails the app's call). Concurrent holds are shown as a queue the
  * user resolves in any order.
  *
- * [seeds] is the host-owned armed queue of canned responses, which is why it survives this window closing
- * and reopening; [onFillSeeds] arms it from the enabled seed rules, [onClearSeeds] empties it, and
- * [onLoadSeedBody] reads a seed's stored body for its preview. The host spends a seed the moment a
- * matching hold arrives, so a hold answered that way never reaches this window.
+ * [seeds] is the armed queue of canned responses, which the daemon owns — which is why it survives this
+ * window closing and reopening, and why it can change while nothing here did (ADR-0067). [onFillSeeds]
+ * arms it from the enabled seed rules, [onClearSeeds] empties it, and [onLoadSeedBody] reads a seed's
+ * stored body for its preview. A seed is spent the moment a matching hold arrives, so a hold answered
+ * that way never reaches this window.
  *
  * [onBringToFront] raises this window: the host owns the OS window, so the inspector asks for it when a
  * hold arrives while the window is buried behind another.

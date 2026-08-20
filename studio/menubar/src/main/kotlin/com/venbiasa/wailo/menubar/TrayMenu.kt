@@ -19,6 +19,7 @@ internal data class MenuState(
     val capturing: Boolean,
     val mapLocalEnabled: Boolean,
     val breakpointsEnabled: Boolean,
+    val seedsEnabled: Boolean,
     val allowlistEnabled: Boolean,
     val blocklistEnabled: Boolean,
     // A list with no hosts cannot be armed (see CaptureFilterState), so its row is offered as disabled
@@ -35,6 +36,7 @@ internal class MenuActions(
     val setCapturing: (Boolean) -> Unit,
     val setMapLocalEnabled: (Boolean) -> Unit,
     val setBreakpointsEnabled: (Boolean) -> Unit,
+    val setSeedsEnabled: (Boolean) -> Unit,
     val setAllowlistEnabled: (Boolean) -> Unit,
     val setBlocklistEnabled: (Boolean) -> Unit,
     val quit: () -> Unit,
@@ -62,10 +64,11 @@ internal class TrayMenu(
     private val copyHost = MenuItem("Copy only IP")
     // One row per feature master rather than a single switch over all of them: each is the same
     // non-destructive master the panel shows (ADR-0030), and only the daemon's own masters can appear
-    // here — Seeds are spent by Studio, so there is nothing to report with no window open.
+    // here (ADR-0066) — which now includes Seeds, since the daemon spends them (ADR-0067).
     private val enableTools = Menu("Enable Tools")
     private val mapLocal = CheckboxMenuItem("Map Local")
     private val breakpoints = CheckboxMenuItem("Breakpoints")
+    private val seeds = CheckboxMenuItem("Seeds")
     private val allowlist = CheckboxMenuItem("Capture Filter: Allowlist")
     private val blocklist = CheckboxMenuItem("Capture Filter: Blocklist")
     private val quit = MenuItem("Quit")
@@ -87,6 +90,7 @@ internal class TrayMenu(
         addSeparator()
         enableTools.add(mapLocal)
         enableTools.add(breakpoints)
+        enableTools.add(seeds)
         enableTools.add(allowlist)
         enableTools.add(blocklist)
         add(enableTools)
@@ -109,6 +113,7 @@ internal class TrayMenu(
         recordTraffic.addItemListener { actions.setCapturing(recordTraffic.state) }
         mapLocal.addItemListener { actions.setMapLocalEnabled(mapLocal.state) }
         breakpoints.addItemListener { actions.setBreakpointsEnabled(breakpoints.state) }
+        seeds.addItemListener { actions.setSeedsEnabled(seeds.state) }
         allowlist.addItemListener { actions.setAllowlistEnabled(allowlist.state) }
         blocklist.addItemListener { actions.setBlocklistEnabled(blocklist.state) }
         SystemTray.getSystemTray().add(icon)
@@ -123,6 +128,7 @@ internal class TrayMenu(
         recordTraffic.state = next.capturing
         mapLocal.state = next.mapLocalEnabled
         breakpoints.state = next.breakpointsEnabled
+        seeds.state = next.seedsEnabled
         allowlist.state = next.allowlistEnabled
         allowlist.isEnabled = next.allowlistConfigured
         blocklist.state = next.blocklistEnabled

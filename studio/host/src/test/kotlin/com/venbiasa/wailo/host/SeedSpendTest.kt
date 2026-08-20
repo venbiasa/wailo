@@ -8,15 +8,28 @@ import com.venbiasa.wailo.protocol.HttpRequest
 import com.venbiasa.wailo.protocol.HttpResponse
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlinx.coroutines.runBlocking
-import okio.ByteString.Companion.toByteString
 
 class SeedSpendTest {
 
-    private fun seed(id: String, url: String, method: String = "", status: Int = 200) =
-        HostSeed(id = id, urlPattern = url, method = method, statusCode = status)
+    private fun seed(
+        id: String,
+        url: String,
+        method: String = "",
+        status: Int = 200,
+        bodyAvailable: Boolean = true,
+    ) = HostSeed(
+        id = id,
+        urlPattern = url,
+        method = method,
+        statusCode = status,
+        body = """{"ok":true}""".toByteArray(),
+        bodyAvailable = bodyAvailable,
+    )
 
     private fun hold(
         correlationId: String = "c1",
@@ -53,28 +66,27 @@ class SeedSpendTest {
     fun requestPhaseHoldIsNotAnswered() = runBlocking {
         val engine = WailoEngine(port = 0)
         val queue = listOf(seed("a", "https://x/poll"))
-        val result = spendSeedOn(engine, queue, hold(phase = BreakpointPhase.BREAKPOINT_PHASE_REQUEST)) {
-            HttpResponse(code = 200, body = ByteArray(0).toByteString())
-        }
+        val result = spendSeedOn(engine, queue, hold(phase = BreakpointPhase.BREAKPOINT_PHASE_REQUEST))
         assertNull(result)
     }
 
     @Test
     fun missingBodyLeavesQueueAndHoldUntouched() = runBlocking {
-        val engine = WailoEngine(port = 0)
-        val queue = listOf(seed("a", "https://x/poll"))
-        val result = spendSeedOn(engine, queue, hold()) { null }
+        var resumed = false
+        val queue = listOf(seed("a", "https://x/poll", bodyAvailable = false))
+        val result = spendSeedOn(queue, hold()) { _, _ ->
+            resumed = true
+            true
+        }
         assertNull(result)
+        assertFalse(resumed)
     }
 
     @Test
-    fun staleHoldDoesNotSpendSeedAfterProviderServes() = runBlocking {
+    fun staleHoldDoesNotSpendSeed() = runBlocking {
         val engine = WailoEngine(port = 0)
         val queue = listOf(seed("a", "https://x/poll"), seed("b", "https://x/other"))
-        val spent = spendSeedOn(engine, queue, hold()) {
-            HttpResponse(code = 202, body = "{}".toByteArray().toByteString())
-        }
-        assertNull(spent)
+        assertNull(spendSeedOn(engine, queue, hold()))
     }
 
     @Test
@@ -84,12 +96,28 @@ class SeedSpendTest {
     }
 
     @Test
-    fun hostSeedHeadersRoundTrip() {
+    fun servedResponseCarriesAuthoredHeadersAndTheRealContentLength() = runBlocking {
         val seed = HostSeed(
             id = "s",
             urlPattern = "https://x/*",
-            headers = listOf(Header(name = "Content-Type", value_ = "application/json")),
+            statusCode = 201,
+            headers = listOf(
+                Header(name = "Content-Type", value_ = "application/json"),
+                // Authored by hand and now wrong for the bytes actually sent.
+                Header(name = "Content-Length", value_ = "9999"),
+            ),
+            body = """{"ok":true}""".toByteArray(),
         )
-        assertEquals("application/json", seed.headers.single().value_)
+        var served: HttpResponse? = null
+        val spent = spendSeedOn(listOf(seed), hold()) { _, response ->
+            served = response
+            true
+        }
+        assertTrue(spent!!.isEmpty())
+        val response = assertNotNull(served)
+        assertEquals(201, response.code)
+        assertEquals("application/json", response.headers.single { it.name == "Content-Type" }.value_)
+        assertEquals("11", response.headers.single { it.name == "Content-Length" }.value_)
+        assertEquals("""{"ok":true}""", response.body.utf8())
     }
 }

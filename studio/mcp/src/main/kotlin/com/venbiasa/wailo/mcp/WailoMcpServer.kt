@@ -68,8 +68,10 @@ internal object WailoMcpServer {
             .serverInfo("wailo", "0.1.0")
             .instructions(
                 "Wailo captures HTTP(S) traffic from instrumented Android and iOS apps. " +
-                    "Call status first, configure Map Local, Capture Filter, or breakpoint rules as needed, " +
-                    "then inspect or wait for exchanges. Studio, CLI, and MCP share one persistent local daemon. " +
+                    "Call status first, configure Map Local, Capture Filter, breakpoint, or seed rules as " +
+                    "needed, then inspect or wait for exchanges. To script a sequence of answers, set " +
+                    "breakpoints, write seeds, then fill_seeds. " +
+                    "Studio, CLI, and MCP share one persistent local daemon. " +
                     "The user controls this access and can revoke it; when status reports " +
                     "redacting_secrets, credentials in headers, URLs, and bodies read back as " +
                     "\"$REDACTED_VALUE\" and cannot be recovered through these tools.",
@@ -256,6 +258,66 @@ internal object WailoMcpTools {
             "set_breakpoints_enabled",
             "Globally enable or disable all registered breakpoint rules without deleting them.",
             objectSchema("enabled" to boolean("Global breakpoint state"), required = listOf("enabled")),
+        ),
+        McpToolDefinition(
+            "set_seed",
+            "Create or replace a seed: a canned response that answers a response-phase breakpoint hold. " +
+                "Seeds are matched in library order and each one answers a single hold, so two seeds for " +
+                "the same URL answer two successive calls. Writing a seed does not arm it; call fill_seeds.",
+            objectSchema(
+                "id" to string("Stable seed id"),
+                "url_pattern" to string("Full-URL wildcard pattern where * matches any characters"),
+                "method" to string("HTTP method; empty or omitted means any"),
+                "enabled" to boolean("Whether fill_seeds arms this seed"),
+                "status_code" to integer("Canned response status", minimum = 100, maximum = 599),
+                "headers" to headers(),
+                "body_text" to string("UTF-8 response body"),
+                "body_base64" to string("Base64 response body; mutually exclusive with body_text"),
+                required = listOf("id", "url_pattern"),
+            ),
+        ),
+        McpToolDefinition(
+            "remove_seed",
+            "Remove a seed from the library by id, and from the armed queue if it is in it.",
+            objectSchema("id" to string("Seed id"), required = listOf("id")),
+        ),
+        readTool(
+            "list_seeds",
+            "List the seed library and the global enabled state, without body data. armed says whether a " +
+                "seed is still waiting to answer a hold; a seed that has been spent stays in the library " +
+                "with armed false until the next fill_seeds.",
+            objectSchema(),
+        ),
+        readTool(
+            "get_seed",
+            "Get one seed by id with its bounded response body, to check what it would answer with. " +
+                "Text MIME bodies are UTF-8; other bodies are Base64.",
+            objectSchema(
+                "id" to string("Seed id"),
+                "body_bytes" to integer("Maximum bytes returned from the seed body", minimum = 0, maximum = 1_000_000),
+                required = listOf("id"),
+            ),
+        ),
+        McpToolDefinition(
+            "set_seeds_enabled",
+            "Globally enable or disable seed answering without deleting the library.",
+            objectSchema("enabled" to boolean("Global seed state"), required = listOf("enabled")),
+        ),
+        McpToolDefinition(
+            "fill_seeds",
+            "Arm every enabled seed in order and immediately answer the holds already waiting, then keep " +
+                "answering matching holds as they arrive until the queue is spent. Returns how many are " +
+                "left armed. Re-filling replaces a partly spent queue, restarting the sequence.",
+            objectSchema(),
+            destructive = true,
+            idempotent = false,
+        ),
+        McpToolDefinition(
+            "clear_seed_queue",
+            "Disarm every seed without deleting the library, so waiting holds are left for a human or an " +
+                "explicit resume_hold.",
+            objectSchema(),
+            destructive = true,
         ),
         McpToolDefinition(
             "resume_hold",

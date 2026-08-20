@@ -6,6 +6,7 @@ import com.venbiasa.wailo.engine.WailoEngine
 import com.venbiasa.wailo.host.HeadlessHost
 import com.venbiasa.wailo.host.HostBreakpointRule
 import com.venbiasa.wailo.host.HostMapLocalRule
+import com.venbiasa.wailo.host.HostSeed
 import com.venbiasa.wailo.host.urlPatternMatches
 import com.venbiasa.wailo.protocol.BreakpointPhase
 import com.venbiasa.wailo.protocol.Header
@@ -75,6 +76,13 @@ internal class WailoMcpService(
                 "remove_breakpoint" -> removeBreakpoint(arguments)
                 "list_breakpoints" -> listBreakpoints()
                 "set_breakpoints_enabled" -> setBreakpointsEnabled(arguments)
+                "set_seed" -> setSeed(arguments)
+                "remove_seed" -> removeSeed(arguments)
+                "list_seeds" -> listSeeds()
+                "get_seed" -> getSeed(arguments)
+                "set_seeds_enabled" -> setSeedsEnabled(arguments)
+                "fill_seeds" -> fillSeeds()
+                "clear_seed_queue" -> clearSeedQueue()
                 "resume_hold" -> resumeHold(arguments)
                 "abort_hold" -> abortHold(arguments)
                 else -> failure("Unknown Wailo tool: $name")
@@ -102,6 +110,9 @@ internal class WailoMcpService(
             "map_local_rule_count" to backend.mapLocalRules.size,
             "breakpoints_enabled" to backend.breakpointsEnabled,
             "breakpoint_rule_count" to backend.breakpointRules.size,
+            "seeds_enabled" to backend.seedsEnabled,
+            "seed_count" to backend.seeds.size,
+            "armed_seed_count" to backend.seedQueue.size,
             // So a caller reading "<wailo:redacted>" knows the value was withheld rather than that the
             // app really sent that.
             "redacting_secrets" to backend.redactSecrets,
@@ -394,6 +405,92 @@ internal class WailoMcpService(
         val enabled = arguments.requiredBoolean("enabled")
         backend.setBreakpointsEnabled(enabled)
         return success("breakpoints_enabled=$enabled", mapOf("enabled" to enabled))
+    }
+
+    private suspend fun setSeed(arguments: ToolArguments): McpToolResponse {
+        val id = arguments.requiredString("id")
+        val body = arguments.optionalBody()
+        val statusCode = arguments.int("status_code", 200).inRange("status_code", 100..599)
+        backend.upsertSeed(
+            HostSeed(
+                id = id,
+                enabled = arguments.boolean("enabled", true),
+                urlPattern = arguments.requiredString("url_pattern"),
+                method = arguments.string("method").orEmpty(),
+                statusCode = statusCode,
+                headers = arguments.headers(),
+                body = body ?: ByteArray(0),
+            ),
+        )
+        // Writing a seed does not arm it: the library is the script, fill_seeds is where it starts.
+        return success(
+            "Seed $id set",
+            mapOf("id" to id, "body_bytes" to (body?.size ?: 0), "status_code" to statusCode, "armed" to false),
+        )
+    }
+
+    private suspend fun removeSeed(arguments: ToolArguments): McpToolResponse {
+        val id = arguments.requiredString("id")
+        if (!backend.removeSeed(id)) throw ToolFailure("Seed not found: $id")
+        return success("Seed $id removed", mapOf("id" to id, "removed" to true))
+    }
+
+    /** Body-free for the same reason as [mapLocalSummary]; `get_seed` is where the bytes are. */
+    private fun seedSummary(seed: HostSeed, armed: Set<String>): Map<String, Any?> = mapOf(
+        "id" to seed.id,
+        "enabled" to seed.enabled,
+        "url_pattern" to seed.urlPattern,
+        "method" to seed.method,
+        "status_code" to seed.statusCode,
+        "headers" to seed.headers.map(::headerData),
+        "body_bytes" to seed.bodySize,
+        "body_available" to seed.bodyAvailable,
+        // Being in the library is not being in play: a seed answers one hold and is then spent, so this
+        // is the only field that says whether the next matching hold will actually get this response.
+        "armed" to (seed.id in armed),
+    )
+
+    private fun listSeeds(): McpToolResponse {
+        val armed = backend.seedQueue.mapTo(mutableSetOf()) { it.id }
+        val seeds = backend.seeds.map { seedSummary(it, armed) }
+        return success(
+            "${seeds.size} seed(s), ${armed.size} armed",
+            mapOf("enabled" to backend.seedsEnabled, "seeds" to seeds),
+        )
+    }
+
+    private fun getSeed(arguments: ToolArguments): McpToolResponse {
+        val id = arguments.requiredString("id")
+        val bodyLimit = arguments.int("body_bytes", DEFAULT_BODY_LIMIT).inRange("body_bytes", 0..MAX_BODY_LIMIT)
+        val seed = backend.seeds.firstOrNull { it.id == id } ?: throw ToolFailure("Seed not found: $id")
+        val armed = backend.seedQueue.mapTo(mutableSetOf()) { it.id }
+        return success(
+            "Seed $id",
+            mapOf(
+                "seeds_enabled" to backend.seedsEnabled,
+                "seed" to seedSummary(seed, armed) +
+                    mapOf("body" to renderBody(seed.bodyCopy(), seed.headers, bodyLimit)),
+            ),
+        )
+    }
+
+    private suspend fun setSeedsEnabled(arguments: ToolArguments): McpToolResponse {
+        val enabled = arguments.requiredBoolean("enabled")
+        backend.setSeedsEnabled(enabled)
+        return success("seeds_enabled=$enabled", mapOf("enabled" to enabled))
+    }
+
+    private suspend fun fillSeeds(): McpToolResponse {
+        val remaining = backend.fillSeeds()
+        return success(
+            "$remaining seed(s) armed",
+            mapOf("armed" to remaining, "hold_count" to backend.holds.size),
+        )
+    }
+
+    private suspend fun clearSeedQueue(): McpToolResponse {
+        backend.clearSeedQueue()
+        return success("Seed queue cleared", mapOf("armed" to 0))
     }
 
     private suspend fun resumeHold(arguments: ToolArguments): McpToolResponse {

@@ -8,11 +8,11 @@ import kotlin.random.Random
  * the host keeps as an app-managed file keyed by [id] — minus the name: a seed is identified by what it
  * matches, and the window lists it by its `METHOD → pattern`.
  *
- * Unlike Map Local, a seed never reaches a device. It is consumed on the desktop, where a match resolves
- * the hold by sending the response back as the breakpoint's decision. Order is priority *and* sequence:
- * the armed queue is walked top-down, the first match wins, and it is then spent — so two seeds for the
- * same URL answer two successive requests differently. The spend itself lives in `host` (ADR-0055) so
- * CLI/MCP use the same matcher; this type is the UI-facing twin of `HostSeed`.
+ * Unlike Map Local, a seed never reaches a device: a match resolves the hold by sending the response back
+ * as the breakpoint's decision. Order is priority *and* sequence: the armed queue is walked top-down, the
+ * first match wins, and it is then spent — so two seeds for the same URL answer two successive requests
+ * differently. This type is only the panel's copy; the daemon owns the library that actually answers, and
+ * spends it with or without a window open (ADR-0067). `HostSeed` is that copy.
  */
 data class SeedRuleDef(
     override val id: String,
@@ -52,8 +52,8 @@ fun List<SeedRuleDef>.consume(seed: SeedRuleDef): List<SeedRuleDef> = filterNot 
  * Whole-URL wildcard match, case-sensitive: `*` matches any run of characters, everything else is
  * literal. Deliberately the same scheme the devices use (`sdk-android`'s `WailoMatching.kt`, mirrored per
  * store in `sdk-ios`) — a seed is routinely copied from a Map Local rule, and the two would be a trap if
- * the same pattern matched on the device but not here. This is the first time matching runs on the
- * desktop at all: Map Local and breakpoints only ever push patterns and let the device decide.
+ * the same pattern matched on the device but not here. Seeds are why matching runs off-device at all:
+ * Map Local and breakpoints only ever push patterns and let the device decide.
  */
 internal fun seedUrlMatches(pattern: String, url: String): Boolean {
     // An empty pattern can't be saved, but a decoded-from-prefs seed could still carry one; treat it as

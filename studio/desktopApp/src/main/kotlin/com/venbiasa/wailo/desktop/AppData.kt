@@ -75,8 +75,6 @@ internal fun managedBodyFiles(dir: File, id: String): List<File> =
  * The response headers to serve alongside [bytes] read from [file]: the rule's [authored] headers pass
  * through as-is, except Content-Length (the host owns it, recomputed from the bytes so it can't drift and
  * truncate or hang the response); Content-Type falls back to an extension guess when the rule set none.
- * Shared by Map Local's served bodies and Seed's breakpoint responses — both answer with an authored
- * rule's response, so both owe the client the same corrections.
  */
 internal fun servedHeaders(authored: List<ResponseHeader>, file: File, bytes: ByteArray): List<Header> {
     val named = authored.filter { it.name.isNotBlank() }

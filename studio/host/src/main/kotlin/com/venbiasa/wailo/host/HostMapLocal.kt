@@ -50,7 +50,12 @@ class HostMapLocalRule(
     }
 }
 
-private fun normalizedHeaders(headers: List<Header>, bodySize: Int): List<Header> = buildList {
+/**
+ * Shared with Seed's breakpoint responses: both answer with an authored rule's headers, so both owe the
+ * client the same correction — Content-Length is the host's, recomputed from the bytes it is actually
+ * sending, since an authored one that drifts truncates or hangs the response.
+ */
+internal fun normalizedHeaders(headers: List<Header>, bodySize: Int): List<Header> = buildList {
     headers
         .filter { it.name.isNotBlank() && !it.name.equals("Content-Length", ignoreCase = true) }
         .forEach(::add)

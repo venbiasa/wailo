@@ -3,6 +3,7 @@ package com.venbiasa.wailo.daemon
 import com.venbiasa.wailo.host.HeadlessHost
 import com.venbiasa.wailo.host.HostBreakpointRule
 import com.venbiasa.wailo.host.HostMapLocalRule
+import com.venbiasa.wailo.host.HostSeed
 import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.io.IOException
@@ -82,6 +83,10 @@ internal class DaemonRuntime(
     var breakpointLayout: String = ""
         private set
 
+    @Volatile
+    var seedLayout: String = ""
+        private set
+
     init {
         restoreFixtures()
     }
@@ -109,6 +114,8 @@ internal class DaemonRuntime(
         val mapHash = hash(listOf(mapLocalLayout, mapRules.map { it.toDto() }))
         val breakpointRules = host.breakpointRules.value
         val breakpointHash = hash(listOf(breakpointLayout, breakpointRules.map { it.toDto() }))
+        val seeds = host.seeds.value
+        val seedHash = hash(listOf(seedLayout, seeds.map { it.toDto() }))
         val engine = host.engine
         val identity = engine.pairings.identity.value
         val offer = engine.pairings.offer.value
@@ -138,6 +145,12 @@ internal class DaemonRuntime(
                 .takeUnless { request.breakpointHash == breakpointHash }
                 ?.map { it.toDto() },
             breakpointLayout = this.breakpointLayout.takeUnless { request.breakpointHash == breakpointHash },
+            seedsEnabled = host.areSeedsEnabled(),
+            seedHash = seedHash,
+            seeds = seeds.takeUnless { request.seedHash == seedHash }?.map { it.toDto() },
+            seedLayout = this.seedLayout.takeUnless { request.seedHash == seedHash },
+            armedSeedIds = host.seedQueue.value.map { it.id },
+            triagedHoldIds = host.triagedHolds.value.toList(),
             pairing = PairingDto(
                 supported = pairingSupported,
                 requirePairing = engine.requirePairing.value,
@@ -264,6 +277,28 @@ internal class DaemonRuntime(
         persistBreakpoints()
     }
 
+    suspend fun replaceSeeds(seeds: List<HostSeed>, enabled: Boolean, layout: String?) {
+        host.replaceSeeds(seeds, enabled)
+        seedLayout = layout.orEmpty()
+        persistSeeds()
+    }
+
+    suspend fun upsertSeed(seed: HostSeed) {
+        host.upsertSeed(seed)
+        persistSeeds()
+    }
+
+    suspend fun removeSeed(id: String): Boolean {
+        val removed = host.removeSeed(id)
+        if (removed) persistSeeds()
+        return removed
+    }
+
+    suspend fun setSeedsEnabled(enabled: Boolean) {
+        host.setSeedsEnabled(enabled)
+        persistSeeds()
+    }
+
     fun updateCaptureFilter(
         allowlistEnabled: Boolean,
         allowPatterns: List<String>,
@@ -297,6 +332,10 @@ internal class DaemonRuntime(
                 breakpointLayout = breakpoints.layout
                 host.replaceBreakpointRules(breakpoints.rules.map { it.toDomain() }, breakpoints.enabled)
             }
+            fixtures.loadSeedsIfPresent()?.let { seeds ->
+                seedLayout = seeds.layout
+                host.replaceSeeds(seeds.rules.map { it.toDomain() }, seeds.enabled)
+            }
             fixtures.loadCaptureFilterIfPresent()?.let { filter ->
                 host.updateCaptureFilter(
                     filter.allowlistEnabled,
@@ -324,6 +363,16 @@ internal class DaemonRuntime(
                 enabled = host.areBreakpointsEnabled(),
                 layout = breakpointLayout,
                 rules = host.breakpointRules.value.map { it.toDto() },
+            ),
+        )
+    }
+
+    private fun persistSeeds() {
+        fixtures.saveSeeds(
+            PersistedSeeds(
+                enabled = host.areSeedsEnabled(),
+                layout = seedLayout,
+                rules = host.seeds.value.map { it.toDto() },
             ),
         )
     }
@@ -578,6 +627,29 @@ internal class DaemonServer(
             )
             "set_breakpoints_enabled" -> {
                 runtime.setBreakpointsEnabled(request.decode(BooleanValue.serializer()).value)
+                success()
+            }
+            "replace_seeds" -> {
+                val value = request.decode(ReplaceSeedsRequest.serializer())
+                runtime.replaceSeeds(value.rules.map(SeedRuleDto::toDomain), value.enabled, value.layout)
+                success()
+            }
+            "upsert_seed" -> {
+                runtime.upsertSeed(request.decode(SeedRuleDto.serializer()).toDomain())
+                success()
+            }
+            "remove_seed" -> success(
+                DaemonJson.encodeToJsonElement(
+                    BooleanValue(runtime.removeSeed(request.decode(IdRequest.serializer()).id)),
+                ),
+            )
+            "set_seeds_enabled" -> {
+                runtime.setSeedsEnabled(request.decode(BooleanValue.serializer()).value)
+                success()
+            }
+            "fill_seeds" -> success(DaemonJson.encodeToJsonElement(IntValue(runtime.host.fillSeeds())))
+            "clear_seed_queue" -> {
+                runtime.host.clearSeedQueue()
                 success()
             }
             "resume_hold" -> {

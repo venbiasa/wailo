@@ -79,6 +79,29 @@ class ParseArgsTest {
         assertNull(parseArgs(arrayOf("list_exchanges", "--limit", "0")))
     }
 
+    // A seed is authored exactly like a Map Local rule, so it reuses the same flags rather than growing
+    // a parallel set that would drift.
+    @Test
+    fun aSeedIsAuthoredFromTheSameFlagsAsAMapLocalRule() {
+        val parsed = parseArgs(
+            arrayOf(
+                "set_seed",
+                "--id", "poll-1",
+                "--url-pattern", "https://example.com/poll",
+                "--method", "GET",
+                "--status", "202",
+                "--header", "Content-Type: application/json",
+                "--body-text", """{"state":"pending"}""",
+            ),
+        )!!
+        assertEquals("poll-1", parsed.id)
+        assertEquals("https://example.com/poll", parsed.urlPattern)
+        assertEquals("GET", parsed.method)
+        assertEquals(202, parsed.statusCode)
+        assertEquals(listOf("Content-Type: application/json"), parsed.headers)
+        assertEquals("""{"state":"pending"}""", parsed.bodyText)
+    }
+
     @Test
     fun commandEnumCoversTier1Surface() {
         val verbs = Command.entries.map { it.verb }.toSet()
@@ -97,6 +120,9 @@ class ParseArgsTest {
                 "wait_exchange",
                 "set_mcp_access",
                 "set_mcp_redaction",
+                "set_seed",
+                "list_seeds",
+                "fill_seeds",
             ),
         ))
     }

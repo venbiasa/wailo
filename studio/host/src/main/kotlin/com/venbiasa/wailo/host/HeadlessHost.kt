@@ -27,12 +27,12 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
 /**
- * UI-free orchestration over [WailoEngine] for CLI / MCP / Appium frontends (ADR-0055). Owns Seed
- * auto-spend, query helpers, and the rule-push surface so those frontends do not reimplement what
- * `desktopApp` already does for the Compose viewer.
+ * UI-free orchestration over [WailoEngine] for CLI / MCP / Appium frontends (ADR-0055). Owns the Map
+ * Local, breakpoint, and Seed registries with their feature masters, Seed auto-spend, and query helpers,
+ * so no frontend reimplements them.
  *
- * The desktop app may keep talking to [engine] directly for Compose state; it shares Seed spend via
- * [spendSeedOn]. Headless frontends should use this type as their only entry point.
+ * Every frontend reaches this through the daemon that owns it (ADR-0058), Studio included: a seed is
+ * spent here, once, whether or not a window is open (ADR-0067).
  */
 class HeadlessHost private constructor(
     val engine: WailoEngine,
@@ -41,28 +41,30 @@ class HeadlessHost private constructor(
     val queries = TrafficQueries(engine)
 
     private val seedMutex = Mutex()
+
+    /** The authored seed library, in priority order. Fill arms the enabled ones out of it. */
+    private val _seeds = MutableStateFlow<List<HostSeed>>(emptyList())
+    val seeds: StateFlow<List<HostSeed>> = _seeds.asStateFlow()
+
+    /**
+     * What Fill armed, minus whatever has been spent. Session state even here: a half-spent queue is a
+     * position in a run, not a preference, so it dies with the process rather than being restored into a
+     * script whose first half never happened (ADR-0041).
+     */
     private val _seedQueue = MutableStateFlow<List<HostSeed>>(emptyList())
     val seedQueue: StateFlow<List<HostSeed>> = _seedQueue.asStateFlow()
 
     @Volatile
-    private var seedsEnabledValue = true
+    private var seedsEnabled = true
 
-    var seedsEnabled: Boolean
-        get() = seedsEnabledValue
-        set(value) {
-            seedsEnabledValue = value
-            if (value) scope.launch { triage(engine.pausedExchanges.value) }
-        }
-
-    @Volatile
-    private var seedResponseProviderValue: SeedResponseProvider? = null
-
-    var seedResponseProvider: SeedResponseProvider?
-        get() = seedResponseProviderValue
-        set(value) {
-            seedResponseProviderValue = value
-            if (value != null) scope.launch { triage(engine.pausedExchanges.value) }
-        }
+    /**
+     * Holds this host has already decided about — matched and answered, or left alone. It is the only
+     * way a frontend can tell "no seed wanted this hold" from "the spend has not run yet", and Studio
+     * needs that difference: opening a window on first sight would flash one open for every hold a seed
+     * is about to answer (ADR-0067).
+     */
+    private val _triagedHolds = MutableStateFlow<Set<String>>(emptySet())
+    val triagedHolds: StateFlow<Set<String>> = _triagedHolds.asStateFlow()
 
     private val mapLocalMutex = Mutex()
     private val _mapLocalRules = MutableStateFlow<List<HostMapLocalRule>>(emptyList())
@@ -103,8 +105,8 @@ class HeadlessHost private constructor(
             }
         }
 
-        // Same arrival-only triage the desktop runs (ADR-0044): a response-phase hold a queued seed
-        // matches is answered here; everything else is left for the caller to resume/abort.
+        // Arrival-only triage (ADR-0044): a response-phase hold a queued seed matches is answered here;
+        // everything else is left for a frontend to resume/abort, or for an explicit Fill to sweep.
         scope.launch {
             engine.pausedExchanges.collect(::triage)
         }
@@ -246,30 +248,80 @@ class HeadlessHost private constructor(
 
     fun abortHold(correlationId: String) = engine.abortBreakpoint(correlationId)
 
-    /** Replace the armed Seed queue (Fill). Does not spend against waiting holds — see [fillSeeds]. */
-    fun armSeeds(seeds: List<HostSeed>) {
-        _seedQueue.value = seeds
+    suspend fun upsertSeed(seed: HostSeed) {
+        require(seed.id.isNotBlank()) { "Seed id must not be blank" }
+        require(seed.urlPattern.isNotBlank()) { "Seed URL pattern must not be blank" }
+        require(seed.statusCode in 100..599) { "Seed status must be between 100 and 599" }
+        seedMutex.withLock {
+            val current = _seeds.value
+            val index = current.indexOfFirst { it.id == seed.id }
+            _seeds.value = if (index == -1) {
+                current + seed
+            } else {
+                current.toMutableList().also { it[index] = seed }
+            }
+            reconcileSeedQueue()
+        }
     }
 
-    /**
-     * Arm [seeds] (or the current queue when null) and spend against every hold already waiting —
-     * the headless form of the desktop Fill button (ADR-0044).
-     */
-    suspend fun fillSeeds(seeds: List<HostSeed>? = null) {
-        val provider = seedResponseProvider ?: return
-        seedMutex.withLock {
-            if (seeds != null) _seedQueue.value = seeds
-            if (!seedsEnabled) {
-                _seedQueue.value = emptyList()
-                return
-            }
-            var queue = _seedQueue.value
-            engine.pausedExchanges.value.forEach { hold ->
-                val spent = spendSeedOn(engine, queue, hold, provider) ?: return@forEach
-                queue = spent
-                _seedQueue.value = queue
-            }
+    suspend fun removeSeed(id: String): Boolean = seedMutex.withLock {
+        val current = _seeds.value
+        val next = current.filterNot { it.id == id }
+        if (next.size == current.size) return@withLock false
+        _seeds.value = next
+        reconcileSeedQueue()
+        true
+    }
+
+    suspend fun replaceSeeds(seeds: List<HostSeed>, enabled: Boolean) {
+        require(seeds.map { it.id }.distinct().size == seeds.size) { "Seed ids must be unique" }
+        seeds.forEach {
+            require(it.id.isNotBlank()) { "Seed id must not be blank" }
+            require(it.urlPattern.isNotBlank()) { "Seed URL pattern must not be blank" }
+            require(it.statusCode in 100..599) { "Seed status must be between 100 and 599" }
         }
+        seedMutex.withLock {
+            _seeds.value = seeds.toList()
+            seedsEnabled = enabled
+            reconcileSeedQueue()
+        }
+    }
+
+    suspend fun setSeedsEnabled(enabled: Boolean) {
+        seedMutex.withLock {
+            seedsEnabled = enabled
+            // A hold decided while the master was off never met a seed, so turning it on is its first
+            // chance rather than a retry — forget the decisions and take them again.
+            if (enabled) triaged.clear()
+        }
+        if (enabled) triage(engine.pausedExchanges.value)
+    }
+
+    fun areSeedsEnabled(): Boolean = seedsEnabled
+
+    /**
+     * Arm the enabled library in order and spend against every hold already waiting — the headless form
+     * of the desktop Fill button (ADR-0044). Re-filling replaces the queue, which is how a partly-spent
+     * sequence is reset mid-run. Returns how many seeds are still armed once the sweep is done, so a
+     * scripted caller can tell "nothing matched" from "the queue answered everything".
+     */
+    suspend fun fillSeeds(): Int = seedMutex.withLock {
+        if (!seedsEnabled) {
+            _seedQueue.value = emptyList()
+            return@withLock 0
+        }
+        var queue = _seeds.value.filter { it.enabled }
+        _seedQueue.value = queue
+        engine.pausedExchanges.value.forEach { hold ->
+            val spent = spendSeedOn(engine, queue, hold) ?: return@forEach
+            queue = spent
+            _seedQueue.value = queue
+        }
+        queue.size
+    }
+
+    suspend fun clearSeedQueue() {
+        seedMutex.withLock { _seedQueue.value = emptyList() }
     }
 
     fun findExchangeById(id: String): CapturedExchange? = queries.findExchangeById(id)
@@ -302,24 +354,33 @@ class HeadlessHost private constructor(
     private suspend fun triage(holds: List<PausedExchange>) {
         seedMutex.withLock {
             triaged.retainAll(holds.mapTo(mutableSetOf()) { it.correlationId })
-            val provider = seedResponseProviderValue ?: return
-            if (!seedsEnabledValue) return
-
             holds.forEach { hold ->
-                if (hold.correlationId in triaged) return@forEach
+                // Marked before the attempt, and marked even with the master off: one complete decision
+                // per hold. A no-match, a missing body, or a disabled master leaves it for an explicit
+                // Fill or a human rather than retrying forever.
+                if (!triaged.add(hold.correlationId)) return@forEach
+                if (!seedsEnabled) return@forEach
                 val spent = try {
-                    spendSeedOn(engine, _seedQueue.value, hold, provider)
+                    spendSeedOn(engine, _seedQueue.value, hold)
                 } catch (cancelled: CancellationException) {
                     throw cancelled
                 } catch (_: Exception) {
                     null
                 }
-                // A provider was ready and this hold had one complete attempt. No match / missing body
-                // remains visible for an explicit Fill or manual decision rather than retrying forever.
-                triaged += hold.correlationId
                 if (spent != null) _seedQueue.value = spent
             }
+            _triagedHolds.value = triaged.toSet()
         }
+    }
+
+    /**
+     * Re-project the armed queue onto the library after an edit: order preserved, deleted seeds dropped,
+     * edited ones picked up. Without it the queue would keep answering with a fixture the user has just
+     * changed or removed, and no surface would show why.
+     */
+    private fun reconcileSeedQueue() {
+        val byId = _seeds.value.associateBy { it.id }
+        _seedQueue.value = _seedQueue.value.mapNotNull { byId[it.id] }
     }
 
     private fun pushRegisteredMapLocalRules() {

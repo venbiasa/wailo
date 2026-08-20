@@ -3,6 +3,7 @@ package com.venbiasa.wailo.daemon
 import com.venbiasa.wailo.engine.WailoEngine
 import com.venbiasa.wailo.host.HeadlessHost
 import com.venbiasa.wailo.host.HostMapLocalRule
+import com.venbiasa.wailo.host.HostSeed
 import java.net.ServerSocket
 import java.nio.file.Files
 import java.util.concurrent.CountDownLatch
@@ -218,6 +219,91 @@ class DaemonIntegrationTest {
             }
         } finally {
             directory.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun seedsSurviveADaemonRestartButTheArmedQueueDoesNot() = runBlocking {
+        val directory = Files.createTempDirectory("wailo-daemon-seeds")
+        try {
+            harness(directory, deleteDirectory = false).use { first ->
+                val client = first.client()
+                try {
+                    assertTrue(client.awaitReady())
+                    client.replaceSeeds(
+                        listOf(
+                            HostSeed(
+                                id = "poll-1",
+                                urlPattern = "https://example.com/poll",
+                                body = """{"state":"pending"}""".toByteArray(),
+                            ),
+                        ),
+                        enabled = true,
+                        layout = "R|poll-1|1|aHR0cHM6Ly9leGFtcGxlLmNvbS9wb2xs||200|",
+                    )
+                    assertEquals(1, client.fillSeeds())
+                } finally {
+                    client.close()
+                }
+            }
+            harness(directory, deleteDirectory = false).use { second ->
+                val client = second.client()
+                try {
+                    assertTrue(client.awaitReady())
+                    withTimeout(5_000) {
+                        while (client.seeds.value.none { it.id == "poll-1" }) delay(25)
+                    }
+                    val seed = client.seeds.value.single()
+                    assertEquals("https://example.com/poll", seed.urlPattern)
+                    assertEquals("""{"state":"pending"}""", seed.bodyCopy().decodeToString())
+                    assertEquals("R|poll-1|1|aHR0cHM6Ly9leGFtcGxlLmNvbS9wb2xs||200|", client.seedLayout.value)
+                    // A half-spent queue is a position in a run, not a preference (ADR-0041).
+                    assertTrue(client.seedQueue.value.isEmpty())
+                } finally {
+                    client.close()
+                }
+            }
+        } finally {
+            directory.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun everyFrontendSeesTheSameSeedLibraryAndArmedQueue() = runBlocking {
+        harness().use { harness ->
+            val author = harness.client()
+            val observer = harness.client()
+            try {
+                assertTrue(author.awaitReady())
+                assertTrue(observer.awaitReady())
+                author.upsertSeed(
+                    HostSeed(
+                        id = "shared",
+                        urlPattern = "https://example.com/*",
+                        body = "canned".toByteArray(),
+                    ),
+                )
+                withTimeout(5_000) {
+                    while (observer.seeds.value.none { it.id == "shared" }) delay(25)
+                }
+                assertEquals("canned", observer.seeds.value.single().bodyCopy().decodeToString())
+                // Nothing is armed until an explicit fill, so the observer can tell "authored" from "in play".
+                assertTrue(observer.seedQueue.value.isEmpty())
+
+                assertEquals(1, author.fillSeeds())
+                withTimeout(5_000) {
+                    while (observer.seedQueue.value.none { it.id == "shared" }) delay(25)
+                }
+
+                observer.setSeedsEnabled(false)
+                withTimeout(5_000) {
+                    while (author.seedsEnabled.value) delay(25)
+                }
+                assertFalse(harness.host.areSeedsEnabled())
+            } finally {
+                author.close()
+                observer.close()
+            }
         }
     }
 

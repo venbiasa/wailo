@@ -1,21 +1,21 @@
 package com.venbiasa.wailo.desktop
 
-import com.venbiasa.wailo.protocol.HttpResponse
+import com.venbiasa.wailo.host.HostSeed
 import com.venbiasa.wailo.shared.SeedLayoutCodec
 import com.venbiasa.wailo.shared.SeedNode
 import com.venbiasa.wailo.shared.SeedRuleDef
 import com.venbiasa.wailo.shared.allRules
 import com.venbiasa.wailo.shared.settings.createKeyValueStore
 import java.io.File
-import okio.ByteString.Companion.toByteString
 
 /**
- * Persists the Seed layout (groups + rules + order) across launches, mirroring [MapLocalStore]: the
+ * Studio's authoring copy of the Seed layout (groups + rules + order), mirroring [MapLocalStore]: the
  * definitions ride in prefs as one string via the portable [SeedLayoutCodec], while each seed's authored
  * body is an app-managed file keyed by seed id, so prefs never holds bytes.
  *
- * What is *not* persisted is the armed queue in the breakpoint window — that is session state owned by
- * the host (ADR-0041). This store is the seed library; filling copies from it.
+ * The daemon holds the copy that actually answers holds — flattened, bodies inline — because a seed is
+ * spent with or without a window open (ADR-0067). This store keeps the grouping and the editable files
+ * that projection is built from. The armed queue is in neither: it is session state (ADR-0041).
  */
 object SeedStore {
     private const val KEY = "seedRules"
@@ -43,9 +43,15 @@ object SeedStore {
     }
 
     /** A seed's authored body bytes (empty if none saved yet or unreadable). */
-    fun loadBody(seed: SeedRuleDef): ByteArray {
-        val file = existingBodyFile(seed.id) ?: return ByteArray(0)
-        return runCatching { file.readBytes() }.getOrDefault(ByteArray(0))
+    fun loadBody(seed: SeedRuleDef): ByteArray = loadBodyOrNull(seed) ?: ByteArray(0)
+
+    /**
+     * The same bytes, with "no body on disk" kept distinct from "an empty body". The daemon needs the
+     * difference: a seed whose file has gone missing must decline the hold rather than answer it empty.
+     */
+    fun loadBodyOrNull(seed: SeedRuleDef): ByteArray? {
+        val file = existingBodyFile(seed.id) ?: return null
+        return runCatching { file.readBytes() }.getOrNull()
     }
 
     /**
@@ -64,26 +70,17 @@ object SeedStore {
         runCatching { File(seedBodiesDir(), "$id.${extensionForContentType(contentType)}").writeBytes(bytes) }
     }
 
-    fun deleteBody(id: String) {
-        runCatching { managedBodyFiles(seedBodiesDir(), id).forEach { it.delete() } }
+    /** Lands a seed authored on another frontend, whose bytes arrive inline from the daemon. */
+    fun importHostBody(seed: HostSeed) {
+        if (!seed.bodyAvailable) return
+        val contentType = seed.headers
+            .firstOrNull { it.name.equals("Content-Type", ignoreCase = true) }
+            ?.value_
+        importBody(seed.id, contentType, seed.bodyCopy())
     }
 
-    /**
-     * The response a matched seed answers a held exchange with, read fresh from disk at resolve time —
-     * the same "device holds no bodies, the desktop reads at use time" split Map Local uses (ADR-0019).
-     * Null when the body file is gone, which leaves the hold for the user rather than resolving it with
-     * an empty body: a seed that can't answer shouldn't silently swallow the request.
-     */
-    fun seedResponse(seed: SeedRuleDef): HttpResponse? {
-        val file = existingBodyFile(seed.id) ?: return null
-        val bytes = runCatching { file.readBytes() }.getOrNull() ?: return null
-        return HttpResponse(
-            code = seed.statusCode,
-            headers = servedHeaders(seed.headers, file, bytes),
-            body = bytes.toByteString(),
-            body_size = bytes.size.toLong(),
-            body_truncated = false,
-        )
+    fun deleteBody(id: String) {
+        runCatching { managedBodyFiles(seedBodiesDir(), id).forEach { it.delete() } }
     }
 }
 
