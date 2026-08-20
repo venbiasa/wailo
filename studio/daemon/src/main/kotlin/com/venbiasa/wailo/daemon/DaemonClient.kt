@@ -740,7 +740,11 @@ object DaemonLauncher {
     ) {
         ensureDaemon(timeoutMillis, initialCapturePort, initialMaxRetained, startAfterExplicitStop)
         // Outside the daemon check above on purpose: the daemon is often already up and the agent is what
-        // died, and a frontend has no reason to care which of the two it just supplied.
+        // died, and a frontend has no reason to care which of the two it just supplied. An explicit stop is
+        // the one case where it must not try: the daemon is down because the user quit, an agent that
+        // reaches none exits at once, and a polling frontend would spawn that doomed JVM twice a second for
+        // as long as it stays open.
+        if (!startAfterExplicitStop && DaemonStopMarker.isMarked()) return
         ensureMenubar()
     }
 
