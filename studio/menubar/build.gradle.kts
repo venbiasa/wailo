@@ -21,8 +21,9 @@ application {
     applicationName = "wailo-menubar"
 }
 
-// The item's glyph is derived from the app mark at runtime, and the mark stays where it belongs — with the
-// app whose icon it is. Copying it in at build time keeps one asset on disk, so the two cannot drift.
+// Windows and Linux tray areas show the app icon in its own colours, so the item is the mark itself there
+// (macOS draws the two template assets in this module's resources instead). The mark stays where it
+// belongs — with the app whose icon it is — and is copied in rather than duplicated.
 tasks.processResources {
     from(project(":desktopApp").file("src/main/resources/icons/wailo.png")) { into("icons") }
 }

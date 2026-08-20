@@ -9,7 +9,6 @@ import java.awt.SystemTray
 import java.awt.Toolkit
 import java.awt.TrayIcon as AwtTrayIcon
 import java.awt.datatransfer.StringSelection
-import java.awt.image.BufferedImage
 
 /** Everything the item renders, gathered so a poll hands over one value instead of a setter per row. */
 internal data class MenuState(
@@ -29,6 +28,9 @@ internal data class MenuState(
     val studioAttached: Boolean,
 ) {
     val address: String get() = "$lanAddress:$capturePort"
+
+    /** Whether an arriving exchange would be logged: the master is on *and* the capture server is up. */
+    val recording: Boolean get() = listening && capturing
 }
 
 internal class MenuActions(
@@ -51,7 +53,7 @@ internal class MenuActions(
  * projection of [MenuState], so the poll loop never touches an AWT control directly.
  */
 internal class TrayMenu(
-    private val mark: BufferedImage,
+    private val images: TrayImages,
     private val actions: MenuActions,
 ) {
     // These two start disabled: neither means anything until a poll says whether a Studio can be raised
@@ -72,7 +74,7 @@ internal class TrayMenu(
     private val allowlist = CheckboxMenuItem("Capture Filter: Allowlist")
     private val blocklist = CheckboxMenuItem("Capture Filter: Blocklist")
     private val quit = MenuItem("Quit")
-    private val icon = AwtTrayIcon(mark, "Wailo", popup())
+    private val icon = AwtTrayIcon(images.idle, "Wailo", popup())
 
     // Null until the first poll lands, which is also what makes the address rows unclickable until there
     // is an address to copy.
@@ -100,7 +102,6 @@ internal class TrayMenu(
 
     fun install() {
         icon.isImageAutoSize = true
-        icon.image = TrayIcon.render(mark)
         showStudio.addActionListener { actions.showStudio() }
         // Windows and Linux raise the app on a double-click of the icon itself; on macOS a click opens the
         // menu, so this never fires there.
@@ -123,8 +124,18 @@ internal class TrayMenu(
         // The poll is unconditional, so most ticks change nothing; rewriting the same labels underneath an
         // open menu is visible on macOS.
         if (next == state) return@onEventQueue
+        val previous = state
         state = next
-        icon.toolTip = if (next.listening) "Wailo — listening on ${next.address}" else "Wailo — not listening"
+        // Only on a change: assigning the image redraws the item, and most ticks are not one.
+        if (previous?.recording != next.recording) {
+            icon.image = if (next.recording) images.recording else images.idle
+        }
+        // The two shapes are only legible if the tooltip names them, since a paused daemon is still up.
+        icon.toolTip = when {
+            !next.listening -> "Wailo — not listening"
+            next.recording -> "Wailo — recording on ${next.address}"
+            else -> "Wailo — paused on ${next.address}"
+        }
         recordTraffic.state = next.capturing
         mapLocal.state = next.mapLocalEnabled
         breakpoints.state = next.breakpointsEnabled

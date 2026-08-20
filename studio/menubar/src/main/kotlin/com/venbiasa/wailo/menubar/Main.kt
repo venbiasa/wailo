@@ -5,7 +5,6 @@ import com.venbiasa.wailo.daemon.DaemonLauncher
 import com.venbiasa.wailo.daemon.DaemonSingleInstanceLock
 import com.venbiasa.wailo.daemon.wailoStateDir
 import java.awt.SystemTray
-import java.awt.image.BufferedImage
 import java.nio.file.Files
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.atomic.AtomicBoolean
@@ -44,8 +43,8 @@ fun main() {
             runCatching { Files.writeString(DaemonLauncher.menubarUnsupportedPath(), "unsupported") }
             return
         }
-        val mark = TrayIcon.mark() ?: run {
-            note("the app mark is missing from this install")
+        val images = TrayIcon.load() ?: run {
+            note("the item's icons are missing from this install")
             return
         }
         // autoStart = false is the whole point: an agent that started a daemon would resurrect the one the
@@ -58,7 +57,7 @@ fun main() {
             return
         }
         try {
-            run(client, mark)
+            run(client, images)
         } finally {
             client.close()
         }
@@ -71,7 +70,7 @@ fun main() {
     }
 }
 
-private fun run(client: DaemonClient, mark: BufferedImage) {
+private fun run(client: DaemonClient, images: TrayImages) {
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     val done = CountDownLatch(1)
     val stopping = AtomicBoolean()
@@ -86,7 +85,7 @@ private fun run(client: DaemonClient, mark: BufferedImage) {
     }
 
     menu = TrayMenu(
-        mark = mark,
+        images = images,
         actions = MenuActions(
             showStudio = {
                 scope.launch {
