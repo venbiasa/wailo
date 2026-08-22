@@ -2,33 +2,24 @@ package com.venbiasa.wailo.daemon
 
 import java.io.ByteArrayInputStream
 import java.math.BigInteger
+import java.security.KeyFactory
 import java.security.KeyPair
 import java.security.KeyPairGenerator
 import java.security.KeyStore
+import java.security.MessageDigest
 import java.security.PrivateKey
 import java.security.SecureRandom
 import java.security.cert.CertificateFactory
 import java.security.cert.X509Certificate
 import java.security.spec.ECGenParameterSpec
 import java.security.spec.PKCS8EncodedKeySpec
+import java.time.Instant
 import java.util.Base64
-import java.util.Date
 import java.util.concurrent.ConcurrentHashMap
 import javax.net.ssl.KeyManagerFactory
 import javax.net.ssl.SSLContext
+import javax.security.auth.x500.X500Principal
 import kotlin.time.Duration.Companion.days
-import org.bouncycastle.asn1.x500.X500Name
-import org.bouncycastle.asn1.x509.BasicConstraints
-import org.bouncycastle.asn1.x509.ExtendedKeyUsage
-import org.bouncycastle.asn1.x509.Extension
-import org.bouncycastle.asn1.x509.GeneralName
-import org.bouncycastle.asn1.x509.GeneralNames
-import org.bouncycastle.asn1.x509.KeyPurposeId
-import org.bouncycastle.asn1.x509.KeyUsage
-import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter
-import org.bouncycastle.cert.jcajce.JcaX509ExtensionUtils
-import org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder
-import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder
 
 /** The root as a caller needs to see it: what to show, and what to hand a user to install. */
 internal class CertificateAuthorityInfo(
@@ -117,25 +108,24 @@ internal class WailoCertificateAuthority(private val store: CertificateAuthority
 
     private fun mint(): Root? = runCatching {
         val keys = generateKeys()
-        val name = X500Name("CN=$ROOT_COMMON_NAME, O=Wailo, OU=Wailo Proxy")
+        val name = X500Principal("CN=$ROOT_COMMON_NAME, O=Wailo, OU=Wailo Proxy").encoded
         val now = System.currentTimeMillis()
-        val builder = JcaX509v3CertificateBuilder(
-            name,
-            BigInteger(64, SecureRandom()),
-            Date(now - CLOCK_SKEW_MS),
-            Date(now + ROOT_LIFETIME_MS),
-            name,
-            keys.public,
+        val certificate = X509.certificate(
+            subject = name,
+            issuer = name,
+            publicKey = keys.public,
+            signingKey = keys.private,
+            serial = serial(),
+            notBefore = Instant.ofEpochMilli(now - CLOCK_SKEW_MS),
+            notAfter = Instant.ofEpochMilli(now + ROOT_LIFETIME_MS),
+            extensions = listOf(
+                // Depth 0: this root signs leaves and nothing that can sign further.
+                X509.basicConstraints(ca = true, pathLength = 0),
+                X509.keyUsage(X509.DIGITAL_SIGNATURE, X509.KEY_CERT_SIGN, X509.CRL_SIGN),
+                X509.subjectKeyIdentifier(keys.public),
+            ),
         )
-        val utils = JcaX509ExtensionUtils()
-        builder.addExtension(Extension.basicConstraints, true, BasicConstraints(0))
-        builder.addExtension(
-            Extension.keyUsage,
-            true,
-            KeyUsage(KeyUsage.keyCertSign or KeyUsage.cRLSign or KeyUsage.digitalSignature),
-        )
-        builder.addExtension(Extension.subjectKeyIdentifier, false, utils.createSubjectKeyIdentifier(keys.public))
-        Root(keys.private, builder.signedBy(keys.private))
+        Root(keys.private, certificate)
     }.getOrElse {
         lastError = "${it::class.simpleName}: ${it.message}"
         null
@@ -144,27 +134,23 @@ internal class WailoCertificateAuthority(private val store: CertificateAuthority
     private fun leaf(root: Root, host: String): SSLContext {
         val keys = generateKeys()
         val now = System.currentTimeMillis()
-        val builder = JcaX509v3CertificateBuilder(
+        val certificate = X509.certificate(
+            subject = X500Principal("CN=$host").encoded,
             // From the encoded principal, not its string form: a DN round-tripped through text comes
             // back with different DER, and a chain is matched on those bytes.
-            X500Name.getInstance(root.certificate.subjectX500Principal.encoded),
-            BigInteger(64, SecureRandom()),
-            Date(now - CLOCK_SKEW_MS),
-            Date(now + LEAF_LIFETIME_MS),
-            X500Name("CN=$host"),
-            keys.public,
+            issuer = root.certificate.subjectX500Principal.encoded,
+            publicKey = keys.public,
+            signingKey = root.privateKey,
+            serial = serial(),
+            notBefore = Instant.ofEpochMilli(now - CLOCK_SKEW_MS),
+            notAfter = Instant.ofEpochMilli(now + LEAF_LIFETIME_MS),
+            extensions = listOf(
+                X509.basicConstraints(ca = false),
+                X509.keyUsage(X509.DIGITAL_SIGNATURE, X509.KEY_ENCIPHERMENT),
+                X509.serverAuth(),
+                X509.subjectAltName(host),
+            ),
         )
-        builder.addExtension(Extension.basicConstraints, true, BasicConstraints(false))
-        builder.addExtension(Extension.keyUsage, true, KeyUsage(KeyUsage.digitalSignature or KeyUsage.keyEncipherment))
-        builder.addExtension(
-            Extension.extendedKeyUsage,
-            false,
-            ExtendedKeyUsage(KeyPurposeId.id_kp_serverAuth),
-        )
-        // A modern client ignores the CN entirely, so the SAN is the only thing that makes this leaf
-        // usable — and an IP literal has to be tagged as one rather than as a DNS name.
-        builder.addExtension(Extension.subjectAlternativeName, false, GeneralNames(subjectAltName(host)))
-        val certificate = builder.signedBy(root.privateKey)
 
         val keyStore = KeyStore.getInstance("PKCS12").apply {
             load(null, EPHEMERAL_PASSWORD)
@@ -177,7 +163,7 @@ internal class WailoCertificateAuthority(private val store: CertificateAuthority
     }
 
     private fun restore(stored: StoredCertificateAuthority): Root? = runCatching {
-        val key = java.security.KeyFactory.getInstance("EC")
+        val key = KeyFactory.getInstance("EC")
             .generatePrivate(PKCS8EncodedKeySpec(stored.privateKeyPkcs8))
         val certificate = CertificateFactory.getInstance("X.509")
             .generateCertificate(ByteArrayInputStream(stored.certificateDer)) as X509Certificate
@@ -217,22 +203,11 @@ internal class WailoCertificateAuthority(private val store: CertificateAuthority
             initialize(ECGenParameterSpec("secp256r1"), SecureRandom())
         }.generateKeyPair()
 
-        /**
-         * Matched rather than resolved: `InetAddress` would go to DNS for anything that is not a
-         * literal, which is a network round-trip inside a handshake.
-         */
-        val IP_LITERAL = Regex("""\d{1,3}(\.\d{1,3}){3}""")
-
-        fun subjectAltName(host: String): GeneralName {
-            val literal = host.contains(':') || IP_LITERAL.matches(host)
-            return GeneralName(if (literal) GeneralName.iPAddress else GeneralName.dNSName, host)
-        }
-
-        fun JcaX509v3CertificateBuilder.signedBy(key: PrivateKey): X509Certificate =
-            JcaX509CertificateConverter().getCertificate(build(JcaContentSignerBuilder("SHA256withECDSA").build(key)))
+        /** Random rather than counted: nothing here persists a counter, and a repeat is a broken chain. */
+        fun serial(): BigInteger = BigInteger(64, SecureRandom())
 
         fun fingerprint(certificate: X509Certificate): String =
-            java.security.MessageDigest.getInstance("SHA-256")
+            MessageDigest.getInstance("SHA-256")
                 .digest(certificate.encoded)
                 .joinToString(":") { "%02X".format(it) }
 

@@ -130,7 +130,10 @@ is the SDK regardless of which transport carried it (LAN WebSocket, usbmux, or `
 - **The root is `daemon`'s, and its key never leaves the Keychain** (ADR-0073). `WailoCertificateAuthority`
   mints an EC root lazily — asking for status never creates one — keeps it in the login Keychain (in
   memory only where there is none), and signs short per-host leaves cached for the process. Export is the
-  public certificate alone. `:proxy` sees only a `ProxyTls` seam that answers "decrypt this host, with
+  public certificate alone. The certificates are written by a hand-rolled `X509` encoder rather than a
+  crypto library: the JDK has no public API for authoring one, but it already supplies the two structures
+  that are hard, so the whole surface is an envelope and four extensions — and a mistake in it fails a
+  handshake outright. `:proxy` sees only a `ProxyTls` seam that answers "decrypt this host, with
   this context, or not"; it never learns why. Failing to present a leaf leaves the tunnel opaque rather
   than broken, and the upstream leg keeps the JDK's default validation — decrypting the user's traffic
   must not also stop checking who is on the other end.
