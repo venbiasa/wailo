@@ -108,15 +108,25 @@ internal data class DaemonConfig(
      */
     val proxyDecryptHosts: List<String>,
     /**
-     * Whether the proxy binds beyond loopback (ADR-0074). Persisted, unlike the switch itself, so a
-     * device set up once keeps working — but it only takes effect when something starts the proxy, which
-     * is still never automatic.
+     * Whether the proxy binds beyond loopback. On by default since ADR-0077, which reversed ADR-0074's
+     * loopback default: a proxy exists for the clients that cannot host the SDK, and the ones that
+     * cannot are mostly not on this machine.
+     *
+     * What keeps that honest is the other half of ADR-0074, unchanged — nothing here starts a listener.
+     * The proxy is still off until something explicitly turns it on, so a persisted `true` is a bind
+     * address waiting for a decision, not a relay.
      */
     val proxyLan: Boolean,
 )
 
 /** Long enough that stepping away between CLI commands does not cost the session; 0 disables the exit. */
 internal const val DEFAULT_IDLE_LINGER_MINUTES = 30
+
+/**
+ * A fresh install binds the proxy to every interface (ADR-0077). Named rather than inlined because it is
+ * the one default here that decides who can reach a listener, and it should be greppable as that.
+ */
+internal const val DEFAULT_PROXY_LAN = true
 
 internal const val MAX_IDLE_LINGER_MINUTES = 1_440
 
@@ -161,7 +171,7 @@ internal class DaemonSettings(
                 ?.map { it.trim() }
                 ?.filter { it.isNotEmpty() && it != "*" }
                 .orEmpty(),
-            proxyLan = values.getProperty(PROXY_LAN)?.toBooleanStrictOrNull() ?: false,
+            proxyLan = values.getProperty(PROXY_LAN)?.toBooleanStrictOrNull() ?: DEFAULT_PROXY_LAN,
         )
     }
 

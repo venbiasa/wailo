@@ -143,9 +143,16 @@ internal fun SettingsManager(
                     checked = proxy.running,
                     onCheckedChange = onProxyEnabledChange,
                     error = proxy.error,
-                    help = "Point a browser, a CLI, or an emulator at ${proxy.address} and its traffic " +
-                        "joins the list, ticked in the Proxy column. HTTPS is tunnelled but not read " +
-                        "until you install the certificate below and unlock a host by name.",
+                    help = "Point a browser, a CLI, an emulator, or a phone at ${proxy.address} and its " +
+                        "traffic joins the list, ticked in the Proxy column. HTTPS is tunnelled but not " +
+                        "read until you install the certificate below and unlock a host by name." +
+                        // The reach is part of what this switch does, so it is said where the switch is —
+                        // not left to a row further down that the user may never scroll to (ADR-0077).
+                        if (proxy.lan) {
+                            " While it runs, anything that can reach this machine can use it as a proxy."
+                        } else {
+                            ""
+                        },
                 )
                 RowDivider()
                 NumberField(
@@ -182,10 +189,10 @@ internal fun SettingsManager(
                     label = "Let other devices on this network use it",
                     checked = proxy.lan,
                     onCheckedChange = { onProxySetupAction(ProxySetupAction.SetLan(it)) },
-                    help = "Point a phone's Wi-Fi proxy at ${proxy.address}, then open " +
-                        "http://${proxy.address} on the phone for its certificate and setup steps. While " +
-                        "this is on, anything that can reach this machine can use it as a proxy — so use " +
-                        "it on a network you trust, and turn it off when you are done.",
+                    help = "On, so a phone works: point its Wi-Fi proxy at ${proxy.address}, then open " +
+                        "http://${proxy.address} on the phone for its certificate and setup steps. Turn " +
+                        "it off to keep the proxy to this machine — worth doing on a network you don't " +
+                        "trust, since while the proxy runs anything on that network can use it too.",
                 )
                 RowDivider()
                 CertificateRow(proxy = proxy, onAction = onProxySetupAction)

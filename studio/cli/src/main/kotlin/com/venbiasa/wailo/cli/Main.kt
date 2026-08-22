@@ -330,7 +330,16 @@ internal suspend fun dispatch(host: DaemonClient, args: ParsedArgs): CommandResu
             val status = host.setProxyEnabled(enabled, args.port.takeIf { args.portSpecified })
             CommandResult(
                 if (status.running) {
-                    "proxy=on address=${status.reachableAddress}"
+                    // The bind is reported at the start, not only when it is changed: since ADR-0077 the
+                    // wide one is the default, so this may be the first and only time the user is told.
+                    "proxy=on address=${status.reachableAddress} " +
+                        "bind=${if (status.lan) "lan" else "loopback"}" +
+                        if (status.lan) {
+                            "\nAnything that can reach this machine can use it as a proxy while it runs. " +
+                                "set_proxy_lan --off keeps it to this machine."
+                        } else {
+                            ""
+                        }
                 } else {
                     "proxy=off" + (status.error?.let { " error=$it" } ?: "")
                 },
@@ -739,11 +748,11 @@ private fun printUsage() {
         library; fill_seeds arms every enabled one and sweeps the holds already waiting, and each hold it
         answers spends a seed. list_seeds shows which are still armed.
 
-        set_proxy starts the bundled HTTP proxy so traffic from anything on this machine — a browser, a
-        CLI, a simulator — is captured without the SDK. It listens on loopback, off by default, and
-        while it runs it keeps the daemon alive. set_proxy_lan binds it to every interface so a phone or
-        another machine can use it, which also makes it an open relay for anything on that network — so
-        it is opt-in, and worth turning off when you are done.
+        set_proxy starts the bundled HTTP proxy so traffic from anything that can reach this machine — a
+        browser, a CLI, a simulator, a phone — is captured without the SDK. It is off until you start it,
+        and while it runs it keeps the daemon alive. It binds every interface by default, which is also
+        what makes it an open relay for that network while it runs: set_proxy_lan --off keeps it to this
+        machine, and stopping the proxy ends the exposure either way.
 
         set_system_proxy points this Mac's own network settings at Wailo and forwards through whatever
         proxy was already configured, so a machine behind one keeps working. The settings are snapshotted

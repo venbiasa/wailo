@@ -94,7 +94,7 @@ flowchart LR
 ## The second capture path: the bundled proxy
 
 The SDK cannot reach a third-party app, a shipped binary, a browser, or a CLI. For those, the daemon can
-run an HTTP proxy (`proxy`, off by default, loopback, port 9090 — ADR-0070). It is additive: the SDK stays
+run an HTTP proxy (`proxy`, off by default, port 9090 — ADR-0070). It is additive: the SDK stays
 the zero-setup path, and both produce rows in one timeline distinguished by `CapturedExchange.source`.
 
 The two paths are named **Socket** and **Proxy** in the UI, after how traffic reaches Wailo: an
@@ -158,11 +158,13 @@ is the SDK regardless of which transport carried it (LAN WebSocket, usbmux, or `
   cannot read a file on the desktop, gets the certificate. The page reads the root and never mints one, so
   a device on the network cannot be what creates a signing key here; `:proxy` sees only a `ProxySetup`
   seam that returns a response or nothing.
-- **Loopback unless the user widens it** (ADR-0074). The wider bind is its own switch, separate from
-  starting the proxy, because it makes the listener an open relay for anything that can route here —
-  which the capture socket answers with pairing and a proxy cannot, since the client is by definition
-  something Wailo does not control. The choice persists so a phone set up once keeps working; the proxy
-  still does not start on its own, so a persisted `true` cannot put a relay on a network by itself.
+- **Every interface by default; starting it is the gate** (ADR-0077, reversing ADR-0074's default). The
+  clients this exists for are mostly not on this machine, so loopback made the common case a second
+  discovery. What it costs is real and unmitigable: while it runs the listener is an open relay for
+  anything that can route here, which the capture socket answers with pairing and a proxy cannot, since
+  the client is by definition something Wailo does not control. So the protection is the half that did
+  the work anyway — nothing starts a listener on its own — and the notice sits on the start switch rather
+  than on the bind row nobody visits. Narrowing stays available and persists.
 - **The macOS takeover snapshots first, to disk, and chains upstream** (ADR-0075). `SystemProxyController`
   captures every active service's proxy settings through `networksetup` *before* writing, replays exactly
   that to restore, and writes the snapshot to `WAILO_HOME` so a daemon that was killed rather than closed

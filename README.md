@@ -105,9 +105,13 @@ $CLI stop                              # the daemon otherwise remains running
 
 ## Capturing without the SDK (the proxy)
 
-Some things cannot host the SDK: a browser, a `curl`, a third-party app, an emulator you did not build.
-For those the daemon runs a bundled HTTP proxy — off by default, loopback only, and owned by the daemon
-rather than any window, so a browser pointed at it does not lose its network when Studio closes.
+Some things cannot host the SDK: a browser, a `curl`, a third-party app, an emulator you did not build, a
+phone. For those the daemon runs a bundled HTTP proxy — off until you start it, owned by the daemon rather
+than any window, so a browser pointed at it does not lose its network when Studio closes.
+
+It listens on every interface, so a device on your network can use it as soon as it is running — which
+also means anything else on that network can (ADR-0077). Starting it is the only thing standing in front
+of that, so stop it when you're done, or keep it to this machine with `set_proxy_lan --off`.
 
 On this Mac, Studio's **Settings → Proxy** does the whole setup: switch it on, then "Send this Mac's
 traffic through Wailo" configures the system proxy for you and puts your settings back afterwards
@@ -122,18 +126,17 @@ HTTPS starts locked, and stays locked until you do two separate things (ADR-0071
 2. **Unlock the hosts you want to read**, by name. Everything else stays an opaque tunnel and shows as a
    locked row, so "not decrypted" never looks like traffic Wailo missed.
 
-For a phone, turn on "Let other devices on this network use it", point the device's Wi-Fi proxy at the
-address shown, and then **browse to that same address on the device**: the proxy serves its own setup page
-with the certificate and the install steps for that platform (ADR-0076). While that bind is on, anything
-that can reach this machine can use it as a proxy, so use it on a network you trust and turn it off after.
-An app that pins its certificates will still refuse — that is the app working correctly.
+For a phone, point the device's Wi-Fi proxy at the address shown in Settings, then **browse to that same
+address on the device**: the proxy serves its own setup page with the certificate and the install steps for
+that platform (ADR-0076). No file transfer, no AirDrop. An app that pins its certificates will still refuse
+— that is the app working correctly.
 
 Everything above is also in the CLI:
 
 ```bash
 $CLI set_proxy --on --port 9090
 $CLI set_system_proxy --on            # macOS; restored when the proxy stops
-$CLI set_proxy_lan --on               # reachable by a phone, and an open relay while on
+$CLI set_proxy_lan --off              # keep it to this machine; on (the default) a phone can reach it
 $CLI proxy_ca --out /tmp/wailo.pem    # mint + export the local root
 $CLI set_proxy_decrypt --host api.example.com   # --off relocks everything
 $CLI proxy_status

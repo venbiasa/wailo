@@ -461,6 +461,28 @@ class DaemonIntegrationTest {
     }
 
     @Test
+    fun aFreshInstallBindsTheProxyWideAndAnExplicitNarrowingSurvives() {
+        val directory = Files.createTempDirectory("wailo-proxy-bind")
+        try {
+            val file = directory.resolve("settings.properties")
+            val settings = DaemonSettings(file)
+
+            // ADR-0077 reversed ADR-0074's default: the clients a proxy exists for are mostly not on
+            // this machine. The gate that remains is that nothing here starts a listener.
+            assertTrue(settings.load().proxyLan, "a fresh install must be reachable by a device")
+
+            settings.update { it.copy(proxyLan = false) }
+
+            assertFalse(
+                DaemonSettings(file).load().proxyLan,
+                "narrowing has to outlive the daemon, or it is a choice the user re-makes every session",
+            )
+        } finally {
+            directory.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
     fun theRootIsExportedAsACertificateAndNeverAsAKey() = runBlocking {
         harness().use { harness ->
             val client = harness.client()

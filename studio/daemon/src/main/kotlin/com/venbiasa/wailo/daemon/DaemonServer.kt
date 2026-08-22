@@ -61,6 +61,8 @@ internal class DaemonRuntime(
     mcpRedactSecrets: Boolean = true,
     proxyPort: Int = DEFAULT_PROXY_PORT,
     proxyDecryptHosts: List<String> = emptyList(),
+    // Loopback, deliberately unlike the shipped default (`DEFAULT_PROXY_LAN`): the callers that omit this
+    // are tests, and a test has no business opening a port to the network it happens to be run on.
     proxyLan: Boolean = false,
     certificateAuthority: WailoCertificateAuthority = WailoCertificateAuthority(EphemeralCertificateAuthorityStore()),
     systemProxy: SystemProxyController = SystemProxyController(),
