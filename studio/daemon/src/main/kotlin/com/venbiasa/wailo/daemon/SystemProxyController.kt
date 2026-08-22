@@ -2,6 +2,8 @@ package com.venbiasa.wailo.daemon
 
 import com.venbiasa.wailo.proxy.ProxyUpstream
 import java.io.File
+import java.net.InetSocketAddress
+import java.net.Socket
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.concurrent.TimeUnit
@@ -20,7 +22,19 @@ internal class ProxySetting(val enabled: Boolean, val server: String, val port: 
     val configured: Boolean get() = enabled && server.isNotEmpty() && port > 0
 
     fun upstream(): ProxyUpstream? = if (configured) ProxyUpstream(server, port) else null
+
+    /** Whether this is Wailo's own listener rather than a setting that predates it. */
+    fun ours(ourPort: Int): Boolean = configured && port == ourPort && server in LOOPBACK_NAMES
+
+    /**
+     * The same setting, unless it is Wailo's own — in which case "nothing was configured". A leftover
+     * from a takeover nobody undid is not a setting worth preserving; recording it as one is what made
+     * the takeover permanent (ADR-0078).
+     */
+    fun unlessOurs(ourPort: Int): ProxySetting = if (ours(ourPort)) ProxySetting(false, "", 0) else this
 }
+
+private val LOOPBACK_NAMES = setOf("127.0.0.1", "::1", "localhost")
 
 /**
  * What a caller needs to know about the takeover, whether or not a window is open.
@@ -48,8 +62,21 @@ internal class SystemProxyState(
  * this process does not survive: a `SIGKILL` would otherwise leave a machine pointed at a proxy that no
  * longer exists, with no record of what it used to be. [recover] is how the next daemon undoes that.
  */
+internal fun interface NetworkSetup {
+    /** The command's output, or null when it failed. */
+    fun run(arguments: List<String>): String?
+}
+
 internal class SystemProxyController(
-    private val statePath: Path = wailoStateDir().resolve("system-proxy.json"),
+    private val statePath: Path = wailoMachineStateDir().resolve("system-proxy.json"),
+    /**
+     * Null where there is no `networksetup` to drive, which is also the seam the tests use: this class
+     * reconfigures the machine it runs on, so exercising its decisions for real would be the very
+     * accident it exists to clean up.
+     */
+    private val networksetup: NetworkSetup? = systemNetworkSetup(),
+    /** Whether something answers on a loopback port — how a live takeover is told from an abandoned one. */
+    private val listens: (Int) -> Boolean = ::loopbackAnswers,
 ) {
     @Volatile
     private var snapshot: List<NetworkServiceProxies>? = null
@@ -65,8 +92,10 @@ internal class SystemProxyController(
 
     fun upstreamFor(@Suppress("UNUSED_PARAMETER") host: String): ProxyUpstream? = chained
 
+    private val supported: Boolean get() = networksetup != null
+
     fun state(error: String? = null) = SystemProxyState(
-        supported = isSupported,
+        supported = supported,
         active = active,
         services = snapshot?.map { it.service }.orEmpty(),
         chainedTo = chained,
@@ -81,16 +110,25 @@ internal class SystemProxyController(
      */
     @Synchronized
     fun apply(port: Int): SystemProxyState {
-        if (!isSupported) return state("system proxy automation needs macOS")
+        if (!supported) return state("system proxy automation needs macOS")
         if (active) return state()
         val services = activeServices()
         if (services.isEmpty()) return state("no active network service to configure")
 
-        val taken = services.map { service ->
-            NetworkServiceProxies(service, read(service, WEB), read(service, SECURE))
+        // An outstanding record outranks whatever the machine says now: it was written before the first
+        // change, so it is the last description of the machine that predates Wailo. Re-reading here is
+        // how a takeover across a daemon restart used to record Wailo's own address as "what was there
+        // before", making the change permanent and pointing the relay at itself (ADR-0078).
+        val taken = readRecord() ?: services.map { service ->
+            NetworkServiceProxies(
+                service,
+                read(service, WEB).unlessOurs(port),
+                read(service, SECURE).unlessOurs(port),
+            )
         }
         // Whichever service was already proxied wins; in practice a machine has one such setting, and
-        // guessing between two conflicting ones is worse than taking the first.
+        // guessing between two conflicting ones is worse than taking the first. It cannot be Wailo
+        // itself, which `unlessOurs` has already dropped — a relay chained to its own listener is a loop.
         chained = taken.firstNotNullOfOrNull { it.web.upstream() ?: it.secure.upstream() }
 
         // Written before the first change, so a process that dies mid-apply still leaves the next daemon
@@ -139,11 +177,36 @@ internal class SystemProxyController(
      */
     @Synchronized
     fun recover(): Boolean {
-        val stranded = runCatching {
-            Files.readString(statePath).let { DaemonJson.decodeFromString<List<NetworkServiceProxies>>(it) }
-        }.getOrNull() ?: return false
+        val stranded = readRecord() ?: return false
         putBack(stranded)
         return true
+    }
+
+    /**
+     * Turn off any service still pointed at `127.0.0.1:[port]` when nothing is listening there.
+     *
+     * This is the backstop for a takeover with no record — the daemon that applied it was killed, or
+     * wrote its record somewhere that no longer exists. [restore] cannot help there, because it can only
+     * replay a snapshot this process holds, so a machine could be left routing through a listener that
+     * had gone, with nothing anywhere that knew to undo it (ADR-0078).
+     *
+     * The invariant is the one a user actually feels: with Wailo's proxy not running, nothing points at
+     * it. So the test is the machine's current state, not a memory of having changed it. Turning the
+     * proxy off rather than reinstating a previous setting is deliberate — without a record there is
+     * nothing to reinstate, and a direct connection is the state every machine can reach.
+     */
+    @Synchronized
+    fun releaseStranded(port: Int): Boolean {
+        // A live listener means the takeover is working, and may belong to another daemon: leave it be.
+        if (!supported || active || listens(port)) return false
+        val released = activeServices().filter { service ->
+            val web = read(service, WEB).ours(port)
+            val secure = read(service, SECURE).ours(port)
+            if (web) run("-set${WEB}state", service, "off")
+            if (secure) run("-set${SECURE}state", service, "off")
+            web || secure
+        }
+        return released.isNotEmpty()
     }
 
     private fun putBack(taken: List<NetworkServiceProxies>): List<String> {
@@ -156,6 +219,10 @@ internal class SystemProxyController(
         if (failures.isEmpty()) runCatching { Files.deleteIfExists(statePath) }
         return failures
     }
+
+    private fun readRecord(): List<NetworkServiceProxies>? = runCatching {
+        DaemonJson.decodeFromString<List<NetworkServiceProxies>>(Files.readString(statePath))
+    }.getOrNull()?.takeIf { it.isNotEmpty() }
 
     private fun persist(taken: List<NetworkServiceProxies>) {
         runCatching {
@@ -202,26 +269,43 @@ internal class SystemProxyController(
         return run("-set${kind}state", service, if (setting.enabled) "on" else "off") != null
     }
 
-    private fun run(vararg arguments: String): String? = runCatching {
-        val process = ProcessBuilder(listOf(NETWORKSETUP) + arguments)
-            .redirectErrorStream(true)
-            .start()
-        val output = process.inputStream.bufferedReader().readText()
-        if (!process.waitFor(TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
-            process.destroyForcibly()
-            return null
-        }
-        if (process.exitValue() != 0) null else output
-    }.getOrNull()
+    private fun run(vararg arguments: String): String? = networksetup?.run(arguments.toList())
 
     companion object {
-        private const val NETWORKSETUP = "/usr/sbin/networksetup"
-        private const val WEB = "webproxy"
-        private const val SECURE = "securewebproxy"
-        private const val TIMEOUT_SECONDS = 15L
+        internal const val WEB = "webproxy"
+        internal const val SECURE = "securewebproxy"
 
-        val isSupported: Boolean
-            get() = System.getProperty("os.name").orEmpty().contains("Mac", ignoreCase = true) &&
-                File(NETWORKSETUP).canExecute()
+        val isSupported: Boolean get() = systemNetworkSetup() != null
     }
 }
+
+private const val NETWORKSETUP = "/usr/sbin/networksetup"
+private const val TIMEOUT_SECONDS = 15L
+
+/** Only ever dialled on loopback, where a listener answers immediately or does not exist. */
+private const val PROBE_TIMEOUT_MS = 250
+
+private fun systemNetworkSetup(): NetworkSetup? {
+    val onAMac = System.getProperty("os.name").orEmpty().contains("Mac", ignoreCase = true)
+    if (!onAMac || !File(NETWORKSETUP).canExecute()) return null
+    return NetworkSetup { arguments ->
+        runCatching {
+            val process = ProcessBuilder(listOf(NETWORKSETUP) + arguments)
+                .redirectErrorStream(true)
+                .start()
+            val output = process.inputStream.bufferedReader().readText()
+            if (!process.waitFor(TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
+                process.destroyForcibly()
+                return@NetworkSetup null
+            }
+            if (process.exitValue() != 0) null else output
+        }.getOrNull()
+    }
+}
+
+private fun loopbackAnswers(port: Int): Boolean = runCatching {
+    Socket().use {
+        it.connect(InetSocketAddress("127.0.0.1", port), PROBE_TIMEOUT_MS)
+        true
+    }
+}.getOrDefault(false)

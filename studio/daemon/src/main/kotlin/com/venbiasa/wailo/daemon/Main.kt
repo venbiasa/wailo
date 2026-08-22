@@ -16,14 +16,18 @@ fun main() {
         System.err.println("wailo-daemon: another daemon already owns this user's Wailo state")
         exitProcess(0)
     }
+    val settings = DaemonSettings()
+    val config = settings.load()
     // Before anything binds or dials: if the last daemon was killed while it owned the system proxy,
     // this machine is currently pointed at a listener that no longer exists (ADR-0075).
     val systemProxy = SystemProxyController()
     if (systemProxy.recover()) {
         System.err.println("wailo-daemon: restored the system proxy settings a previous run left behind")
+    } else if (systemProxy.releaseStranded(config.proxyPort)) {
+        // No record, but the machine points at a Wailo proxy that is not there — a takeover whose daemon
+        // died with the only note of it. Nothing else will ever undo this one, so start-up does (ADR-0078).
+        System.err.println("wailo-daemon: turned off a system proxy left pointing at a proxy that is gone")
     }
-    val settings = DaemonSettings()
-    val config = settings.load()
     val keyStore = if (KeychainPairingKeyStore.isSupported) {
         // A second, isolated daemon may need a genuinely independent Studio identity, not just its own
         // ports and preferences. Production keeps the stable default service; smoke/E2E runs can opt in.

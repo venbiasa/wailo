@@ -172,6 +172,13 @@ is the SDK regardless of which transport carried it (LAN WebSocket, usbmux, or `
   behind a proxy is forwarded through it via `ProxyChain`, because for that machine the setting Wailo
   would overwrite is its only route out. Unlike the port and the allowlist, the takeover is session
   state — the disk record exists to undo one, never to reinstate one.
+- **The takeover record belongs to the machine, and stopping sweeps for it** (ADR-0078). The record sits
+  at `~/.wailo/system-proxy.json` whatever `WAILO_HOME` says, because `networksetup` changes one Mac and
+  a scratch run must not carry off the only note of how to undo it. Snapshotting drops any service
+  already pointing at Wailo, so a takeover applied over an unrecorded one cannot record Wailo as the
+  thing to restore, and cannot chain the relay to itself. Because a record can still be missing
+  entirely, stopping the proxy also sweeps the machine — any service pointing at that port with nothing
+  listening is switched off — which is what makes "proxy off" and "the network works" the same state.
 
 ## Multi-session model
 

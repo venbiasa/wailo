@@ -228,9 +228,14 @@ internal class ProxyController(
     fun stop() {
         // Before the listener, and even when there is none: a machine still pointed at a proxy that is
         // no longer there has no network, which is the one failure worse than losing a capture.
+        val port = _status.value.port
         system.restore()
         stopListener()
-        _status.value = describe(running = false, port = _status.value.port).copy(connections = 0)
+        // Then again from the machine's side, now that the listener is actually gone. A takeover applied
+        // by an earlier daemon is invisible to the restore above — that replays a snapshot this process
+        // holds — so without this, stopping the proxy is what takes the network down (ADR-0078).
+        system.releaseStranded(port)
+        _status.value = describe(running = false, port = port).copy(connections = 0)
     }
 
     /**

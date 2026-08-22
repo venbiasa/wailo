@@ -25,6 +25,17 @@ fun wailoStateDir(): Path =
     System.getenv("WAILO_HOME")?.takeIf { it.isNotBlank() }?.let { Path.of(it) }
         ?: Path.of(System.getProperty("user.home"), ".wailo")
 
+/**
+ * Where notes about *the machine* live, as opposed to this daemon's own capture state — deliberately not
+ * `WAILO_HOME` (ADR-0078).
+ *
+ * `networksetup` changes one Mac, so the note saying how to put that Mac back has to be findable by
+ * whichever daemon runs next, not by the one that happened to make the change. Scoping it to `WAILO_HOME`
+ * meant a scratch run could take the machine over and then delete its only undo record along with its
+ * temp directory.
+ */
+fun wailoMachineStateDir(): Path = Path.of(System.getProperty("user.home"), ".wailo")
+
 enum class UsbConnectionStatus {
     ATTACHED,
     CONNECTING,
