@@ -102,6 +102,26 @@ class ProxyToolParityTest {
     }
 
     @Test
+    fun wideningTheBindRebindsARunningListenerAndKeepsLoopbackWorking() {
+        val origin = origin { out -> out.respond("reachable") }
+        startProxy()
+        val loopbackPort = proxy.status.value.port
+
+        val widened = proxy.setLan(true)
+
+        // A socket's bind address is fixed at bind, so widening has to rebind or it is a switch that
+        // quietly does nothing until the next start (ADR-0074) — and the rebind must land on the same
+        // port, or every client already pointed at it breaks.
+        assertTrue(widened.lan && widened.running)
+        assertEquals(loopbackPort, widened.port)
+        assertTrue(get("http://127.0.0.1:${origin.port}/still-here").endsWith("reachable"))
+
+        val narrowed = proxy.setLan(false)
+        assertTrue(!narrowed.lan && narrowed.running)
+        assertEquals("127.0.0.1:$loopbackPort", narrowed.reachableAddress)
+    }
+
+    @Test
     fun aBlockedHostIsStillRelayedButNotRecorded() {
         val origin = origin { out -> out.respond("served anyway") }
         host.updateCaptureFilter(false, emptyList(), true, listOf("127.0.0.1"))

@@ -142,6 +142,7 @@ cd studio && ./cli/build/install/wailo-cli/bin/wailo-cli status # auto-starts th
 cd studio && ./cli/build/install/wailo-cli/bin/wailo-cli set_proxy --on # bundled proxy for SDK-less clients (ADR-0070)
 cd studio && ./cli/build/install/wailo-cli/bin/wailo-cli proxy_ca --out /tmp/wailo-root.pem # mint + export the local root (ADR-0073)
 cd studio && ./cli/build/install/wailo-cli/bin/wailo-cli set_proxy_decrypt --host api.example.com # unlock one host; --off relocks all
+cd studio && ./cli/build/install/wailo-cli/bin/wailo-cli set_proxy_lan --on # reachable by a phone, and an open relay while on (ADR-0074)
 cd studio && ./cli/build/install/wailo-cli/bin/wailo-cli set_mcp_access --off # revoke AI tool access (ADR-0059)
 cd studio && ./cli/build/install/wailo-cli/bin/wailo-cli set_seed --id s1 --url-pattern 'https://…/poll' --body-text '{}'
 cd studio && ./cli/build/install/wailo-cli/bin/wailo-cli fill_seeds # arm the library + sweep waiting holds (ADR-0067)

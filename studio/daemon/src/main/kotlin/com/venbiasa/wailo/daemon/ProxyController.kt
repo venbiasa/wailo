@@ -26,13 +26,25 @@ data class ProxyStatus(
     val exchanges: Long = 0,
     /** Why the last start attempt failed, most often a port something else already holds. */
     val error: String? = null,
+    /**
+     * Whether the listener is bound beyond loopback (ADR-0074). Reported rather than inferred from
+     * [lanAddress], because "a device could reach this" is the thing a surface has to be able to warn
+     * about, and it stays true even where the address cannot be resolved.
+     */
+    val lan: Boolean = false,
+    /** This machine on the local network, so a phone can be told where to point. Empty when unknown. */
+    val lanAddress: String = "",
     /** Whether a local root exists at all — the first of the two things decryption needs (ADR-0071). */
     val caInstalled: Boolean = false,
     val caFingerprint: String = "",
     val caExpiresEpochMs: Long = 0,
     /** Host patterns the user unlocked. Everything else stays an opaque tunnel. */
     val decryptHosts: List<String> = emptyList(),
-)
+) {
+    /** What to actually point a client at — the LAN address only once it is one a client could use. */
+    val reachableAddress: String
+        get() = "${if (lan && lanAddress.isNotEmpty()) lanAddress else "127.0.0.1"}:$port"
+}
 
 /**
  * The local root as a frontend may hold it (ADR-0073): what to show, and the PEM to hand a trust store.
@@ -63,6 +75,7 @@ internal class ProxyController(
     private val host: HeadlessHost,
     initialPort: Int = DEFAULT_PROXY_PORT,
     initialDecryptHosts: List<String> = emptyList(),
+    initialLan: Boolean = false,
     /**
      * Defaulted to a session-scoped root rather than the Keychain-backed one: reaching the login
      * Keychain is the daemon entry point's decision to make, so nothing else — a test, a harness — can
@@ -78,6 +91,9 @@ internal class ProxyController(
     @Volatile
     private var decryptHosts: List<String> = initialDecryptHosts
 
+    @Volatile
+    private var lan: Boolean = initialLan
+
     /**
      * Two independent gates, deliberately: a root that exists does not decrypt anything, and a host on
      * the list is not decrypted without one (ADR-0071). Generating the root here rather than at start-up
@@ -90,7 +106,9 @@ internal class ProxyController(
         override fun upstream(): SSLContext = this@ProxyController.upstream ?: SSLContext.getDefault()
     }
 
-    private val _status = MutableStateFlow(ProxyStatus(port = initialPort, decryptHosts = initialDecryptHosts))
+    private val _status = MutableStateFlow(
+        ProxyStatus(port = initialPort, decryptHosts = initialDecryptHosts, lan = initialLan),
+    )
     val status: StateFlow<ProxyStatus> = _status.asStateFlow()
 
     @Volatile
@@ -103,7 +121,7 @@ internal class ProxyController(
     fun start(port: Int = _status.value.port): Boolean {
         stop()
         return try {
-            val started = ProxyServer.start(port, EngineProxyCaptureSink(engine), rules, tls)
+            val started = ProxyServer.start(port, EngineProxyCaptureSink(engine), rules, tls, lan)
             server = started
             _status.value = describe(running = true, port = started.port)
             true
@@ -154,7 +172,21 @@ internal class ProxyController(
             caFingerprint = root?.sha256.orEmpty(),
             caExpiresEpochMs = root?.notAfterEpochMs ?: 0,
             decryptHosts = decryptHosts,
+            lan = lan,
+            lanAddress = engine.lanAddress.value.takeUnless { it == "localhost" }.orEmpty(),
         )
+    }
+
+    /**
+     * Bind beyond loopback, or come back to it. Always a restart: a listening socket's address is fixed
+     * at bind, so the alternative is a switch that silently does nothing until the next start.
+     */
+    @Synchronized
+    fun setLan(enabled: Boolean): ProxyStatus {
+        if (lan == enabled) return _status.value
+        lan = enabled
+        if (running) start(_status.value.port) else publish()
+        return _status.value
     }
 
     @Synchronized

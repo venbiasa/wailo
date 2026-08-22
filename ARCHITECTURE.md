@@ -148,7 +148,11 @@ is the SDK regardless of which transport carried it (LAN WebSocket, usbmux, or `
   than a call that fails open, and stopping the proxy releases every waiting hold first.
 - A held body is the one exception to streaming: it is read whole (capped at 32 MB) because an editor
   cannot offer half a payload. Past the cap the exchange is relayed unheld rather than failed.
-- Not yet: loopback-only, so a physical device cannot reach it.
+- **Loopback unless the user widens it** (ADR-0074). The wider bind is its own switch, separate from
+  starting the proxy, because it makes the listener an open relay for anything that can route here —
+  which the capture socket answers with pairing and a proxy cannot, since the client is by definition
+  something Wailo does not control. The choice persists so a phone set up once keeps working; the proxy
+  still does not start on its own, so a persisted `true` cannot put a relay on a network by itself.
 
 ## Multi-session model
 

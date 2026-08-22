@@ -73,6 +73,7 @@ fun main() {
         mcpRedactSecrets = config.mcpRedactSecrets,
         proxyPort = config.proxyPort,
         proxyDecryptHosts = config.proxyDecryptHosts,
+        proxyLan = config.proxyLan,
         certificateAuthority = certificateAuthority,
     )
     val stopped = CountDownLatch(1)

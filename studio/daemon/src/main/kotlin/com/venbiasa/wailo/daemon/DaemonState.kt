@@ -107,6 +107,12 @@ internal data class DaemonConfig(
      * session-scoped escape hatch is set through the RPC and dies with the daemon.
      */
     val proxyDecryptHosts: List<String>,
+    /**
+     * Whether the proxy binds beyond loopback (ADR-0074). Persisted, unlike the switch itself, so a
+     * device set up once keeps working — but it only takes effect when something starts the proxy, which
+     * is still never automatic.
+     */
+    val proxyLan: Boolean,
 )
 
 /** Long enough that stepping away between CLI commands does not cost the session; 0 disables the exit. */
@@ -155,6 +161,7 @@ internal class DaemonSettings(
                 ?.map { it.trim() }
                 ?.filter { it.isNotEmpty() && it != "*" }
                 .orEmpty(),
+            proxyLan = values.getProperty(PROXY_LAN)?.toBooleanStrictOrNull() ?: false,
         )
     }
 
@@ -171,6 +178,7 @@ internal class DaemonSettings(
             setProperty(IDLE_LINGER_MINUTES, config.idleLingerMinutes.toString())
             setProperty(PROXY_PORT, config.proxyPort.toString())
             setProperty(PROXY_DECRYPT_HOSTS, config.proxyDecryptHosts.filterNot { it == "*" }.joinToString(","))
+            setProperty(PROXY_LAN, config.proxyLan.toString())
         }
         Files.createDirectories(path.parent)
         setOwnerOnly(path.parent, directory = true)
@@ -216,6 +224,7 @@ internal class DaemonSettings(
         const val IDLE_LINGER_MINUTES = "idleLingerMinutes"
         const val PROXY_PORT = "proxyPort"
         const val PROXY_DECRYPT_HOSTS = "proxyDecryptHosts"
+        const val PROXY_LAN = "proxyLan"
     }
 }
 

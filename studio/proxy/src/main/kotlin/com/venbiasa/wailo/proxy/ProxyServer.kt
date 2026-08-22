@@ -818,16 +818,21 @@ class ProxyServer private constructor(
 
         private const val ABORTED_MESSAGE = "This request was aborted at a Wailo breakpoint."
 
-        /** Loopback only for now: exposing a proxy to the LAN is an explicit, separate decision. */
+        /**
+         * Loopback unless [lan] is set, which is an open relay for anything that can reach this machine
+         * and so is always a separate, explicit decision by the caller (ADR-0074).
+         */
         fun start(
             port: Int,
             sink: ProxyCaptureSink,
             rules: ProxyRules = ProxyRules.None,
             tls: ProxyTls = ProxyTls.Locked,
+            lan: Boolean = false,
         ): ProxyServer {
             val socket = ServerSocket()
             socket.reuseAddress = true
-            socket.bind(InetSocketAddress(InetAddress.getByName("127.0.0.1"), port))
+            val bindTo = if (lan) InetAddress.getByName("0.0.0.0") else InetAddress.getLoopbackAddress()
+            socket.bind(InetSocketAddress(bindTo, port))
             return ProxyServer(socket, sink, rules, tls).also(ProxyServer::start)
         }
     }

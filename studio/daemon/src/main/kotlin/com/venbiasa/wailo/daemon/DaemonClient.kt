@@ -297,6 +297,20 @@ class DaemonClient internal constructor(
         return status
     }
 
+    /**
+     * Bind the proxy beyond loopback so a phone or another machine can use it (ADR-0074). It is an open
+     * relay while on, so a caller is expected to have said so.
+     */
+    suspend fun setProxyLan(enabled: Boolean): ProxyStatus {
+        val status = rpc.call(
+            "set_proxy_lan",
+            DaemonJson.encodeToJsonElement(BooleanValue(enabled)),
+            ProxyStatusDto.serializer(),
+        ).toDomain()
+        _proxy.value = status
+        return status
+    }
+
     /** Replace the hosts whose TLS the proxy terminates. Everything absent from [hosts] relocks. */
     suspend fun setProxyDecryptHosts(hosts: List<String>): ProxyStatus {
         val status = rpc.call(

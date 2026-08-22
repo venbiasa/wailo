@@ -61,6 +61,7 @@ internal class DaemonRuntime(
     mcpRedactSecrets: Boolean = true,
     proxyPort: Int = DEFAULT_PROXY_PORT,
     proxyDecryptHosts: List<String> = emptyList(),
+    proxyLan: Boolean = false,
     certificateAuthority: WailoCertificateAuthority = WailoCertificateAuthority(EphemeralCertificateAuthorityStore()),
     private val fixtures: DaemonFixturesStore = DaemonFixturesStore(),
 ) : AutoCloseable {
@@ -68,7 +69,7 @@ internal class DaemonRuntime(
      * The bundled proxy, off until something explicitly starts it (ADR-0070). Daemon-owned like every
      * other master, so a CLI or menu bar session can start and stop it with no window open.
      */
-    private val proxy = ProxyController(host, proxyPort, proxyDecryptHosts, certificateAuthority)
+    private val proxy = ProxyController(host, proxyPort, proxyDecryptHosts, proxyLan, certificateAuthority)
 
     /** Whether the proxy is holding this daemon up: a client pointed at a dead one loses its network. */
     val proxyRunning: Boolean get() = proxy.running
@@ -218,6 +219,16 @@ internal class DaemonRuntime(
         val applied = proxy.status.value.decryptHosts
         settings.update { it.copy(proxyDecryptHosts = applied.filterNot { host -> host == "*" }) }
         return proxy.status.value
+    }
+
+    /**
+     * Bind the proxy beyond loopback, or bring it back (ADR-0074). Persisted so a device configured once
+     * keeps working, and applied immediately by restarting a running listener on the wider address.
+     */
+    fun setProxyLan(enabled: Boolean): ProxyStatus {
+        val status = proxy.setLan(enabled)
+        settings.update { it.copy(proxyLan = enabled) }
+        return status
     }
 
     /** Mint the local root if there is not one yet — the one call that may create a signing key. */
@@ -652,6 +663,11 @@ internal class DaemonServer(
             "set_proxy_decrypt" -> success(
                 DaemonJson.encodeToJsonElement(
                     runtime.setProxyDecryptHosts(request.decode(SetProxyDecryptRequest.serializer()).hosts).toDto(),
+                ),
+            )
+            "set_proxy_lan" -> success(
+                DaemonJson.encodeToJsonElement(
+                    runtime.setProxyLan(request.decode(BooleanValue.serializer()).value).toDto(),
                 ),
             )
             "proxy_certificate" -> success(DaemonJson.encodeToJsonElement(runtime.proxyCertificate()))

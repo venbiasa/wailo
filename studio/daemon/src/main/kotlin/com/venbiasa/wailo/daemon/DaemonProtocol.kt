@@ -160,6 +160,8 @@ internal data class ProxyStatusDto(
     val caFingerprint: String = "",
     val caExpiresEpochMs: Long = 0,
     val decryptHosts: List<String> = emptyList(),
+    val lan: Boolean = false,
+    val lanAddress: String = "",
 ) {
     fun toDomain() = ProxyStatus(
         running = running,
@@ -171,6 +173,8 @@ internal data class ProxyStatusDto(
         caFingerprint = caFingerprint,
         caExpiresEpochMs = caExpiresEpochMs,
         decryptHosts = decryptHosts,
+        lan = lan,
+        lanAddress = lanAddress,
     )
 }
 
@@ -474,6 +478,8 @@ internal fun ProxyStatus.toDto() = ProxyStatusDto(
     caFingerprint = caFingerprint,
     caExpiresEpochMs = caExpiresEpochMs,
     decryptHosts = decryptHosts,
+    lan = lan,
+    lanAddress = lanAddress,
 )
 
 internal fun CertificateAuthorityInfo?.toDto(error: String? = null) = ProxyCertificateDto(

@@ -340,11 +340,25 @@ internal suspend fun dispatch(host: DaemonClient, args: ParsedArgs): CommandResu
         }
         "proxy_status", "proxy-status" -> host.proxy.value.let { status ->
             CommandResult(
-                "proxy=${if (status.running) "on" else "off"} port=${status.port} " +
+                "proxy=${if (status.running) "on" else "off"} address=${status.reachableAddress} " +
+                    "bind=${if (status.lan) "lan" else "loopback"} " +
                     "clients=${status.connections} exchanges=${status.exchanges} " +
                     "ca=${if (status.caInstalled) "installed" else "none"} " +
                     "decrypt=${status.decryptHosts.ifEmpty { listOf("none") }.joinToString(",")}" +
                     (status.error?.let { " error=$it" } ?: ""),
+            )
+        }
+        "set_proxy_lan", "set-proxy-lan" -> {
+            val enabled = args.flag ?: return CommandResult("set_proxy_lan requires --on or --off", exitCode = 2)
+            val status = host.setProxyLan(enabled)
+            CommandResult(
+                if (status.lan) {
+                    "bind=lan address=${status.reachableAddress}\n" +
+                        "Anything that can reach this machine can now use it as a proxy. " +
+                        "Use it on a network you trust, and turn it off when you are done."
+                } else {
+                    "bind=loopback address=${status.reachableAddress}"
+                },
             )
         }
         "set_proxy_decrypt", "set-proxy-decrypt" -> {
@@ -533,6 +547,7 @@ internal enum class Command(val verb: String) {
     Rebind("rebind"),
     SetProxy("set_proxy"),
     ProxyStatus("proxy_status"),
+    SetProxyLan("set_proxy_lan"),
     SetProxyDecrypt("set_proxy_decrypt"),
     ProxyCa("proxy_ca"),
     RotateProxyCa("rotate_proxy_ca"),
@@ -684,6 +699,7 @@ private fun printUsage() {
         wailo-cli rebind --port N
         wailo-cli set_proxy --on|--off [--port N]
         wailo-cli proxy_status
+        wailo-cli set_proxy_lan --on|--off
         wailo-cli set_proxy_decrypt --host PATTERN... | --off
         wailo-cli proxy_ca [--out PATH]
         wailo-cli rotate_proxy_ca
@@ -701,7 +717,9 @@ private fun printUsage() {
 
         set_proxy starts the bundled HTTP proxy so traffic from anything on this machine — a browser, a
         CLI, a simulator — is captured without the SDK. It listens on loopback, off by default, and
-        while it runs it keeps the daemon alive.
+        while it runs it keeps the daemon alive. set_proxy_lan binds it to every interface so a phone or
+        another machine can use it, which also makes it an open relay for anything on that network — so
+        it is opt-in, and worth turning off when you are done.
 
         HTTPS starts locked: a CONNECT is tunnelled without being read (ADR-0071). Decrypting needs two
         separate acts. proxy_ca mints the local root and prints it — or writes it with --out — for you to
