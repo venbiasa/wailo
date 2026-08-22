@@ -84,12 +84,14 @@ users who have one.
 `daemon` is the only module that adapts it, mapping its output onto `CapturedExchange` with
 `CaptureSource.PROXY` and its bodies into the same encrypted spool. Never let it import `engine`, `host`, or
 `shared`, and never let a frontend bind it — the daemon owns the listener, so a browser pointed at Wailo
-does not lose its network when a window closes. `CONNECT` is an opaque tunnel: this module never terminates
-TLS, and a locked tunnel is still recorded as a row so "not decrypted" reads differently from "not
-captured" (ADR-0071). It knows the *shape* of interception (`ProxyRules`) but never a rule: the daemon's
-`HostProxyRules` evaluates the real sets, in ADR-0033's precedence, against the same registries the device
-snapshots come from. That matching order now exists twice — here and in `sdk-android`, which cannot depend
-on it — so a change to one is a change to both (ADR-0072).
+does not lose its network when a window closes. `CONNECT` is opaque unless the daemon hands back a context
+for that host through `ProxyTls`, and a locked tunnel is still recorded as a row so "not decrypted" reads
+differently from "not captured" (ADR-0071). The local root that signs those leaves is the daemon's alone —
+Keychain-backed, minted lazily, exported as a certificate and never as a key (ADR-0073); never move key
+material into `proxy` or a frontend. `proxy` knows the *shape* of interception (`ProxyRules`) but never a
+rule: the daemon's `HostProxyRules` evaluates the real sets, in ADR-0033's precedence, against the same
+registries the device snapshots come from. That matching order now exists twice — here and in
+`sdk-android`, which cannot depend on it — so a change to one is a change to both (ADR-0072).
 
 `sdk-android-panel` is the on-device panel (Compose + a ZXing QR scanner + a launcher shortcut). It is a
 consumer of `sdk-android`, never the other way round, and hosts wire it as `debugImplementation` so its

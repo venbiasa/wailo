@@ -121,10 +121,18 @@ is the SDK regardless of which transport carried it (LAN WebSocket, usbmux, or `
   spool an SDK capture uses. A response larger than memory is not a special case. The inspection copy is
   decoded (gzip/deflate) and its recorded `Content-Length` corrected, so what is stored is what a human
   wants to read while the wire stays byte-exact.
-- **HTTPS starts locked** (ADR-0071). `CONNECT` is an opaque tunnel: this code never terminates TLS. The
+- **HTTPS starts locked** (ADR-0071). A `CONNECT` is an opaque tunnel unless two independent things are
+  true: a local root exists, and this host is on the allowlist. Neither happens on its own, and a locked
   tunnel is still recorded as a row saying so, so "not decrypted" is legible rather than looking like
-  traffic Wailo missed. Decryption will need a local root the user installs *and* a host they unlock by
-  name; neither happens on its own.
+  traffic Wailo missed. Unlocked, the tunnel is terminated with a leaf minted for that host and the
+  requests inside become ordinary rows; the tunnel itself then has no row, because they are it.
+- **The root is `daemon`'s, and its key never leaves the Keychain** (ADR-0073). `WailoCertificateAuthority`
+  mints an EC root lazily — asking for status never creates one — keeps it in the login Keychain (in
+  memory only where there is none), and signs short per-host leaves cached for the process. Export is the
+  public certificate alone. `:proxy` sees only a `ProxyTls` seam that answers "decrypt this host, with
+  this context, or not"; it never learns why. Failing to present a leaf leaves the tunnel opaque rather
+  than broken, and the upstream leg keeps the JDK's default validation — decrypting the user's traffic
+  must not also stop checking who is on the other end.
 - One connection per virtual thread, blocking IO throughout — a proxy is almost entirely parked on a
   socket, and blocking reads keep the framing code readable.
 - **The same rules act on both paths** (ADR-0067). There is no proxy rule list: Capture Filter, Map Local,

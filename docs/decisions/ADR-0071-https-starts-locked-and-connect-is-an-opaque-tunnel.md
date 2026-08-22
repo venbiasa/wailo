@@ -3,11 +3,11 @@ adr: 0071
 title: HTTPS starts locked — `CONNECT` is an opaque tunnel until a host is explicitly unlocked
 date: "2026-08-22"
 status: accepted
-relations: extends ADR-0070; constrains the later CA/trust work
+relations: extends ADR-0070; constrains the CA/trust work, implemented by ADR-0073
 ---
 # ADR-0071 — HTTPS starts locked: `CONNECT` is an opaque tunnel until a host is explicitly unlocked
 
-- Status: Accepted; the locked half is implemented (`CONNECT` tunnels byte-for-byte and is recorded as a locked row). Decryption, the local root, and the per-host allowlist are the next milestone; this ADR fixes the default they have to respect.
+- Status: Accepted; both halves are implemented — a `CONNECT` tunnels byte-for-byte and is recorded as a locked row unless the host is on the allowlist, in which case ADR-0073's local root signs a leaf for it and the requests inside become ordinary rows.
 - Context: A proxy sees `CONNECT host:443` and has exactly two options: pass the bytes through untouched, or terminate TLS with a certificate the client will accept and re-originate the connection. The second requires generating a root, installing it in the OS trust store, and then being technically able to read every TLS connection the machine makes — banking, password managers, the user's own mail. Proxy tools have historically defaulted this on, and it is the single most consequential thing a debugging tool can ask for. Wailo's existing posture is the opposite of casual about this: the MCP gate is revocable, redaction is on by default (ADR-0059), and captured bodies are encrypted under a key that dies with the process (ADR-0069). A proxy that decrypted everything the moment it started would contradict all of it.
 - Decision:
   - **Locked is the default and the starting state.** A proxy with no configuration tunnels every `CONNECT` opaquely. Turning proxying on is not consent to decrypt anything.

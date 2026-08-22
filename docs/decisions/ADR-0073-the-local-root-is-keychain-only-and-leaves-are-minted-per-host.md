@@ -1,0 +1,32 @@
+---
+adr: 0073
+title: The local root lives in the Keychain and never leaves it; leaves are minted per unlocked host
+date: "2026-08-22"
+status: accepted
+relations: implements the decryption half ADR-0071 deferred; extends ADR-0070; reuses ADR-0060's Keychain store
+---
+# ADR-0073 — The local root lives in the Keychain and never leaves it; leaves are minted per unlocked host
+
+- Status: Accepted; implemented as `WailoCertificateAuthority` + `CertificateAuthorityStore` in `daemon` and a `ProxyTls` seam in `:proxy`. Verify with `cd studio && ./gradlew :proxy:test :daemon:test` (`ProxyDecryptionTest` drives a real TLS origin through the relay, unlocked and locked).
+- Context: ADR-0071 fixed the *policy* — HTTPS starts locked, installing a root is not consent to decrypt, and only named hosts are unlocked — and deferred the mechanism. The mechanism is a certificate authority living on the user's machine: a private key that can mint a certificate for any hostname on the internet. That is a strictly more dangerous secret than anything else Wailo holds, including the pairing keys (ADR-0060) and the spool key (ADR-0069), because it is useful to an attacker *off* this machine and it outlives the process. So the question is not only how to sign a leaf in time for a handshake, but where the key sleeps and what an export hands over.
+- Decision:
+  - **The root's key goes in the login Keychain, or nowhere.** `KeychainCertificateAuthorityStore` reuses the `security` CLI path the pairing store already uses, so the key gets an OS-enforced ACL rather than a file beside the settings. Where there is no Keychain — Linux, CI, a scratch `WAILO_HOME` — `EphemeralCertificateAuthorityStore` keeps the root in memory only: decryption still works for that session and the user reinstalls next time. Writing a universal signing key to an unprotected file is not one of the options.
+  - **Export is the certificate, never the key.** `CertificateAuthorityInfo` carries a PEM of the public certificate, a SHA-256 fingerprint, and an expiry. That is everything a trust store needs, and it is the only thing any surface — RPC, CLI, Studio — is ever able to ask for. There is no code path that serialises the private key outside the store.
+  - **The root is minted lazily, on the first thing that actually needs it.** Reading status calls `current()`, which never creates one; only `ensure()` mints. A user who runs the proxy purely as a tunnel never acquires a signing key at all, which keeps ADR-0071's "installing the CA is a separate act" true in the implementation and not just the UI.
+  - **Leaves are per-host, short, and cached for the process.** 397 days, because Apple rejects a longer server certificate outright; SAN-bearing, because a modern client ignores the CN; cached per host, because a keypair and a signature inside every handshake is latency on every request of a page. The root itself is 825 days — long enough not to be a chore, short enough that a leaked key expires.
+  - **`:proxy` is told *whether* to decrypt, never *how* the decision was made.** A `ProxyTls` seam with two calls — `unlock(host)` returning a context or null, and `upstream()` for dialling the origin — keeps the relay off `daemon` and lets `ProxyTls.Locked` be the default. Two gates are checked on every `CONNECT`, deliberately: a root that exists decrypts nothing, and an unlocked host is not decrypted without one.
+  - **Decrypting does not stop validating.** The upstream leg uses the JDK's default trust, so Wailo refuses an origin a browser would have refused. `upstream()` is overridable only so a daemon can reach an origin behind a private root — the one case where the user's own trust store is the wrong answer — and tests use it rather than disabling verification.
+  - **Anything that goes wrong presenting a leaf leaves the tunnel opaque.** Locked is both the default and the failure mode: a missing root, a signing error, or a `ProxyTls` that throws produces a byte-for-byte tunnel, never a broken connection.
+  - **A failure to mint is reported, not swallowed.** `lastError` exists because "decryption is off" and "this machine could not make a key" are indistinguishable to every surface otherwise, and the second has a very different next action.
+- Alternatives considered:
+  - **RSA-2048 for the root, matching most proxy tools:** rejected — P-256 signs an order of magnitude faster, which matters because a leaf is minted inside a handshake, and every client Wailo targets has supported EC for a decade.
+  - **One wildcard leaf reused for every host:** rejected — it would mean a single certificate valid for hosts the user never unlocked, which quietly undoes the allowlist ADR-0071 is built on.
+  - **Persist leaves alongside the root:** rejected — they are cheap to remint and a cache that outlives the process is more key material at rest for no gain.
+  - **Install the root into the system trust store on the user's behalf:** rejected — trusting a root is the single most consequential thing this tool asks for, and it must be the user's explicit act, in the OS's own dialog. Wailo hands over a PEM and instructions.
+  - **File-backed store encrypted with a passphrase:** rejected for now — it moves the problem to where the passphrase lives, and the ephemeral fallback is an honest answer for the platforms without a Keychain.
+- Consequences:
+  - A macOS user installs the root once and trusts it in Keychain Access; rotation invalidates every leaf and requires trusting the new root, which is why it is an explicit action and never implicit.
+  - A decrypted `CONNECT` produces no tunnel row — the requests inside it are the rows. Only a locked tunnel is recorded as one (ADR-0071), so "one row that says not decrypted" and "the real exchanges" stay distinguishable.
+  - `daemon` gains a BouncyCastle dependency for X.509 generation. It stays in `daemon` alone: `:proxy` sees only an `SSLContext`, and nothing on the device side is affected.
+  - A pinned client still fails, and should. Nothing here defeats pinning (ADR-0071).
+  - The allowlist is currently held in the controller and set per session; persisting it as daemon configuration (ADR-0061's class) is the next step, together with the RPC, CLI, and Studio surfaces that expose export, rotate, and remove.

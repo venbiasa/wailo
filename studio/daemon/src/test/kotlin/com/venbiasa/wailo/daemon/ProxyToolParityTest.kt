@@ -7,9 +7,7 @@ import com.venbiasa.wailo.host.HostBreakpointRule
 import com.venbiasa.wailo.host.HostMapLocalRule
 import com.venbiasa.wailo.host.HostSeed
 import com.venbiasa.wailo.protocol.Header
-import java.io.ByteArrayOutputStream
 import java.io.Closeable
-import java.io.InputStream
 import java.io.OutputStream
 import java.net.InetAddress
 import java.net.InetSocketAddress
@@ -147,7 +145,7 @@ class ProxyToolParityTest {
                 thread(isDaemon = true) {
                     client.use {
                         runCatching {
-                            it.getInputStream().consumeHead()
+                            it.getInputStream().readRequestHead()
                             handle(it.getOutputStream())
                         }
                     }
@@ -158,28 +156,3 @@ class ProxyToolParityTest {
     }
 }
 
-private class TestOrigin(private val socket: ServerSocket) : Closeable {
-    val port: Int get() = socket.localPort
-    override fun close() = socket.close()
-}
-
-private fun freePort(): Int = ServerSocket(0).use { it.localPort }
-
-private fun OutputStream.respond(body: String) {
-    write("HTTP/1.1 200 OK\r\nContent-Length: ${body.length}\r\n\r\n$body".toByteArray())
-    flush()
-}
-
-private fun InputStream.consumeHead() {
-    val line = ByteArrayOutputStream()
-    while (true) {
-        val next = read()
-        if (next < 0) return
-        if (next == '\n'.code) {
-            if (line.size() == 0) return
-            line.reset()
-        } else if (next != '\r'.code) {
-            line.write(next)
-        }
-    }
-}

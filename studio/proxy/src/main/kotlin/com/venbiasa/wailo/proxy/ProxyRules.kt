@@ -2,6 +2,7 @@ package com.venbiasa.wailo.proxy
 
 import com.venbiasa.wailo.protocol.HttpRequest
 import com.venbiasa.wailo.protocol.HttpResponse
+import javax.net.ssl.SSLContext
 
 /**
  * What the daemon wants from an exchange before any of its bytes move.
@@ -16,6 +17,28 @@ class Interception(
     val holdResponse: Boolean = false,
     val record: Boolean = true,
 )
+
+/**
+ * Whether a `CONNECT` to [host] is decrypted, and with what identity.
+ *
+ * Null keeps the tunnel opaque, which is the default for every host (ADR-0071). Returning a context is
+ * the daemon asserting two separate things at once — that a local root exists, and that this host is one
+ * the user unlocked by name — because either alone must not be enough to read someone's traffic.
+ */
+fun interface ProxyTls {
+    fun unlock(host: String): SSLContext?
+
+    /**
+     * The identity and trust used to dial an origin once a tunnel is decrypted. The JDK default, so
+     * Wailo refuses a certificate a browser would have refused; overridden to reach an origin behind a
+     * private root, which is the one case where the user's own trust store is the wrong answer.
+     */
+    fun upstream(): SSLContext = SSLContext.getDefault()
+
+    companion object {
+        val Locked: ProxyTls = ProxyTls { null }
+    }
+}
 
 /** What the daemon decides about a request that has not yet left for its origin. */
 sealed interface RequestVerdict {

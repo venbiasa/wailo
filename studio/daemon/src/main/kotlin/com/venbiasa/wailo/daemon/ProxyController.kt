@@ -5,12 +5,15 @@ import com.venbiasa.wailo.engine.CaptureSource
 import com.venbiasa.wailo.engine.CapturedExchange
 import com.venbiasa.wailo.engine.WailoEngine
 import com.venbiasa.wailo.host.HeadlessHost
+import com.venbiasa.wailo.host.hostWildcardMatches
 import com.venbiasa.wailo.protocol.HttpExchange
 import com.venbiasa.wailo.proxy.ProxyBodyRef
 import com.venbiasa.wailo.proxy.ProxyBodySink
 import com.venbiasa.wailo.proxy.ProxyCaptureSink
 import com.venbiasa.wailo.proxy.ProxyServer
+import com.venbiasa.wailo.proxy.ProxyTls
 import java.io.Closeable
+import javax.net.ssl.SSLContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -23,6 +26,12 @@ data class ProxyStatus(
     val exchanges: Long = 0,
     /** Why the last start attempt failed, most often a port something else already holds. */
     val error: String? = null,
+    /** Whether a local root exists at all — the first of the two things decryption needs (ADR-0071). */
+    val caInstalled: Boolean = false,
+    val caFingerprint: String = "",
+    val caExpiresEpochMs: Long = 0,
+    /** Host patterns the user unlocked. Everything else stays an opaque tunnel. */
+    val decryptHosts: List<String> = emptyList(),
 )
 
 const val DEFAULT_PROXY_PORT = 9090
@@ -39,11 +48,36 @@ const val DEFAULT_PROXY_PORT = 9090
 internal class ProxyController(
     private val host: HeadlessHost,
     initialPort: Int = DEFAULT_PROXY_PORT,
+    initialDecryptHosts: List<String> = emptyList(),
+    private val ca: WailoCertificateAuthority = WailoCertificateAuthority(
+        if (KeychainCertificateAuthorityStore.isSupported) {
+            KeychainCertificateAuthorityStore()
+        } else {
+            EphemeralCertificateAuthorityStore()
+        },
+    ),
+    /** Trust used when dialling an origin, for reaching one behind a private root. Default is the JDK's. */
+    private val upstream: SSLContext? = null,
 ) : Closeable {
     private val engine: WailoEngine get() = host.engine
     private val rules = HostProxyRules(host)
 
-    private val _status = MutableStateFlow(ProxyStatus(port = initialPort))
+    @Volatile
+    private var decryptHosts: List<String> = initialDecryptHosts
+
+    /**
+     * Two independent gates, deliberately: a root that exists does not decrypt anything, and a host on
+     * the list is not decrypted without one (ADR-0071). Generating the root here rather than at start-up
+     * keeps a proxy that only tunnels from ever minting a signing key.
+     */
+    private val tls = object : ProxyTls {
+        override fun unlock(host: String): SSLContext? =
+            if (decryptHosts.none { hostWildcardMatches(it, host) }) null else ca.contextFor(host)
+
+        override fun upstream(): SSLContext = this@ProxyController.upstream ?: SSLContext.getDefault()
+    }
+
+    private val _status = MutableStateFlow(ProxyStatus(port = initialPort, decryptHosts = initialDecryptHosts))
     val status: StateFlow<ProxyStatus> = _status.asStateFlow()
 
     @Volatile
@@ -56,18 +90,55 @@ internal class ProxyController(
     fun start(port: Int = _status.value.port): Boolean {
         stop()
         return try {
-            val started = ProxyServer.start(port, EngineProxyCaptureSink(engine), rules)
+            val started = ProxyServer.start(port, EngineProxyCaptureSink(engine), rules, tls)
             server = started
-            _status.value = ProxyStatus(running = true, port = started.port)
+            _status.value = describe(running = true, port = started.port)
             true
         } catch (failure: Exception) {
-            _status.value = ProxyStatus(
+            _status.value = describe(
                 running = false,
                 port = port,
                 error = failure.message ?: "could not bind port $port",
             )
             false
         }
+    }
+
+    /** Mint the local root if there is not one yet, and hand back what a user needs to install it. */
+    fun certificate(): CertificateAuthorityInfo? = ca.ensure().also { publish() }
+
+    fun rotateCertificate(): CertificateAuthorityInfo? = ca.rotate().also { publish() }
+
+    fun removeCertificate() {
+        ca.remove()
+        publish()
+    }
+
+    /**
+     * Replace the set of hosts whose TLS is terminated. Existing tunnels are unaffected — a host is
+     * decrypted from its next `CONNECT`, since the current one is already an established session.
+     */
+    fun setDecryptHosts(hosts: List<String>) {
+        decryptHosts = hosts.map { it.trim() }.filter { it.isNotEmpty() }.distinct()
+        publish()
+    }
+
+    private fun publish() {
+        _status.value = describe(running = running, port = _status.value.port, error = _status.value.error)
+    }
+
+    private fun describe(running: Boolean, port: Int, error: String? = null): ProxyStatus {
+        // Read rather than mint: asking for the status must not be what creates a signing key.
+        val root = ca.current()
+        return ProxyStatus(
+            running = running,
+            port = port,
+            error = error,
+            caInstalled = root != null,
+            caFingerprint = root?.sha256.orEmpty(),
+            caExpiresEpochMs = root?.notAfterEpochMs ?: 0,
+            decryptHosts = decryptHosts,
+        )
     }
 
     @Synchronized
@@ -84,9 +155,7 @@ internal class ProxyController(
     /** Refresh the counters the panel and the menu bar read; they only change as traffic flows. */
     fun sample(): ProxyStatus {
         val current = server ?: return _status.value
-        val next = _status.value.copy(
-            running = true,
-            port = current.port,
+        val next = describe(running = true, port = current.port).copy(
             connections = current.connections,
             exchanges = current.exchangeCount,
         )

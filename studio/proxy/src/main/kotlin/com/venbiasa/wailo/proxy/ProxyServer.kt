@@ -6,6 +6,7 @@ import com.venbiasa.wailo.protocol.HttpRequest
 import com.venbiasa.wailo.protocol.HttpResponse
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
+import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.Closeable
 import java.io.IOException
@@ -23,6 +24,7 @@ import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
+import javax.net.ssl.SSLSocket
 import okio.ByteString
 import okio.ByteString.Companion.toByteString
 
@@ -45,6 +47,7 @@ class ProxyServer private constructor(
     private val socket: ServerSocket,
     private val sink: ProxyCaptureSink,
     private val rules: ProxyRules,
+    private val tls: ProxyTls,
 ) : Closeable {
     private val executor: ExecutorService = Executors.newVirtualThreadPerTaskExecutor()
     private val closed = AtomicBoolean()
@@ -93,7 +96,7 @@ class ProxyServer private constructor(
             while (!closed.get()) {
                 val head = readHead(input) ?: return
                 val reusable = if (head.first.equals("CONNECT", ignoreCase = true)) {
-                    tunnel(head, input, output, peer)
+                    connect(client, head, input, output, peer)
                     false
                 } else {
                     relay(head, input, output, peer)
@@ -106,12 +109,63 @@ class ProxyServer private constructor(
     }
 
     /**
+     * Answer a `CONNECT`: decrypt it if the daemon unlocked this host, otherwise tunnel it opaquely.
+     *
+     * Locked is the default and the failure mode — anything that goes wrong presenting a leaf leaves the
+     * connection encrypted end to end rather than broken (ADR-0071).
+     */
+    private fun connect(client: Socket, head: HttpHead, clientIn: InputStream, clientOut: OutputStream, peer: String) {
+        val authority = head.second
+        val host = authority.substringBeforeLast(':', authority)
+        val port = authority.substringAfterLast(':', "443").toIntOrNull() ?: 443
+        val context = runCatching { tls.unlock(host) }.getOrNull()
+        if (context == null) {
+            tunnel(host, port, head, clientIn, clientOut, peer)
+            return
+        }
+        clientOut.write(TUNNEL_ESTABLISHED)
+        clientOut.flush()
+        val secured = try {
+            // Whatever the buffer already pulled off the socket has to be handed to the TLS layer, or a
+            // client that pipelined its ClientHello behind the CONNECT would hang on a lost handshake.
+            val pending = clientIn.available()
+            val consumed = if (pending > 0) ByteArrayInputStream(clientIn.readNBytes(pending)) else null
+            context.socketFactory.createSocket(client, consumed, false) as SSLSocket
+        } catch (_: IOException) {
+            return
+        }
+        secured.useClientMode = false
+        secured.soTimeout = READ_TIMEOUT_MS
+        val inner = BufferedInputStream(secured.inputStream, RELAY_BUFFER_BYTES)
+        val innerOut = BufferedOutputStream(secured.outputStream, RELAY_BUFFER_BYTES)
+        val tunnelTo = ProxyTarget(host, port, "/", "https://$authority", secure = true)
+        try {
+            while (!closed.get()) {
+                val request = readHead(inner) ?: return
+                if (!relay(request, inner, innerOut, peer, tunnelTo)) return
+            }
+        } catch (_: IOException) {
+            // Same as plain HTTP: a client hanging up mid-message is traffic, not a fault.
+        } finally {
+            runCatching { secured.close() }
+        }
+    }
+
+    /**
      * Relay one plain-HTTP exchange. Returns whether the client connection can carry another request,
      * which is false whenever the response was framed by its own end — the client has to see the close
      * to know the body finished.
      */
-    private fun relay(head: HttpHead, clientIn: InputStream, clientOut: OutputStream, peer: String): Boolean {
-        val target = absoluteTarget(head.second)
+    private fun relay(
+        head: HttpHead,
+        clientIn: InputStream,
+        clientOut: OutputStream,
+        peer: String,
+        tunnel: ProxyTarget? = null,
+    ): Boolean {
+        // Inside a decrypted tunnel the request-target is origin-form and the authority is the tunnel's,
+        // which is the one thing that differs from a plain proxied request.
+        val target = tunnel?.within(head.second) ?: absoluteTarget(head.second)
         if (target == null) {
             respondDirectly(clientOut, 400, "Bad Request", DIRECT_REQUEST_HELP)
             return false
@@ -167,11 +221,7 @@ class ProxyServer private constructor(
         }
 
         val upstream = try {
-            Socket().apply {
-                tcpNoDelay = true
-                connect(InetSocketAddress(target.host, target.port), CONNECT_TIMEOUT_MS)
-                soTimeout = READ_TIMEOUT_MS
-            }
+            openUpstream(target)
         } catch (failure: IOException) {
             respondDirectly(clientOut, 502, "Bad Gateway", "Wailo could not reach ${target.host}:${target.port}.")
             record(
@@ -416,14 +466,40 @@ class ProxyServer private constructor(
     }
 
     /**
+     * The connection to the origin: TLS inside a decrypted tunnel, plain otherwise. Validation is the
+     * JDK's default, so Wailo refuses an origin a browser would have refused — decrypting a user's own
+     * traffic must not also quietly stop checking who is on the other end.
+     */
+    private fun openUpstream(target: ProxyTarget): Socket {
+        val socket = Socket().apply {
+            tcpNoDelay = true
+            connect(InetSocketAddress(target.host, target.port), CONNECT_TIMEOUT_MS)
+            soTimeout = READ_TIMEOUT_MS
+        }
+        if (!target.secure) return socket
+        return runCatching {
+            tls.upstream().socketFactory
+                .createSocket(socket, target.host, target.port, true)
+                .also { (it as SSLSocket).startHandshake() }
+        }.getOrElse {
+            runCatching { socket.close() }
+            throw IOException("TLS handshake with ${target.host} failed: ${it.message}", it)
+        }
+    }
+
+    /**
      * Open an opaque `CONNECT` tunnel. The row is recorded the moment the tunnel is established rather
      * than when it closes: a tunnel can stay open for the length of a session, and a row that appeared
      * only afterwards would leave the user watching an empty list while their traffic flowed.
      */
-    private fun tunnel(head: HttpHead, clientIn: InputStream, clientOut: OutputStream, peer: String) {
-        val authority = head.second
-        val host = authority.substringBeforeLast(':', authority)
-        val port = authority.substringAfterLast(':', "443").toIntOrNull() ?: 443
+    private fun tunnel(
+        host: String,
+        port: Int,
+        head: HttpHead,
+        clientIn: InputStream,
+        clientOut: OutputStream,
+        peer: String,
+    ) {
         val startedAt = System.currentTimeMillis()
         val intent = runCatching { rules.intercepts("CONNECT", "https://$host:$port") }
             .getOrDefault(Interception())
@@ -743,16 +819,34 @@ class ProxyServer private constructor(
         private const val ABORTED_MESSAGE = "This request was aborted at a Wailo breakpoint."
 
         /** Loopback only for now: exposing a proxy to the LAN is an explicit, separate decision. */
-        fun start(port: Int, sink: ProxyCaptureSink, rules: ProxyRules = ProxyRules.None): ProxyServer {
+        fun start(
+            port: Int,
+            sink: ProxyCaptureSink,
+            rules: ProxyRules = ProxyRules.None,
+            tls: ProxyTls = ProxyTls.Locked,
+        ): ProxyServer {
             val socket = ServerSocket()
             socket.reuseAddress = true
             socket.bind(InetSocketAddress(InetAddress.getByName("127.0.0.1"), port))
-            return ProxyServer(socket, sink, rules).also(ProxyServer::start)
+            return ProxyServer(socket, sink, rules, tls).also(ProxyServer::start)
         }
     }
 }
 
-internal class ProxyTarget(val host: String, val port: Int, val pathAndQuery: String, val url: String)
+internal class ProxyTarget(
+    val host: String,
+    val port: Int,
+    val pathAndQuery: String,
+    val url: String,
+    val secure: Boolean = false,
+) {
+    /** The same authority, re-pointed at an origin-form request-target read inside a decrypted tunnel. */
+    fun within(requestTarget: String): ProxyTarget {
+        val path = requestTarget.ifEmpty { "/" }
+        val authority = if (port == 443) host else "$host:$port"
+        return ProxyTarget(host, port, path, "https://$authority$path", secure = true)
+    }
+}
 
 /**
  * A proxied request carries the whole URL in its start line; an origin-form target means something
@@ -779,7 +873,9 @@ private fun List<Header>.withHost(target: ProxyTarget): List<Header> =
     listOf(Header("Host", hostHeader(target))) + filterNot { it.name.equals("Host", ignoreCase = true) }
 
 private fun hostHeader(target: ProxyTarget): String =
-    if (target.port == 80) target.host else "${target.host}:${target.port}"
+    if (target.port == target.defaultPort) target.host else "${target.host}:${target.port}"
+
+private val ProxyTarget.defaultPort: Int get() = if (secure) 443 else 80
 
 /**
  * Restate the framing for a body this proxy is sending itself. The original `Content-Length` describes

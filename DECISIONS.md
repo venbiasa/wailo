@@ -80,3 +80,4 @@ reasoning in the ADR file, not here.
 | [0070](docs/decisions/ADR-0070-the-proxy-is-an-additive-daemon-owned-capture-source.md) | 2026-08-22 | accepted | The proxy is an additive, daemon-owned capture source in a bundled `:proxy` module (extends ADR-0001/0058) |
 | [0071](docs/decisions/ADR-0071-https-starts-locked-and-connect-is-an-opaque-tunnel.md) | 2026-08-22 | accepted | HTTPS starts locked — `CONNECT` is an opaque tunnel until a host is explicitly unlocked (extends ADR-0070) |
 | [0072](docs/decisions/ADR-0072-a-hold-is-a-route-so-one-rule-set-serves-both-capture-paths.md) | 2026-08-22 | accepted | A hold carries a decision route, so one rule set serves both capture paths (extends ADR-0067/0070) |
+| [0073](docs/decisions/ADR-0073-the-local-root-is-keychain-only-and-leaves-are-minted-per-host.md) | 2026-08-22 | accepted | The local root lives in the Keychain and never leaves it; leaves are minted per unlocked host (implements ADR-0071's deferred half) |
