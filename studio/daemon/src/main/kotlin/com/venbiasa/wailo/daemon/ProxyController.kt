@@ -4,6 +4,7 @@ import com.venbiasa.wailo.engine.BodyRef
 import com.venbiasa.wailo.engine.CaptureSource
 import com.venbiasa.wailo.engine.CapturedExchange
 import com.venbiasa.wailo.engine.WailoEngine
+import com.venbiasa.wailo.host.HeadlessHost
 import com.venbiasa.wailo.protocol.HttpExchange
 import com.venbiasa.wailo.proxy.ProxyBodyRef
 import com.venbiasa.wailo.proxy.ProxyBodySink
@@ -36,9 +37,12 @@ const val DEFAULT_PROXY_PORT = 9090
  * spool an SDK capture uses (ADR-0069).
  */
 internal class ProxyController(
-    private val engine: WailoEngine,
+    private val host: HeadlessHost,
     initialPort: Int = DEFAULT_PROXY_PORT,
 ) : Closeable {
+    private val engine: WailoEngine get() = host.engine
+    private val rules = HostProxyRules(host)
+
     private val _status = MutableStateFlow(ProxyStatus(port = initialPort))
     val status: StateFlow<ProxyStatus> = _status.asStateFlow()
 
@@ -52,7 +56,7 @@ internal class ProxyController(
     fun start(port: Int = _status.value.port): Boolean {
         stop()
         return try {
-            val started = ProxyServer.start(port, EngineProxyCaptureSink(engine))
+            val started = ProxyServer.start(port, EngineProxyCaptureSink(engine), rules)
             server = started
             _status.value = ProxyStatus(running = true, port = started.port)
             true
@@ -70,6 +74,9 @@ internal class ProxyController(
     fun stop() {
         val current = server ?: return
         server = null
+        // Holds first: a client parked on a breakpoint has no other route to its origin, so an orderly
+        // stop that just closed the listener would leave it waiting on a decision nothing can make.
+        rules.releaseAll()
         runCatching { current.close() }
         _status.value = _status.value.copy(running = false, connections = 0, error = null)
     }

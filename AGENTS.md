@@ -16,9 +16,11 @@ persistent local daemon shared by the Kotlin Multiplatform desktop app, CLI, and
  in `engine`, `host`, or `daemon`, and do not let a frontend bind capture or own cable transports.
  What AI tools may reach and see is daemon state, not Studio state (ADR-0059): the MCP access gate and
  secret redaction must keep working with no UI open, so never move either into `desktopApp` — and never
- redact in `engine`, which exists to show real values. The same test governs interception: an exchange is
- held, mapped, or answered by a seed on the daemon, so a frontend never resolves a hold on its own
- (ADR-0067). Studio may author and display; it may not be the only place a feature works.
+   redact in `engine`, which exists to show real values. The same test governs interception: an exchange is
+   held, mapped, or answered by a seed on the daemon, so a frontend never resolves a hold on its own
+   (ADR-0067). Studio may author and display; it may not be the only place a feature works. Nor may one
+   capture path: a rule acts on SDK and proxy traffic alike, through one hold queue whose decisions route to
+   a device session or to the relay thread waiting on it (ADR-0072).
 3. The interceptor SDK (`sdk-android`, `sdk-ios`) ships inside third-party apps. Keep it small and
    dependency-light. Never make it depend on `engine`, `host`, `daemon`, `shared`, `desktopApp`, `cli`, or `mcp`. `sdk-ios` is native
    Swift and must not embed a Kotlin/Native runtime (ADR-0010). Anything that needs UI, a camera or a
@@ -84,7 +86,10 @@ users who have one.
 `shared`, and never let a frontend bind it — the daemon owns the listener, so a browser pointed at Wailo
 does not lose its network when a window closes. `CONNECT` is an opaque tunnel: this module never terminates
 TLS, and a locked tunnel is still recorded as a row so "not decrypted" reads differently from "not
-captured" (ADR-0071).
+captured" (ADR-0071). It knows the *shape* of interception (`ProxyRules`) but never a rule: the daemon's
+`HostProxyRules` evaluates the real sets, in ADR-0033's precedence, against the same registries the device
+snapshots come from. That matching order now exists twice — here and in `sdk-android`, which cannot depend
+on it — so a change to one is a change to both (ADR-0072).
 
 `sdk-android-panel` is the on-device panel (Compose + a ZXing QR scanner + a launcher shortcut). It is a
 consumer of `sdk-android`, never the other way round, and hosts wire it as `debugImplementation` so its

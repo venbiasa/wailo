@@ -66,7 +66,7 @@ internal class DaemonRuntime(
      * The bundled proxy, off until something explicitly starts it (ADR-0070). Daemon-owned like every
      * other master, so a CLI or menu bar session can start and stop it with no window open.
      */
-    private val proxy = ProxyController(host.engine, proxyPort)
+    private val proxy = ProxyController(host, proxyPort)
 
     /** Whether the proxy is holding this daemon up: a client pointed at a dead one loses its network. */
     val proxyRunning: Boolean get() = proxy.running

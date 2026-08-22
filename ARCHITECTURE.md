@@ -127,8 +127,20 @@ is the SDK regardless of which transport carried it (LAN WebSocket, usbmux, or `
   name; neither happens on its own.
 - One connection per virtual thread, blocking IO throughout — a proxy is almost entirely parked on a
   socket, and blocking reads keep the framing code readable.
-- Not yet: rules (Capture Filter, Map Local, Breakpoints, Seeds) apply to SDK traffic only; the proxy is a
-  recorder until they are generalized. It is loopback-only, so a physical device cannot reach it yet.
+- **The same rules act on both paths** (ADR-0067). There is no proxy rule list: Capture Filter, Map Local,
+  Breakpoints, and Seeds are the sets the SDK already uses, in ADR-0033's precedence — the filter decides
+  what is *kept* (a blocked host is still relayed, and still interceptable); with no breakpoint a Map Local
+  rule short-circuits; with one, the breakpoint owns the exchange and Map Local supplies the response it
+  shows. `daemon`'s `HostProxyRules` is the evaluator, because for a proxied exchange there is no device to
+  push the rules to.
+- **A hold is a parked socket, not a device round-trip.** `WailoEngine` routes a decision either to the
+  session that raised it or to the relay thread waiting on it, so one hold queue serves both paths and
+  Studio, the CLI, MCP, and Seed spend all resolve a proxy hold the way they resolve an SDK one. Two
+  differences follow from there being no second route to the origin: an abort is a visible `502` rather
+  than a call that fails open, and stopping the proxy releases every waiting hold first.
+- A held body is the one exception to streaming: it is read whole (capped at 32 MB) because an editor
+  cannot offer half a payload. Past the cap the exchange is relayed unheld rather than failed.
+- Not yet: loopback-only, so a physical device cannot reach it.
 
 ## Multi-session model
 

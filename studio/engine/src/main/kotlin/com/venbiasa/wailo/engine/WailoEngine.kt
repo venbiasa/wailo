@@ -111,6 +111,17 @@ data class PausedExchange(
     val response: HttpResponse?,
 )
 
+/**
+ * Where a hold's decision has to be delivered. A device holds its own request open and is told over the
+ * wire; the bundled proxy is holding a socket inside this process and is told by resuming the thread
+ * that parked on it (ADR-0067 — the daemon decides, whichever path raised the hold).
+ */
+private sealed interface HoldRoute {
+    class Device(val session: DeviceConnection) : HoldRoute
+
+    class Local(val deliver: (BreakpointDecision) -> Unit) : HoldRoute
+}
+
 /** A synthesized Map Local response the desktop serves for a matched request (ADR-0019). */
 class ServedBody(
     val code: Int,
@@ -330,10 +341,9 @@ class WailoEngine(
     // LAN sockets and outbound USB sockets.
     private val sessions = ConcurrentHashMap<DeviceConnection, SessionState>()
 
-    // Which session raised each paused exchange, keyed by its correlation id, so a resume/abort routes
-    // the decision back to the exact device that is holding that request/response. Entries are removed
+    // Where each paused exchange's decision has to go, keyed by its correlation id. Entries are removed
     // when the decision is sent or when the owning session disconnects.
-    private val pausedSessions = ConcurrentHashMap<String, DeviceConnection>()
+    private val pausedRoutes = ConcurrentHashMap<String, HoldRoute>()
 
     // Rule pushes run off the caller's thread; serialized so frames to a session never interleave.
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -855,7 +865,7 @@ class WailoEngine(
     // Record a device's paused request/response and remember which session raised it, so a later
     // resume/abort can route the decision straight back to that connection.
     private fun recordBreakpointHit(hello: Hello?, hit: BreakpointHit, session: DeviceConnection) {
-        pausedSessions[hit.correlation_id] = session
+        pausedRoutes[hit.correlation_id] = HoldRoute.Device(session)
         val paused = PausedExchange(
             correlationId = hit.correlation_id,
             deviceName = hello?.device_name ?: "unknown",
@@ -897,26 +907,67 @@ class WailoEngine(
             ),
         )
 
-    // Send a decision to the session holding this exchange and drop it from the paused set. Removing
+    // Send a decision to whatever is holding this exchange and drop it from the paused set. Removing
     // eagerly (before the send completes) is safe: if the socket is already gone the device has failed
     // open on its side, so the decision is moot.
     private fun sendDecision(decision: BreakpointDecision): Boolean {
-        val session = pausedSessions.remove(decision.correlation_id) ?: return false
+        val route = pausedRoutes.remove(decision.correlation_id) ?: return false
         _pausedExchanges.update { list -> list.filterNot { it.correlationId == decision.correlation_id } }
-        scope.launch {
-            sendMutex.withLock {
-                runCatching { session.send(Envelope(breakpoint_decision = decision).encode()) }
+        when (route) {
+            // Delivered inline: the proxy thread is parked on this, and a relay that resumes one tick
+            // later than it could is a stall the user reads as a hung request.
+            is HoldRoute.Local -> runCatching { route.deliver(decision) }
+            is HoldRoute.Device -> scope.launch {
+                sendMutex.withLock {
+                    runCatching { route.session.send(Envelope(breakpoint_decision = decision).encode()) }
+                }
             }
         }
         return true
     }
 
+    /**
+     * Park an exchange this engine is holding itself — today, one the bundled proxy is relaying — and be
+     * told through [deliver] when a frontend, a seed, or the CLI decides. Unlike a device hold there is
+     * no fail-open: nothing else can complete this request, so the caller must resolve every hold it
+     * opens, including on shutdown.
+     */
+    fun holdExternal(
+        correlationId: String,
+        client: String,
+        phase: BreakpointPhase,
+        request: HttpRequest?,
+        response: HttpResponse?,
+        deliver: (BreakpointDecision) -> Unit,
+    ) {
+        pausedRoutes[correlationId] = HoldRoute.Local(deliver)
+        _pausedExchanges.update {
+            it + PausedExchange(
+                correlationId = correlationId,
+                deviceName = "Proxy",
+                appId = client,
+                platform = "proxy",
+                phase = phase,
+                request = request,
+                response = response,
+            )
+        }
+    }
+
+    /** Forget a hold whose holder gave up — a proxy client that hung up while waiting for a decision. */
+    fun releaseExternalHold(correlationId: String) {
+        if (pausedRoutes.remove(correlationId) == null) return
+        _pausedExchanges.update { list -> list.filterNot { it.correlationId == correlationId } }
+    }
+
     // Drop every exchange a disconnecting session was holding. The device fails those calls open on its
     // side when the link drops, so the desktop must not keep showing them as pausable.
     private fun releasePausedFor(session: DeviceConnection) {
-        val orphaned = pausedSessions.entries.filter { it.value == session }.map { it.key }
+        val orphaned = pausedRoutes.entries
+            .filter { (it.value as? HoldRoute.Device)?.session == session }
+            .map { it.key }
         if (orphaned.isEmpty()) return
-        orphaned.forEach { pausedSessions.remove(it) }
+        orphaned.forEach { pausedRoutes.remove(it) }
         _pausedExchanges.update { list -> list.filterNot { it.correlationId in orphaned } }
     }
 

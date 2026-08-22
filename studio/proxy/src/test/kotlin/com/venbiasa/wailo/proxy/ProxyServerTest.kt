@@ -1,6 +1,8 @@
 package com.venbiasa.wailo.proxy
 
 import com.venbiasa.wailo.protocol.HttpExchange
+import com.venbiasa.wailo.protocol.HttpRequest
+import com.venbiasa.wailo.protocol.HttpResponse
 import java.io.ByteArrayOutputStream
 import java.io.Closeable
 import java.io.InputStream
@@ -16,6 +18,7 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.zip.GZIPOutputStream
 import kotlin.concurrent.thread
+import okio.ByteString.Companion.encodeUtf8
 import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -200,8 +203,134 @@ class ProxyServerTest {
         assertTrue(sink.bodies.isEmpty(), "a paused capture must not spool anything")
     }
 
-    private fun proxy(sink: ProxyCaptureSink): ProxyServer =
-        ProxyServer.start(0, sink).also { closeables += it }
+    @Test
+    fun aRuleCanAnswerWithoutReachingTheOrigin() {
+        val reached = CountDownLatch(1)
+        val origin = origin { _, out ->
+            reached.countDown()
+            out.respond("from origin")
+        }
+        val sink = RecordingSink()
+        val proxy = proxy(
+            sink,
+            rules(
+                onRequest = {
+                    RequestVerdict.Respond(
+                        HttpResponse(code = 201, body = "mocked".encodeUtf8(), body_size = 6),
+                    )
+                },
+            ),
+        )
+
+        val response = proxy.request("GET http://127.0.0.1:${origin.port}/thing HTTP/1.1")
+
+        assertTrue(response.startsWith("HTTP/1.1 201"), response)
+        assertTrue(response.endsWith("mocked"), response)
+        assertTrue(!reached.await(300, TimeUnit.MILLISECONDS), "a mocked request must not reach the origin")
+        val row = sink.awaitOne()
+        assertEquals(201, row.exchange.response?.code)
+        assertEquals("mocked", sink.body(row.responseBody))
+    }
+
+    @Test
+    fun aHeldRequestIsOfferedWholeAndItsEditReachesTheOrigin() {
+        val origin = origin { request, out ->
+            val length = request.first { it.startsWith("Content-Length:", true) }.substringAfter(':').trim().toInt()
+            out.respond("got $length")
+        }
+        var seen: String? = null
+        val proxy = proxy(
+            RecordingSink(),
+            rules(
+                intercepts = { Interception(holdRequest = true) },
+                onRequest = { request ->
+                    seen = request.body.utf8()
+                    RequestVerdict.Proceed(request.copy(body = "edited body!".encodeUtf8()))
+                },
+            ),
+        )
+
+        val response = proxy.request(
+            "POST http://127.0.0.1:${origin.port}/submit HTTP/1.1",
+            headers = listOf("Content-Length: 8"),
+            body = "original",
+        )
+
+        assertEquals("original", seen)
+        assertTrue(response.contains("got 12"), response)
+    }
+
+    @Test
+    fun aHeldResponseIsOfferedDecodedAndItsEditReachesTheClient() {
+        val compressed = ByteArrayOutputStream().also { out ->
+            GZIPOutputStream(out).use { it.write("secret payload".toByteArray()) }
+        }.toByteArray()
+        val origin = origin { _, out ->
+            out.write(
+                (
+                    "HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\n" +
+                        "Content-Length: ${compressed.size}\r\n\r\n"
+                    ).toByteArray(),
+            )
+            out.write(compressed)
+            out.flush()
+        }
+        var seen: String? = null
+        val sink = RecordingSink()
+        val proxy = proxy(
+            sink,
+            rules(
+                intercepts = { Interception(holdResponse = true) },
+                onResponse = { response ->
+                    seen = response.body.utf8()
+                    ResponseVerdict.Proceed(response.copy(code = 418, body = "rewritten".encodeUtf8()))
+                },
+            ),
+        )
+
+        val response = proxy.request("GET http://127.0.0.1:${origin.port}/gz HTTP/1.1")
+
+        assertEquals("secret payload", seen)
+        assertTrue(response.startsWith("HTTP/1.1 418"), response)
+        assertTrue(response.endsWith("rewritten"), response)
+        assertEquals("rewritten", sink.body(sink.awaitOne().responseBody))
+    }
+
+    @Test
+    fun anAbortedRequestFailsTheClientVisibly() {
+        val origin = origin { _, out -> out.respond("never") }
+        val proxy = proxy(RecordingSink(), rules(onRequest = { RequestVerdict.Abort }))
+
+        val response = proxy.request("GET http://127.0.0.1:${origin.port}/x HTTP/1.1")
+
+        assertTrue(response.startsWith("HTTP/1.1 502"), response)
+        assertTrue(response.contains("aborted at a Wailo breakpoint"), response)
+    }
+
+    @Test
+    fun aFilteredExchangeIsStillRelayedButNotRecorded() {
+        val origin = origin { _, out -> out.respond("served anyway") }
+        val sink = RecordingSink()
+        val proxy = proxy(sink, rules(intercepts = { Interception(record = false) }))
+
+        val response = proxy.request("GET http://127.0.0.1:${origin.port}/quiet HTTP/1.1")
+
+        assertTrue(response.contains("served anyway"), response)
+        assertTrue(sink.rowCount == 0, "a filtered exchange must not be recorded")
+    }
+
+    private fun proxy(sink: ProxyCaptureSink, rules: ProxyRules = ProxyRules.None): ProxyServer =
+        ProxyServer.start(0, sink, rules).also { closeables += it }
+
+    private fun rules(
+        intercepts: (String) -> Interception = { Interception() },
+        onRequest: (HttpRequest) -> RequestVerdict = { RequestVerdict.Proceed() },
+        onResponse: (HttpResponse) -> ResponseVerdict = { ResponseVerdict.Proceed() },
+    ): ProxyRules = object : ProxyRules {
+        override fun intercepts(method: String, url: String) = intercepts(url)
+        override fun onRequest(client: String, request: HttpRequest) = onRequest(request)
+        override fun onResponse(client: String, request: HttpRequest, response: HttpResponse) = onResponse(response)
+    }
 
     private fun origin(handle: (List<String>, OutputStream) -> Unit): TestOrigin =
         rawOrigin { input, output ->
@@ -314,6 +443,8 @@ private class RecordingSink(private val recording: Boolean = true) : ProxyCaptur
         rows += Row(exchange, client, requestBody, responseBody)
         recorded.countDown()
     }
+
+    val rowCount: Int get() = rows.size
 
     fun awaitOne(): Row {
         assertTrue(recorded.await(5, TimeUnit.SECONDS), "no exchange was recorded")

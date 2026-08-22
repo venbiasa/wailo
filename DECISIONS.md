@@ -79,3 +79,4 @@ reasoning in the ADR file, not here.
 | [0069](docs/decisions/ADR-0069-captured-bodies-live-in-an-encrypted-session-spool.md) | 2026-08-21 | accepted | Captured bodies live in an encrypted session spool, and an exchange only holds a reference (amends ADR-0061's in-memory traffic) |
 | [0070](docs/decisions/ADR-0070-the-proxy-is-an-additive-daemon-owned-capture-source.md) | 2026-08-22 | accepted | The proxy is an additive, daemon-owned capture source in a bundled `:proxy` module (extends ADR-0001/0058) |
 | [0071](docs/decisions/ADR-0071-https-starts-locked-and-connect-is-an-opaque-tunnel.md) | 2026-08-22 | accepted | HTTPS starts locked — `CONNECT` is an opaque tunnel until a host is explicitly unlocked (extends ADR-0070) |
+| [0072](docs/decisions/ADR-0072-a-hold-is-a-route-so-one-rule-set-serves-both-capture-paths.md) | 2026-08-22 | accepted | A hold carries a decision route, so one rule set serves both capture paths (extends ADR-0067/0070) |
