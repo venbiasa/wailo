@@ -140,6 +140,8 @@ cd studio && ./gradlew :proxy:test         # the relay, against loopback origins
 cd studio && ./gradlew :cli:installDist
 cd studio && ./cli/build/install/wailo-cli/bin/wailo-cli status # auto-starts the daemon; reports the MCP gate
 cd studio && ./cli/build/install/wailo-cli/bin/wailo-cli set_proxy --on # bundled proxy for SDK-less clients (ADR-0070)
+cd studio && ./cli/build/install/wailo-cli/bin/wailo-cli proxy_ca --out /tmp/wailo-root.pem # mint + export the local root (ADR-0073)
+cd studio && ./cli/build/install/wailo-cli/bin/wailo-cli set_proxy_decrypt --host api.example.com # unlock one host; --off relocks all
 cd studio && ./cli/build/install/wailo-cli/bin/wailo-cli set_mcp_access --off # revoke AI tool access (ADR-0059)
 cd studio && ./cli/build/install/wailo-cli/bin/wailo-cli set_seed --id s1 --url-pattern 'https://…/poll' --body-text '{}'
 cd studio && ./cli/build/install/wailo-cli/bin/wailo-cli fill_seeds # arm the library + sweep waiting holds (ADR-0067)
@@ -161,9 +163,10 @@ WAILO_HOME=$(mktemp -d) WAILO_CAPTURE_PORT=8991 ./cli/build/install/wailo-cli/bi
 ```
 
 `WAILO_HOME` isolates daemon files and settings. A test that also needs an independent Studio
-identity/pairing Keychain must set `WAILO_KEYCHAIN_SERVICE` to a unique disposable service name. A run that
-starts the proxy needs `WAILO_PROXY_PORT` for the same reason as the capture port — 9090 is one listener,
-and two daemons cannot share it.
+identity/pairing Keychain must set `WAILO_KEYCHAIN_SERVICE` to a unique disposable service name — which now
+also isolates the proxy's signing root, so a smoke run's `rotate_proxy_ca`/`remove_proxy_ca` cannot destroy a
+root the user has trusted. A run that starts the proxy needs `WAILO_PROXY_PORT` for the same reason as the
+capture port — 9090 is one listener, and two daemons cannot share it.
 
 Starting a daemon now also puts a menu bar item on screen (ADR-0065), which a scripted or CI run does not
 want: set `WAILO_NO_MENUBAR=1` alongside `WAILO_HOME` to suppress it.

@@ -34,6 +34,20 @@ data class ProxyStatus(
     val decryptHosts: List<String> = emptyList(),
 )
 
+/**
+ * The local root as a frontend may hold it (ADR-0073): what to show, and the PEM to hand a trust store.
+ * There is no field for the private key, and no call that produces one.
+ */
+data class ProxyCertificate(
+    val installed: Boolean,
+    val commonName: String = "",
+    val sha256: String = "",
+    val expiresEpochMs: Long = 0,
+    val pem: String = "",
+    /** Why there is none, when a caller asked for one — distinct from decryption merely being off. */
+    val error: String? = null,
+)
+
 const val DEFAULT_PROXY_PORT = 9090
 
 /**
@@ -49,13 +63,12 @@ internal class ProxyController(
     private val host: HeadlessHost,
     initialPort: Int = DEFAULT_PROXY_PORT,
     initialDecryptHosts: List<String> = emptyList(),
-    private val ca: WailoCertificateAuthority = WailoCertificateAuthority(
-        if (KeychainCertificateAuthorityStore.isSupported) {
-            KeychainCertificateAuthorityStore()
-        } else {
-            EphemeralCertificateAuthorityStore()
-        },
-    ),
+    /**
+     * Defaulted to a session-scoped root rather than the Keychain-backed one: reaching the login
+     * Keychain is the daemon entry point's decision to make, so nothing else — a test, a harness — can
+     * rotate away the root a user has already trusted.
+     */
+    private val ca: WailoCertificateAuthority = WailoCertificateAuthority(EphemeralCertificateAuthorityStore()),
     /** Trust used when dialling an origin, for reaching one behind a private root. Default is the JDK's. */
     private val upstream: SSLContext? = null,
 ) : Closeable {
@@ -106,6 +119,9 @@ internal class ProxyController(
 
     /** Mint the local root if there is not one yet, and hand back what a user needs to install it. */
     fun certificate(): CertificateAuthorityInfo? = ca.ensure().also { publish() }
+
+    /** Why there is no root, when a caller asked for one and did not get it. */
+    val certificateError: String? get() = ca.lastError
 
     fun rotateCertificate(): CertificateAuthorityInfo? = ca.rotate().also { publish() }
 

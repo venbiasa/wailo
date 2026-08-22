@@ -23,7 +23,7 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import okio.ByteString.Companion.toByteString
 
-internal const val DAEMON_CONTROL_PROTOCOL_VERSION = 8
+internal const val DAEMON_CONTROL_PROTOCOL_VERSION = 9
 
 /**
  * The one command whose socket is not answered and closed. The daemon holds it open and counts it as a
@@ -156,6 +156,10 @@ internal data class ProxyStatusDto(
     val connections: Int,
     val exchanges: Long,
     val error: String? = null,
+    val caInstalled: Boolean = false,
+    val caFingerprint: String = "",
+    val caExpiresEpochMs: Long = 0,
+    val decryptHosts: List<String> = emptyList(),
 ) {
     fun toDomain() = ProxyStatus(
         running = running,
@@ -163,11 +167,43 @@ internal data class ProxyStatusDto(
         connections = connections,
         exchanges = exchanges,
         error = error,
+        caInstalled = caInstalled,
+        caFingerprint = caFingerprint,
+        caExpiresEpochMs = caExpiresEpochMs,
+        decryptHosts = decryptHosts,
     )
 }
 
 @Serializable
 internal data class SetProxyRequest(val enabled: Boolean, val port: Int? = null)
+
+/** Replaces the allowlist wholesale rather than adding to it, so revoking is the same call as granting. */
+@Serializable
+internal data class SetProxyDecryptRequest(val hosts: List<String>)
+
+/**
+ * The local root as a frontend may see it (ADR-0073). [pem] is the certificate, never the key — there is
+ * no shape of this message that carries one. [error] explains an absent root, which otherwise reads
+ * exactly like decryption simply being off.
+ */
+@Serializable
+internal data class ProxyCertificateDto(
+    val installed: Boolean,
+    val commonName: String = "",
+    val sha256: String = "",
+    val expiresEpochMs: Long = 0,
+    val pem: String = "",
+    val error: String? = null,
+) {
+    fun toDomain() = ProxyCertificate(
+        installed = installed,
+        commonName = commonName,
+        sha256 = sha256,
+        expiresEpochMs = expiresEpochMs,
+        pem = pem,
+        error = error,
+    )
+}
 
 @Serializable
 internal data class BodyRefDto(val id: String, val size: Long) {
@@ -434,6 +470,19 @@ internal fun ProxyStatus.toDto() = ProxyStatusDto(
     connections = connections,
     exchanges = exchanges,
     error = error,
+    caInstalled = caInstalled,
+    caFingerprint = caFingerprint,
+    caExpiresEpochMs = caExpiresEpochMs,
+    decryptHosts = decryptHosts,
+)
+
+internal fun CertificateAuthorityInfo?.toDto(error: String? = null) = ProxyCertificateDto(
+    installed = this != null,
+    commonName = this?.commonName.orEmpty(),
+    sha256 = this?.sha256.orEmpty(),
+    expiresEpochMs = this?.notAfterEpochMs ?: 0,
+    pem = this?.pem.orEmpty(),
+    error = error.takeIf { this == null },
 )
 
 internal fun BodyRef.toDto() = BodyRefDto(id = id, size = size)

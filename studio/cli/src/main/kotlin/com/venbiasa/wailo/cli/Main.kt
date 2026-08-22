@@ -341,9 +341,44 @@ internal suspend fun dispatch(host: DaemonClient, args: ParsedArgs): CommandResu
         "proxy_status", "proxy-status" -> host.proxy.value.let { status ->
             CommandResult(
                 "proxy=${if (status.running) "on" else "off"} port=${status.port} " +
-                    "clients=${status.connections} exchanges=${status.exchanges}" +
+                    "clients=${status.connections} exchanges=${status.exchanges} " +
+                    "ca=${if (status.caInstalled) "installed" else "none"} " +
+                    "decrypt=${status.decryptHosts.ifEmpty { listOf("none") }.joinToString(",")}" +
                     (status.error?.let { " error=$it" } ?: ""),
             )
+        }
+        "set_proxy_decrypt", "set-proxy-decrypt" -> {
+            // --off is "relock everything", so revoking never means remembering what to omit.
+            val hosts = if (args.flag == false) emptyList() else args.hosts
+            if (hosts.isEmpty() && args.flag != false) {
+                return CommandResult("set_proxy_decrypt requires --host PATTERN, or --off to relock", exitCode = 2)
+            }
+            val status = host.setProxyDecryptHosts(hosts)
+            CommandResult("decrypt=${status.decryptHosts.ifEmpty { listOf("none") }.joinToString(",")}")
+        }
+        "proxy_ca", "proxy-ca" -> host.proxyCertificate().let { certificate ->
+            if (!certificate.installed) {
+                return CommandResult(
+                    "no local root: ${certificate.error ?: "this machine has nowhere to keep the key"}",
+                    exitCode = 1,
+                )
+            }
+            args.out?.let { path -> Files.writeString(Path.of(path), certificate.pem) }
+            CommandResult(
+                "ca=${certificate.commonName} sha256=${certificate.sha256} " +
+                    "expires=${certificate.expiresEpochMs}" +
+                    (args.out?.let { " written=$it" } ?: "\n${certificate.pem.trimEnd()}"),
+            )
+        }
+        "rotate_proxy_ca", "rotate-proxy-ca" -> host.rotateProxyCertificate().let { certificate ->
+            if (!certificate.installed) {
+                return CommandResult("rotate failed: ${certificate.error ?: "no local root"}", exitCode = 1)
+            }
+            CommandResult("ca=${certificate.commonName} sha256=${certificate.sha256} (reinstall it to keep decrypting)")
+        }
+        "remove_proxy_ca", "remove-proxy-ca" -> {
+            host.removeProxyCertificate()
+            CommandResult("ca=removed (also remove it from the system trust store)")
         }
         "status", "daemon_status", "daemon-status" -> CommandResult(
             "listening=${host.listening.value} port=${host.capturePort.value} " +
@@ -498,6 +533,10 @@ internal enum class Command(val verb: String) {
     Rebind("rebind"),
     SetProxy("set_proxy"),
     ProxyStatus("proxy_status"),
+    SetProxyDecrypt("set_proxy_decrypt"),
+    ProxyCa("proxy_ca"),
+    RotateProxyCa("rotate_proxy_ca"),
+    RemoveProxyCa("remove_proxy_ca"),
     SetMcpAccess("set_mcp_access"),
     SetMcpRedaction("set_mcp_redaction"),
     Status("status"),
@@ -521,8 +560,10 @@ internal data class ParsedArgs(
     val headers: List<String> = emptyList(),
     val allowPatterns: List<String> = emptyList(),
     val blockPatterns: List<String> = emptyList(),
+    val hosts: List<String> = emptyList(),
     val bodyFile: String? = null,
     val bodyText: String? = null,
+    val out: String? = null,
     val keep: Boolean = false,
 )
 
@@ -544,8 +585,10 @@ internal fun parseArgs(args: Array<String>): ParsedArgs? {
     val headers = mutableListOf<String>()
     val allowPatterns = mutableListOf<String>()
     val blockPatterns = mutableListOf<String>()
+    val hosts = mutableListOf<String>()
     var bodyFile: String? = null
     var bodyText: String? = null
+    var out: String? = null
     var keep = false
     var i = 1
     while (i < args.size) {
@@ -566,8 +609,10 @@ internal fun parseArgs(args: Array<String>): ParsedArgs? {
             "--header" -> headers += args.getOrNull(++i) ?: return null
             "--allow" -> allowPatterns += args.getOrNull(++i) ?: return null
             "--block" -> blockPatterns += args.getOrNull(++i) ?: return null
+            "--host" -> hosts += args.getOrNull(++i) ?: return null
             "--body-file" -> bodyFile = args.getOrNull(++i) ?: return null
             "--body-text" -> bodyText = args.getOrNull(++i) ?: return null
+            "--out" -> out = args.getOrNull(++i) ?: return null
             "--on" -> flag = true
             "--off" -> flag = false
             "--keep" -> keep = true
@@ -594,8 +639,10 @@ internal fun parseArgs(args: Array<String>): ParsedArgs? {
         headers = headers,
         allowPatterns = allowPatterns,
         blockPatterns = blockPatterns,
+        hosts = hosts,
         bodyFile = bodyFile,
         bodyText = bodyText,
+        out = out,
         keep = keep,
     )
 }
@@ -637,6 +684,10 @@ private fun printUsage() {
         wailo-cli rebind --port N
         wailo-cli set_proxy --on|--off [--port N]
         wailo-cli proxy_status
+        wailo-cli set_proxy_decrypt --host PATTERN... | --off
+        wailo-cli proxy_ca [--out PATH]
+        wailo-cli rotate_proxy_ca
+        wailo-cli remove_proxy_ca
         wailo-cli set_mcp_access --on|--off
         wailo-cli set_mcp_redaction --on|--off
 
@@ -650,7 +701,13 @@ private fun printUsage() {
 
         set_proxy starts the bundled HTTP proxy so traffic from anything on this machine — a browser, a
         CLI, a simulator — is captured without the SDK. It listens on loopback, off by default, and
-        tunnels HTTPS without decrypting it (ADR-0071). While it runs it keeps the daemon alive.
+        while it runs it keeps the daemon alive.
+
+        HTTPS starts locked: a CONNECT is tunnelled without being read (ADR-0071). Decrypting needs two
+        separate acts. proxy_ca mints the local root and prints it — or writes it with --out — for you to
+        trust in the OS; set_proxy_decrypt then names the hosts to unlock, and replaces the list each
+        time, so --off relocks everything. remove_proxy_ca forgets the root here, but you still have to
+        untrust it yourself.
 
         set_mcp_access gates whether AI tools reach this capture at all; set_mcp_redaction decides
         whether what they read has its credentials stripped. Both are also in Studio's Settings panel.

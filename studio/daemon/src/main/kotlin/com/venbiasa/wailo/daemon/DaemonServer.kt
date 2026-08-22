@@ -60,13 +60,15 @@ internal class DaemonRuntime(
     mcpAccess: Boolean = true,
     mcpRedactSecrets: Boolean = true,
     proxyPort: Int = DEFAULT_PROXY_PORT,
+    proxyDecryptHosts: List<String> = emptyList(),
+    certificateAuthority: WailoCertificateAuthority = WailoCertificateAuthority(EphemeralCertificateAuthorityStore()),
     private val fixtures: DaemonFixturesStore = DaemonFixturesStore(),
 ) : AutoCloseable {
     /**
      * The bundled proxy, off until something explicitly starts it (ADR-0070). Daemon-owned like every
      * other master, so a CLI or menu bar session can start and stop it with no window open.
      */
-    private val proxy = ProxyController(host, proxyPort)
+    private val proxy = ProxyController(host, proxyPort, proxyDecryptHosts, certificateAuthority)
 
     /** Whether the proxy is holding this daemon up: a client pointed at a dead one loses its network. */
     val proxyRunning: Boolean get() = proxy.running
@@ -205,6 +207,27 @@ internal class DaemonRuntime(
         val status = proxy.sample()
         settings.update { it.copy(proxyPort = port) }
         return status
+    }
+
+    /**
+     * Replace the set of hosts whose TLS is terminated (ADR-0071). `*` is honoured for the session but
+     * never written: an escape hatch that survived a restart would stop being one.
+     */
+    fun setProxyDecryptHosts(hosts: List<String>): ProxyStatus {
+        proxy.setDecryptHosts(hosts)
+        val applied = proxy.status.value.decryptHosts
+        settings.update { it.copy(proxyDecryptHosts = applied.filterNot { host -> host == "*" }) }
+        return proxy.status.value
+    }
+
+    /** Mint the local root if there is not one yet — the one call that may create a signing key. */
+    fun proxyCertificate(): ProxyCertificateDto = proxy.certificate().toDto(proxy.certificateError)
+
+    fun rotateProxyCertificate(): ProxyCertificateDto = proxy.rotateCertificate().toDto(proxy.certificateError)
+
+    fun removeProxyCertificate(): ProxyCertificateDto {
+        proxy.removeCertificate()
+        return null.toDto()
     }
 
     suspend fun rebind(port: Int): Boolean {
@@ -625,6 +648,18 @@ internal class DaemonServer(
                 DaemonJson.encodeToJsonElement(
                     runtime.setProxyPort(request.decode(IntValue.serializer()).value).toDto(),
                 ),
+            )
+            "set_proxy_decrypt" -> success(
+                DaemonJson.encodeToJsonElement(
+                    runtime.setProxyDecryptHosts(request.decode(SetProxyDecryptRequest.serializer()).hosts).toDto(),
+                ),
+            )
+            "proxy_certificate" -> success(DaemonJson.encodeToJsonElement(runtime.proxyCertificate()))
+            "rotate_proxy_certificate" -> success(
+                DaemonJson.encodeToJsonElement(runtime.rotateProxyCertificate()),
+            )
+            "remove_proxy_certificate" -> success(
+                DaemonJson.encodeToJsonElement(runtime.removeProxyCertificate()),
             )
             "set_capture_filter" -> {
                 val value = request.decode(CaptureFilterRequest.serializer())

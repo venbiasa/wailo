@@ -297,6 +297,30 @@ class DaemonClient internal constructor(
         return status
     }
 
+    /** Replace the hosts whose TLS the proxy terminates. Everything absent from [hosts] relocks. */
+    suspend fun setProxyDecryptHosts(hosts: List<String>): ProxyStatus {
+        val status = rpc.call(
+            "set_proxy_decrypt",
+            DaemonJson.encodeToJsonElement(SetProxyDecryptRequest(hosts)),
+            ProxyStatusDto.serializer(),
+        ).toDomain()
+        _proxy.value = status
+        return status
+    }
+
+    /**
+     * The local root, minting one if this is the first ask (ADR-0073). Separate from the status flow on
+     * purpose: polling for state must never be what puts a universal signing key on the machine.
+     */
+    suspend fun proxyCertificate(): ProxyCertificate =
+        rpc.call("proxy_certificate", JsonNull, ProxyCertificateDto.serializer()).toDomain()
+
+    suspend fun rotateProxyCertificate(): ProxyCertificate =
+        rpc.call("rotate_proxy_certificate", JsonNull, ProxyCertificateDto.serializer()).toDomain()
+
+    suspend fun removeProxyCertificate(): ProxyCertificate =
+        rpc.call("remove_proxy_certificate", JsonNull, ProxyCertificateDto.serializer()).toDomain()
+
     /**
      * Re-reads the AI tool gate straight from the daemon. Callers that enforce it must not wait for the
      * next poll: turning access off has to refuse the very next tool call, not one 200ms later.

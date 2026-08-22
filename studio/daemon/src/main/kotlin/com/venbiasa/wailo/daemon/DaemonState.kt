@@ -100,6 +100,13 @@ internal data class DaemonConfig(
      * silently re-point anything at it (ADR-0070).
      */
     val proxyPort: Int,
+    /**
+     * Host patterns whose TLS the proxy terminates. Durable, unlike the proxy switch itself: unlocking a
+     * host is a deliberate act the user should not have to repeat, and forgetting it would push them
+     * toward unlocking everything (ADR-0071). A `*` entry is deliberately not persisted here — the
+     * session-scoped escape hatch is set through the RPC and dies with the daemon.
+     */
+    val proxyDecryptHosts: List<String>,
 )
 
 /** Long enough that stepping away between CLI commands does not cost the session; 0 disables the exit. */
@@ -143,6 +150,11 @@ internal class DaemonSettings(
                 ?.takeIf { it in 1..65535 }
                 ?: values.getProperty(PROXY_PORT)?.toIntOrNull()?.takeIf { it in 1..65535 }
                 ?: DEFAULT_PROXY_PORT,
+            proxyDecryptHosts = values.getProperty(PROXY_DECRYPT_HOSTS)
+                ?.split(',')
+                ?.map { it.trim() }
+                ?.filter { it.isNotEmpty() && it != "*" }
+                .orEmpty(),
         )
     }
 
@@ -158,6 +170,7 @@ internal class DaemonSettings(
             setProperty(MCP_REDACT_SECRETS, config.mcpRedactSecrets.toString())
             setProperty(IDLE_LINGER_MINUTES, config.idleLingerMinutes.toString())
             setProperty(PROXY_PORT, config.proxyPort.toString())
+            setProperty(PROXY_DECRYPT_HOSTS, config.proxyDecryptHosts.filterNot { it == "*" }.joinToString(","))
         }
         Files.createDirectories(path.parent)
         setOwnerOnly(path.parent, directory = true)
@@ -202,6 +215,7 @@ internal class DaemonSettings(
         const val MCP_REDACT_SECRETS = "mcpRedactSecrets"
         const val IDLE_LINGER_MINUTES = "idleLingerMinutes"
         const val PROXY_PORT = "proxyPort"
+        const val PROXY_DECRYPT_HOSTS = "proxyDecryptHosts"
     }
 }
 

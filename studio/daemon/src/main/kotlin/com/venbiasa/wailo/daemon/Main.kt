@@ -28,6 +28,19 @@ fun main() {
     } else {
         InMemoryPairingKeyStore()
     }
+    // The proxy's signing root, on the same terms and for the same reason (ADR-0073). Without a
+    // Keychain it lives only for this process, so no machine ends up with a universal signing key in a
+    // plain file.
+    val certificateAuthority = WailoCertificateAuthority(
+        if (KeychainCertificateAuthorityStore.isSupported) {
+            System.getenv("WAILO_KEYCHAIN_SERVICE")
+                ?.takeIf { it.isNotBlank() }
+                ?.let(::KeychainCertificateAuthorityStore)
+                ?: KeychainCertificateAuthorityStore()
+        } else {
+            EphemeralCertificateAuthorityStore()
+        },
+    )
     // Opened before the host, because the engine is built around it and because clearing a dead
     // daemon's leftovers is the first thing this process owes the disk.
     val bodies = SpoolBodyStore.open()
@@ -59,6 +72,8 @@ fun main() {
         mcpAccess = config.mcpAccess,
         mcpRedactSecrets = config.mcpRedactSecrets,
         proxyPort = config.proxyPort,
+        proxyDecryptHosts = config.proxyDecryptHosts,
+        certificateAuthority = certificateAuthority,
     )
     val stopped = CountDownLatch(1)
     val stopping = AtomicBoolean()

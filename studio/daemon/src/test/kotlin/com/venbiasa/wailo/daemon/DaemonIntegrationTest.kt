@@ -12,6 +12,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertFails
+import kotlin.test.assertNotEquals
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlinx.coroutines.async
@@ -426,6 +427,60 @@ class DaemonIntegrationTest {
             } finally {
                 agent.close()
                 studio.close()
+            }
+        }
+    }
+
+    @Test
+    fun unlockingAHostPersistsButTheWildcardEscapeHatchDoesNot() = runBlocking {
+        val directory = Files.createTempDirectory("wailo-decrypt-hosts")
+        val settings = DaemonSettings(directory.resolve("settings.properties"))
+        try {
+            harness(directory, deleteDirectory = false).use { harness ->
+                val client = harness.client()
+                try {
+                    assertTrue(client.awaitReady())
+
+                    assertEquals(listOf("api.example.com"), client.setProxyDecryptHosts(listOf("api.example.com")).decryptHosts)
+                    assertEquals(listOf("api.example.com"), settings.load().proxyDecryptHosts)
+
+                    // `*` reads back for this session, so the user sees what they turned on, but it is
+                    // never written: an escape hatch that survived a restart would stop being one.
+                    assertEquals(listOf("*"), client.setProxyDecryptHosts(listOf("*")).decryptHosts)
+                    assertEquals(emptyList(), settings.load().proxyDecryptHosts)
+
+                    // Replace, never merge, so revoking is the same call as granting.
+                    assertEquals(emptyList(), client.setProxyDecryptHosts(emptyList()).decryptHosts)
+                } finally {
+                    client.close()
+                }
+            }
+        } finally {
+            directory.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun theRootIsExportedAsACertificateAndNeverAsAKey() = runBlocking {
+        harness().use { harness ->
+            val client = harness.client()
+            try {
+                assertTrue(client.awaitReady())
+                // Nothing has asked for a root, so nothing should have minted one (ADR-0073).
+                assertFalse(client.proxy.value.caInstalled)
+
+                val certificate = client.proxyCertificate()
+                assertTrue(certificate.installed, certificate.error)
+                assertTrue(certificate.pem.startsWith("-----BEGIN CERTIFICATE-----"))
+                assertFalse(certificate.pem.contains("PRIVATE KEY"))
+
+                val rotated = client.rotateProxyCertificate()
+                assertTrue(rotated.installed)
+                assertNotEquals(certificate.sha256, rotated.sha256)
+
+                assertFalse(client.removeProxyCertificate().installed)
+            } finally {
+                client.close()
             }
         }
     }
