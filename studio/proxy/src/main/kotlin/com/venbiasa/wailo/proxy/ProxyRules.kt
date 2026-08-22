@@ -4,6 +4,24 @@ import com.venbiasa.wailo.protocol.HttpRequest
 import com.venbiasa.wailo.protocol.HttpResponse
 import javax.net.ssl.SSLContext
 
+/** An HTTP proxy this relay forwards through, rather than dialling the origin itself. */
+class ProxyUpstream(val host: String, val port: Int)
+
+/**
+ * The proxy that was already configured on this machine, if there was one (ADR-0075).
+ *
+ * Asked per host so a bypass list can be honoured. Taking over the system proxy on a machine behind a
+ * corporate one has to keep working, and the only way is to forward through it — a relay that dialled
+ * origins directly would simply have no route.
+ */
+fun interface ProxyChain {
+    fun route(host: String): ProxyUpstream?
+
+    companion object {
+        val Direct: ProxyChain = ProxyChain { null }
+    }
+}
+
 /**
  * What the daemon wants from an exchange before any of its bytes move.
  *

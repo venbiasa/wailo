@@ -88,7 +88,10 @@ does not lose its network when a window closes. `CONNECT` is opaque unless the d
 for that host through `ProxyTls`, and a locked tunnel is still recorded as a row so "not decrypted" reads
 differently from "not captured" (ADR-0071). The local root that signs those leaves is the daemon's alone —
 Keychain-backed, minted lazily, exported as a certificate and never as a key (ADR-0073); never move key
-material into `proxy` or a frontend. `proxy` knows the *shape* of interception (`ProxyRules`) but never a
+material into `proxy` or a frontend. The macOS system-proxy takeover is the daemon's too: snapshot before
+writing, restore from that snapshot alone, and keep the record on disk so a killed daemon is undone by the
+next one — never re-read the machine's current settings to "restore" them, since by then they are Wailo's
+(ADR-0075). `proxy` knows the *shape* of interception (`ProxyRules`) but never a
 rule: the daemon's `HostProxyRules` evaluates the real sets, in ADR-0033's precedence, against the same
 registries the device snapshots come from. That matching order now exists twice — here and in
 `sdk-android`, which cannot depend on it — so a change to one is a change to both (ADR-0072).
@@ -143,6 +146,7 @@ cd studio && ./cli/build/install/wailo-cli/bin/wailo-cli set_proxy --on # bundle
 cd studio && ./cli/build/install/wailo-cli/bin/wailo-cli proxy_ca --out /tmp/wailo-root.pem # mint + export the local root (ADR-0073)
 cd studio && ./cli/build/install/wailo-cli/bin/wailo-cli set_proxy_decrypt --host api.example.com # unlock one host; --off relocks all
 cd studio && ./cli/build/install/wailo-cli/bin/wailo-cli set_proxy_lan --on # reachable by a phone, and an open relay while on (ADR-0074)
+cd studio && ./cli/build/install/wailo-cli/bin/wailo-cli set_system_proxy --on # point this Mac at Wailo; restored on stop (ADR-0075)
 cd studio && ./cli/build/install/wailo-cli/bin/wailo-cli set_mcp_access --off # revoke AI tool access (ADR-0059)
 cd studio && ./cli/build/install/wailo-cli/bin/wailo-cli set_seed --id s1 --url-pattern 'https://…/poll' --body-text '{}'
 cd studio && ./cli/build/install/wailo-cli/bin/wailo-cli fill_seeds # arm the library + sweep waiting holds (ADR-0067)

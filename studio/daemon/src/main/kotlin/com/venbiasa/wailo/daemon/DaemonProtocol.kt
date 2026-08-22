@@ -162,6 +162,9 @@ internal data class ProxyStatusDto(
     val decryptHosts: List<String> = emptyList(),
     val lan: Boolean = false,
     val lanAddress: String = "",
+    val systemProxy: Boolean = false,
+    val systemProxySupported: Boolean = false,
+    val chainedTo: String = "",
 ) {
     fun toDomain() = ProxyStatus(
         running = running,
@@ -175,6 +178,9 @@ internal data class ProxyStatusDto(
         decryptHosts = decryptHosts,
         lan = lan,
         lanAddress = lanAddress,
+        systemProxy = systemProxy,
+        systemProxySupported = systemProxySupported,
+        chainedTo = chainedTo,
     )
 }
 
@@ -480,6 +486,9 @@ internal fun ProxyStatus.toDto() = ProxyStatusDto(
     decryptHosts = decryptHosts,
     lan = lan,
     lanAddress = lanAddress,
+    systemProxy = systemProxy,
+    systemProxySupported = systemProxySupported,
+    chainedTo = chainedTo,
 )
 
 internal fun CertificateAuthorityInfo?.toDto(error: String? = null) = ProxyCertificateDto(

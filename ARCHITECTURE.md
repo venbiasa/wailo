@@ -153,6 +153,13 @@ is the SDK regardless of which transport carried it (LAN WebSocket, usbmux, or `
   which the capture socket answers with pairing and a proxy cannot, since the client is by definition
   something Wailo does not control. The choice persists so a phone set up once keeps working; the proxy
   still does not start on its own, so a persisted `true` cannot put a relay on a network by itself.
+- **The macOS takeover snapshots first, to disk, and chains upstream** (ADR-0075). `SystemProxyController`
+  captures every active service's proxy settings through `networksetup` *before* writing, replays exactly
+  that to restore, and writes the snapshot to `WAILO_HOME` so a daemon that was killed rather than closed
+  is undone by the next one at start-up. The snapshot doubles as upstream discovery: a machine already
+  behind a proxy is forwarded through it via `ProxyChain`, because for that machine the setting Wailo
+  would overwrite is its only route out. Unlike the port and the allowlist, the takeover is session
+  state — the disk record exists to undo one, never to reinstate one.
 
 ## Multi-session model
 

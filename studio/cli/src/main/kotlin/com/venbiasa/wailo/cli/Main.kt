@@ -344,8 +344,29 @@ internal suspend fun dispatch(host: DaemonClient, args: ParsedArgs): CommandResu
                     "bind=${if (status.lan) "lan" else "loopback"} " +
                     "clients=${status.connections} exchanges=${status.exchanges} " +
                     "ca=${if (status.caInstalled) "installed" else "none"} " +
-                    "decrypt=${status.decryptHosts.ifEmpty { listOf("none") }.joinToString(",")}" +
+                    "decrypt=${status.decryptHosts.ifEmpty { listOf("none") }.joinToString(",")} " +
+                    "system=${if (status.systemProxy) "on" else "off"}" +
+                    (status.chainedTo.takeIf { it.isNotEmpty() }?.let { " via=$it" } ?: "") +
                     (status.error?.let { " error=$it" } ?: ""),
+            )
+        }
+        "set_system_proxy", "set-system-proxy" -> {
+            val enabled = args.flag ?: return CommandResult("set_system_proxy requires --on or --off", exitCode = 2)
+            val status = host.setSystemProxy(enabled)
+            if (enabled && !status.systemProxy) {
+                return CommandResult(
+                    "system=off error=${status.error ?: "this machine's proxy settings could not be changed"}",
+                    exitCode = 1,
+                )
+            }
+            CommandResult(
+                if (status.systemProxy) {
+                    "system=on address=${status.reachableAddress}" +
+                        (status.chainedTo.takeIf { it.isNotEmpty() }?.let { " via=$it" } ?: "") +
+                        "\nThis machine now goes through Wailo. It is restored when the proxy stops."
+                } else {
+                    "system=off (settings restored)"
+                },
             )
         }
         "set_proxy_lan", "set-proxy-lan" -> {
@@ -548,6 +569,7 @@ internal enum class Command(val verb: String) {
     SetProxy("set_proxy"),
     ProxyStatus("proxy_status"),
     SetProxyLan("set_proxy_lan"),
+    SetSystemProxy("set_system_proxy"),
     SetProxyDecrypt("set_proxy_decrypt"),
     ProxyCa("proxy_ca"),
     RotateProxyCa("rotate_proxy_ca"),
@@ -700,6 +722,7 @@ private fun printUsage() {
         wailo-cli set_proxy --on|--off [--port N]
         wailo-cli proxy_status
         wailo-cli set_proxy_lan --on|--off
+        wailo-cli set_system_proxy --on|--off
         wailo-cli set_proxy_decrypt --host PATTERN... | --off
         wailo-cli proxy_ca [--out PATH]
         wailo-cli rotate_proxy_ca
@@ -720,6 +743,10 @@ private fun printUsage() {
         while it runs it keeps the daemon alive. set_proxy_lan binds it to every interface so a phone or
         another machine can use it, which also makes it an open relay for anything on that network — so
         it is opt-in, and worth turning off when you are done.
+
+        set_system_proxy points this Mac's own network settings at Wailo and forwards through whatever
+        proxy was already configured, so a machine behind one keeps working. The settings are snapshotted
+        first and put back when the proxy stops, including on the way out.
 
         HTTPS starts locked: a CONNECT is tunnelled without being read (ADR-0071). Decrypting needs two
         separate acts. proxy_ca mints the local root and prints it — or writes it with --out — for you to

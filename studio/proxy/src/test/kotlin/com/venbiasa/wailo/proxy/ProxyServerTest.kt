@@ -167,6 +167,48 @@ class ProxyServerTest {
     }
 
     @Test
+    fun aChainedRequestGoesThroughTheProxyThisMachineAlreadyHad() {
+        val origin = origin { request, out -> out.respond(request.first().trim()) }
+        // A second relay standing in for the corporate proxy Wailo took over from. Taking it over must
+        // not remove the only route to the network (ADR-0075).
+        val corporate = proxy(RecordingSink())
+        val sink = RecordingSink()
+        val wailo = proxy(sink, chain = ProxyChain { ProxyUpstream("127.0.0.1", corporate.port) })
+
+        val response = wailo.request("GET http://127.0.0.1:${origin.port}/through HTTP/1.1")
+
+        // The origin echoes the request line it received: origin form, because the last hop was the
+        // upstream dialling it — which is what proves the request went through the upstream, not around.
+        assertTrue(response.contains("GET /through HTTP/1.1"), response)
+        assertEquals(1, corporate.exchangeCount, "the upstream must have carried it")
+        assertEquals("http://127.0.0.1:${origin.port}/through", sink.awaitOne().exchange.request?.url)
+    }
+
+    @Test
+    fun aChainedTunnelIsCarriedByTheUpstreamsOwnConnect() {
+        val origin = rawOrigin { input, output ->
+            output.write(input.readNBytes(5))
+            output.flush()
+        }
+        val corporate = proxy(RecordingSink())
+        val sink = RecordingSink()
+        val wailo = proxy(sink, chain = ProxyChain { ProxyUpstream("127.0.0.1", corporate.port) })
+
+        Socket().use { client ->
+            client.connect(InetSocketAddress(InetAddress.getLoopbackAddress(), wailo.port), 2_000)
+            client.soTimeout = 5_000
+            val out = client.getOutputStream()
+            out.write("CONNECT 127.0.0.1:${origin.port} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n".toByteArray())
+            out.flush()
+            val input = client.getInputStream()
+            assertEquals("200", readHead(input)?.second)
+            out.write("bytes".toByteArray())
+            out.flush()
+            assertEquals("bytes", String(input.readNBytes(5)))
+        }
+    }
+
+    @Test
     fun browsingToTheProxyPortExplainsItself() {
         val proxy = proxy(RecordingSink())
 
@@ -319,8 +361,11 @@ class ProxyServerTest {
         assertTrue(sink.rowCount == 0, "a filtered exchange must not be recorded")
     }
 
-    private fun proxy(sink: ProxyCaptureSink, rules: ProxyRules = ProxyRules.None): ProxyServer =
-        ProxyServer.start(0, sink, rules).also { closeables += it }
+    private fun proxy(
+        sink: ProxyCaptureSink,
+        rules: ProxyRules = ProxyRules.None,
+        chain: ProxyChain = ProxyChain.Direct,
+    ): ProxyServer = ProxyServer.start(0, sink, rules, chain = chain).also { closeables += it }
 
     private fun rules(
         intercepts: (String) -> Interception = { Interception() },

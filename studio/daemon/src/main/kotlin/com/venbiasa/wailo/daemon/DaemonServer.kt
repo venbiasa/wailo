@@ -63,13 +63,21 @@ internal class DaemonRuntime(
     proxyDecryptHosts: List<String> = emptyList(),
     proxyLan: Boolean = false,
     certificateAuthority: WailoCertificateAuthority = WailoCertificateAuthority(EphemeralCertificateAuthorityStore()),
+    systemProxy: SystemProxyController = SystemProxyController(),
     private val fixtures: DaemonFixturesStore = DaemonFixturesStore(),
 ) : AutoCloseable {
     /**
      * The bundled proxy, off until something explicitly starts it (ADR-0070). Daemon-owned like every
      * other master, so a CLI or menu bar session can start and stop it with no window open.
      */
-    private val proxy = ProxyController(host, proxyPort, proxyDecryptHosts, proxyLan, certificateAuthority)
+    private val proxy = ProxyController(
+        host = host,
+        initialPort = proxyPort,
+        initialDecryptHosts = proxyDecryptHosts,
+        initialLan = proxyLan,
+        ca = certificateAuthority,
+        system = systemProxy,
+    )
 
     /** Whether the proxy is holding this daemon up: a client pointed at a dead one loses its network. */
     val proxyRunning: Boolean get() = proxy.running
@@ -230,6 +238,13 @@ internal class DaemonRuntime(
         settings.update { it.copy(proxyLan = enabled) }
         return status
     }
+
+    /**
+     * Point this machine at the proxy, or put its settings back (ADR-0075). Session state on purpose:
+     * a daemon that reclaimed the system proxy on every start would take over a machine nobody asked it
+     * to, and it always restores on the way out.
+     */
+    fun setSystemProxy(enabled: Boolean): ProxyStatus = proxy.setSystemProxy(enabled)
 
     /** Mint the local root if there is not one yet — the one call that may create a signing key. */
     fun proxyCertificate(): ProxyCertificateDto = proxy.certificate().toDto(proxy.certificateError)
@@ -668,6 +683,11 @@ internal class DaemonServer(
             "set_proxy_lan" -> success(
                 DaemonJson.encodeToJsonElement(
                     runtime.setProxyLan(request.decode(BooleanValue.serializer()).value).toDto(),
+                ),
+            )
+            "set_system_proxy" -> success(
+                DaemonJson.encodeToJsonElement(
+                    runtime.setSystemProxy(request.decode(BooleanValue.serializer()).value).toDto(),
                 ),
             )
             "proxy_certificate" -> success(DaemonJson.encodeToJsonElement(runtime.proxyCertificate()))

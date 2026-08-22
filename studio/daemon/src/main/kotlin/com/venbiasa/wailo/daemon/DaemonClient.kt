@@ -311,6 +311,20 @@ class DaemonClient internal constructor(
         return status
     }
 
+    /**
+     * Point this machine's own network settings at the proxy, or restore them (ADR-0075). Turning it on
+     * starts the proxy too: the two being out of step is a machine with no network.
+     */
+    suspend fun setSystemProxy(enabled: Boolean): ProxyStatus {
+        val status = rpc.call(
+            "set_system_proxy",
+            DaemonJson.encodeToJsonElement(BooleanValue(enabled)),
+            ProxyStatusDto.serializer(),
+        ).toDomain()
+        _proxy.value = status
+        return status
+    }
+
     /** Replace the hosts whose TLS the proxy terminates. Everything absent from [hosts] relocks. */
     suspend fun setProxyDecryptHosts(hosts: List<String>): ProxyStatus {
         val status = rpc.call(

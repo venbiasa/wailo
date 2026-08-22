@@ -10,6 +10,7 @@ import com.venbiasa.wailo.protocol.HttpExchange
 import com.venbiasa.wailo.proxy.ProxyBodyRef
 import com.venbiasa.wailo.proxy.ProxyBodySink
 import com.venbiasa.wailo.proxy.ProxyCaptureSink
+import com.venbiasa.wailo.proxy.ProxyChain
 import com.venbiasa.wailo.proxy.ProxyServer
 import com.venbiasa.wailo.proxy.ProxyTls
 import java.io.Closeable
@@ -40,6 +41,11 @@ data class ProxyStatus(
     val caExpiresEpochMs: Long = 0,
     /** Host patterns the user unlocked. Everything else stays an opaque tunnel. */
     val decryptHosts: List<String> = emptyList(),
+    /** Whether this machine's own network settings currently point at Wailo (ADR-0075). */
+    val systemProxy: Boolean = false,
+    val systemProxySupported: Boolean = false,
+    /** The proxy that was already configured here, which Wailo now forwards through. */
+    val chainedTo: String = "",
 ) {
     /** What to actually point a client at — the LAN address only once it is one a client could use. */
     val reachableAddress: String
@@ -84,9 +90,11 @@ internal class ProxyController(
     private val ca: WailoCertificateAuthority = WailoCertificateAuthority(EphemeralCertificateAuthorityStore()),
     /** Trust used when dialling an origin, for reaching one behind a private root. Default is the JDK's. */
     private val upstream: SSLContext? = null,
+    private val system: SystemProxyController = SystemProxyController(),
 ) : Closeable {
     private val engine: WailoEngine get() = host.engine
     private val rules = HostProxyRules(host)
+    private val chain = ProxyChain(system::upstreamFor)
 
     @Volatile
     private var decryptHosts: List<String> = initialDecryptHosts
@@ -119,9 +127,9 @@ internal class ProxyController(
 
     @Synchronized
     fun start(port: Int = _status.value.port): Boolean {
-        stop()
+        stopListener()
         return try {
-            val started = ProxyServer.start(port, EngineProxyCaptureSink(engine), rules, tls, lan)
+            val started = ProxyServer.start(port, EngineProxyCaptureSink(engine), rules, tls, lan, chain)
             server = started
             _status.value = describe(running = true, port = started.port)
             true
@@ -164,6 +172,7 @@ internal class ProxyController(
     private fun describe(running: Boolean, port: Int, error: String? = null): ProxyStatus {
         // Read rather than mint: asking for the status must not be what creates a signing key.
         val root = ca.current()
+        val machine = system.state()
         return ProxyStatus(
             running = running,
             port = port,
@@ -174,7 +183,29 @@ internal class ProxyController(
             decryptHosts = decryptHosts,
             lan = lan,
             lanAddress = engine.lanAddress.value.takeUnless { it == "localhost" }.orEmpty(),
+            systemProxy = machine.active,
+            systemProxySupported = machine.supported,
+            chainedTo = machine.chainedTo?.let { "${it.host}:${it.port}" }.orEmpty(),
         )
+    }
+
+    /**
+     * Point this machine's own network settings at the proxy, or put them back (ADR-0075).
+     *
+     * Turning it on starts the proxy if it is not already running, because the failure mode of the two
+     * being out of step is a machine with no network at all.
+     */
+    @Synchronized
+    fun setSystemProxy(enabled: Boolean): ProxyStatus {
+        if (!enabled) {
+            val restored = system.restore()
+            _status.value = describe(running = running, port = _status.value.port, error = restored.error)
+            return _status.value
+        }
+        if (!running && !start(_status.value.port)) return _status.value
+        val applied = system.apply(_status.value.port)
+        _status.value = describe(running = running, port = _status.value.port, error = applied.error)
+        return _status.value
     }
 
     /**
@@ -191,13 +222,24 @@ internal class ProxyController(
 
     @Synchronized
     fun stop() {
+        // Before the listener, and even when there is none: a machine still pointed at a proxy that is
+        // no longer there has no network, which is the one failure worse than losing a capture.
+        system.restore()
+        stopListener()
+        _status.value = describe(running = false, port = _status.value.port).copy(connections = 0)
+    }
+
+    /**
+     * Close the listener without touching the machine's settings — what a rebind does. A restart must
+     * not look like a stop to the system proxy, or changing the port would quietly undo the takeover.
+     */
+    private fun stopListener() {
         val current = server ?: return
         server = null
         // Holds first: a client parked on a breakpoint has no other route to its origin, so an orderly
         // stop that just closed the listener would leave it waiting on a decision nothing can make.
         rules.releaseAll()
         runCatching { current.close() }
-        _status.value = _status.value.copy(running = false, connections = 0, error = null)
     }
 
     /** Refresh the counters the panel and the menu bar read; they only change as traffic flows. */
@@ -218,7 +260,10 @@ internal class ProxyController(
             _status.value = _status.value.copy(port = port, error = null)
             return true
         }
-        return start(port)
+        val moved = start(port)
+        // A machine pointed at the old port would have no network, so the takeover follows the listener.
+        if (moved) system.retarget(_status.value.port)
+        return moved
     }
 
     override fun close() = stop()

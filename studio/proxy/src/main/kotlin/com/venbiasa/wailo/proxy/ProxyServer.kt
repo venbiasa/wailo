@@ -9,6 +9,7 @@ import java.io.BufferedOutputStream
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.Closeable
+import java.io.EOFException
 import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
@@ -48,6 +49,7 @@ class ProxyServer private constructor(
     private val sink: ProxyCaptureSink,
     private val rules: ProxyRules,
     private val tls: ProxyTls,
+    private val chain: ProxyChain,
 ) : Closeable {
     private val executor: ExecutorService = Executors.newVirtualThreadPerTaskExecutor()
     private val closed = AtomicBoolean()
@@ -235,10 +237,11 @@ class ProxyServer private constructor(
             return false
         }
 
-        upstream.use {
+        upstream.socket.use {
             val upstreamIn = BufferedInputStream(it.getInputStream(), RELAY_BUFFER_BYTES)
             val upstreamOut = BufferedOutputStream(it.getOutputStream(), RELAY_BUFFER_BYTES)
-            val sent = sendRequest(upstreamOut, head, target, request, held, requestFrame, clientIn, intent)
+            val route = target.takeUnless { _ -> upstream.absoluteForm } ?: target.asAbsoluteForm()
+            val sent = sendRequest(upstreamOut, head, route, request, held, requestFrame, clientIn, intent)
             upstreamOut.flush()
 
             val responseHead = readHead(upstreamIn)
@@ -470,13 +473,13 @@ class ProxyServer private constructor(
      * JDK's default, so Wailo refuses an origin a browser would have refused — decrypting a user's own
      * traffic must not also quietly stop checking who is on the other end.
      */
-    private fun openUpstream(target: ProxyTarget): Socket {
-        val socket = Socket().apply {
-            tcpNoDelay = true
-            connect(InetSocketAddress(target.host, target.port), CONNECT_TIMEOUT_MS)
-            soTimeout = READ_TIMEOUT_MS
-        }
-        if (!target.secure) return socket
+    private fun openUpstream(target: ProxyTarget): Upstream {
+        val via = chain.route(target.host)
+        // A plain request to a proxy is written in absolute form and sent to the proxy's own socket, so
+        // there is nothing to tunnel — only the request line changes.
+        if (via != null && !target.secure) return Upstream(dial(via.host, via.port), absoluteForm = true)
+        val socket = if (via == null) dial(target.host, target.port) else tunnelThrough(via, target.host, target.port)
+        if (!target.secure) return Upstream(socket, absoluteForm = false)
         return runCatching {
             tls.upstream().socketFactory
                 .createSocket(socket, target.host, target.port, true)
@@ -484,8 +487,35 @@ class ProxyServer private constructor(
         }.getOrElse {
             runCatching { socket.close() }
             throw IOException("TLS handshake with ${target.host} failed: ${it.message}", it)
+        }.let { Upstream(it, absoluteForm = false) }
+    }
+
+    private fun dial(host: String, port: Int): Socket = Socket().apply {
+        tcpNoDelay = true
+        connect(InetSocketAddress(host, port), CONNECT_TIMEOUT_MS)
+        soTimeout = READ_TIMEOUT_MS
+    }
+
+    /** A raw path to `host:port` carried by [via]'s own `CONNECT`, for TLS Wailo will not be reading. */
+    private fun tunnelThrough(via: ProxyUpstream, host: String, port: Int): Socket {
+        val socket = dial(via.host, via.port)
+        return try {
+            socket.getOutputStream().apply {
+                write("CONNECT $host:$port HTTP/1.1\r\nHost: $host:$port\r\n\r\n".toByteArray(Charsets.ISO_8859_1))
+                flush()
+            }
+            val answer = readHead(socket.getInputStream()) ?: throw EOFException("no answer")
+            val code = answer.second.toIntOrNull()
+            if (code != 200) throw IOException("refused CONNECT to $host:$port with $code")
+            socket
+        } catch (failure: IOException) {
+            runCatching { socket.close() }
+            throw IOException("upstream proxy ${via.host}:${via.port} ${failure.message}", failure)
         }
     }
+
+    /** A route to the origin, and whether it needs the request line an HTTP proxy expects. */
+    private class Upstream(val socket: Socket, val absoluteForm: Boolean)
 
     /**
      * Open an opaque `CONNECT` tunnel. The row is recorded the moment the tunnel is established rather
@@ -504,10 +534,7 @@ class ProxyServer private constructor(
         val intent = runCatching { rules.intercepts("CONNECT", "https://$host:$port") }
             .getOrDefault(Interception())
         val upstream = try {
-            Socket().apply {
-                tcpNoDelay = true
-                connect(InetSocketAddress(host, port), CONNECT_TIMEOUT_MS)
-            }
+            chain.route(host)?.let { tunnelThrough(it, host, port) } ?: dial(host, port)
         } catch (failure: IOException) {
             respondDirectly(clientOut, 502, "Bad Gateway", "Wailo could not reach $host:$port.")
             record(
@@ -828,12 +855,13 @@ class ProxyServer private constructor(
             rules: ProxyRules = ProxyRules.None,
             tls: ProxyTls = ProxyTls.Locked,
             lan: Boolean = false,
+            chain: ProxyChain = ProxyChain.Direct,
         ): ProxyServer {
             val socket = ServerSocket()
             socket.reuseAddress = true
             val bindTo = if (lan) InetAddress.getByName("0.0.0.0") else InetAddress.getLoopbackAddress()
             socket.bind(InetSocketAddress(bindTo, port))
-            return ProxyServer(socket, sink, rules, tls).also(ProxyServer::start)
+            return ProxyServer(socket, sink, rules, tls, chain).also(ProxyServer::start)
         }
     }
 }
@@ -845,6 +873,12 @@ internal class ProxyTarget(
     val url: String,
     val secure: Boolean = false,
 ) {
+    /**
+     * The same target with the whole URL as its request-target, which is what an HTTP proxy expects and
+     * an origin does not. The `Host` header is unchanged, so the origin still sees what it should.
+     */
+    fun asAbsoluteForm() = ProxyTarget(host, port, url, url, secure)
+
     /** The same authority, re-pointed at an origin-form request-target read inside a decrypted tunnel. */
     fun within(requestTarget: String): ProxyTarget {
         val path = requestTarget.ifEmpty { "/" }

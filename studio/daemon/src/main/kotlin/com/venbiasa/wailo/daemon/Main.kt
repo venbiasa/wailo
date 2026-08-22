@@ -16,6 +16,12 @@ fun main() {
         System.err.println("wailo-daemon: another daemon already owns this user's Wailo state")
         exitProcess(0)
     }
+    // Before anything binds or dials: if the last daemon was killed while it owned the system proxy,
+    // this machine is currently pointed at a listener that no longer exists (ADR-0075).
+    val systemProxy = SystemProxyController()
+    if (systemProxy.recover()) {
+        System.err.println("wailo-daemon: restored the system proxy settings a previous run left behind")
+    }
     val settings = DaemonSettings()
     val config = settings.load()
     val keyStore = if (KeychainPairingKeyStore.isSupported) {
@@ -75,6 +81,7 @@ fun main() {
         proxyDecryptHosts = config.proxyDecryptHosts,
         proxyLan = config.proxyLan,
         certificateAuthority = certificateAuthority,
+        systemProxy = systemProxy,
     )
     val stopped = CountDownLatch(1)
     val stopping = AtomicBoolean()
