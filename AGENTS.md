@@ -28,6 +28,10 @@ persistent local daemon shared by the Kotlin Multiplatform desktop app, CLI, and
    `sdk-android` — the former `core` module was folded in (ADR-0011). `sdk-ios` reimplements the same
    thin logic in Swift. There is no shared device-side Kotlin module; consistency across the two SDKs
    is kept only by the `protocol` wire contract, never by shared code.
+5. A retained exchange holds body *references*, never body bytes (ADR-0069). `engine` spools payloads to
+   its `BodyStore` on receipt and the daemon's implementation keeps them encrypted on disk, so a capture
+   is bounded by the volume, not by RAM. Never put bytes back on `CapturedExchange`, in a snapshot, or in
+   a poll; fetch a bounded range when something is actually about to show or send it.
 
 ## Module dependency rules
 
@@ -42,6 +46,7 @@ wailo-android-panel, plugin:
   protocol    -> (Wire Swift codegen) -> sdk-ios <- sample-ios
 
 studio build (studio/, modern — ADR-0015); consumes wailo-protocol from Maven Local:
+  wailo-protocol <- proxy <- daemon
   wailo-protocol <- engine <- host <- daemon <- desktopApp
   wailo-protocol <- engine <- host <- daemon <- cli
   wailo-protocol <- engine <- host <- daemon <- mcp
@@ -72,6 +77,15 @@ system colour it. Never pick that colour here — the menu bar turns dark over a
 is still in light mode, so a glyph coloured from `AppleInterfaceStyle` is black on black for exactly the
 users who have one.
 
+`proxy` is the bundled MITM listener — the second capture path, for anything that cannot host the SDK
+(ADR-0070). It depends on `protocol` and the JDK and nothing else, so the relay cannot reach capture state;
+`daemon` is the only module that adapts it, mapping its output onto `CapturedExchange` with
+`CaptureSource.PROXY` and its bodies into the same encrypted spool. Never let it import `engine`, `host`, or
+`shared`, and never let a frontend bind it — the daemon owns the listener, so a browser pointed at Wailo
+does not lose its network when a window closes. `CONNECT` is an opaque tunnel: this module never terminates
+TLS, and a locked tunnel is still recorded as a row so "not decrypted" reads differently from "not
+captured" (ADR-0071).
+
 `sdk-android-panel` is the on-device panel (Compose + a ZXing QR scanner + a launcher shortcut). It is a
 consumer of `sdk-android`, never the other way round, and hosts wire it as `debugImplementation` so its
 `CAMERA` permission and second launcher icon cannot reach a release build (ADR-0049). Its name says what
@@ -87,7 +101,7 @@ from the desktop `shared` module.
 ## Build & verify
 
 > **Run Gradle from the right directory.** Two builds, two wrappers, two Gradle versions: the SDK build is
-> the repo root (`./gradlew`, 8.11.1); the studio build (`engine`/`host`/`daemon`/`shared`/frontends) is `studio/`
+> the repo root (`./gradlew`, 8.11.1); the studio build (`engine`/`host`/`proxy`/`daemon`/`shared`/frontends) is `studio/`
 > (`studio/gradlew`, 9.3.1). Build studio modules from `studio/` (`cd studio && ./gradlew …`), never from
 > root. See `.cursor/rules/gradle-build-directories.mdc`.
 
@@ -112,11 +126,13 @@ cd sample-ios && xcodegen generate && xcodebuild -scheme WailoSampleiOS -sdk iph
 # KMP sample (iOS framework): ./gradlew :sample-kmp:shared:linkDebugFrameworkIosSimulatorArm64
 #   then: cd sample-kmp/iosApp && xcodegen generate && xcodebuild -scheme WailoKmpSampleiOS -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' build CODE_SIGNING_ALLOWED=NO
 
-# --- studio build (studio/): engine, host, daemon, shared, desktopApp, cli, mcp, menubar ---
+# --- studio build (studio/): engine, host, proxy, daemon, shared, desktopApp, cli, mcp, menubar ---
 cd studio && ./gradlew build               # consumes wailo-protocol from Maven Local
 cd studio && ./gradlew :daemon:test :cli:test :mcp:test # shared service + headless frontends
+cd studio && ./gradlew :proxy:test         # the relay, against loopback origins (no network needed)
 cd studio && ./gradlew :cli:installDist
 cd studio && ./cli/build/install/wailo-cli/bin/wailo-cli status # auto-starts the daemon; reports the MCP gate
+cd studio && ./cli/build/install/wailo-cli/bin/wailo-cli set_proxy --on # bundled proxy for SDK-less clients (ADR-0070)
 cd studio && ./cli/build/install/wailo-cli/bin/wailo-cli set_mcp_access --off # revoke AI tool access (ADR-0059)
 cd studio && ./cli/build/install/wailo-cli/bin/wailo-cli set_seed --id s1 --url-pattern 'https://…/poll' --body-text '{}'
 cd studio && ./cli/build/install/wailo-cli/bin/wailo-cli fill_seeds # arm the library + sweep waiting holds (ADR-0067)
@@ -138,7 +154,9 @@ WAILO_HOME=$(mktemp -d) WAILO_CAPTURE_PORT=8991 ./cli/build/install/wailo-cli/bi
 ```
 
 `WAILO_HOME` isolates daemon files and settings. A test that also needs an independent Studio
-identity/pairing Keychain must set `WAILO_KEYCHAIN_SERVICE` to a unique disposable service name.
+identity/pairing Keychain must set `WAILO_KEYCHAIN_SERVICE` to a unique disposable service name. A run that
+starts the proxy needs `WAILO_PROXY_PORT` for the same reason as the capture port — 9090 is one listener,
+and two daemons cannot share it.
 
 Starting a daemon now also puts a menu bar item on screen (ADR-0065), which a scripted or CI run does not
 want: set `WAILO_NO_MENUBAR=1` alongside `WAILO_HOME` to suppress it.

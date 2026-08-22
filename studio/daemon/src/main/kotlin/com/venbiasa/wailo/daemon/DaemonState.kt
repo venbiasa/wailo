@@ -94,6 +94,12 @@ internal data class DaemonConfig(
     val mcpAccess: Boolean,
     val mcpRedactSecrets: Boolean,
     val idleLingerMinutes: Int,
+    /**
+     * Where the bundled proxy listens when it is started. Only the port persists: a fresh daemon always
+     * starts with proxying off, because a CLI or MCP command that happened to spawn one must not
+     * silently re-point anything at it (ADR-0070).
+     */
+    val proxyPort: Int,
 )
 
 /** Long enough that stepping away between CLI commands does not cost the session; 0 disables the exit. */
@@ -132,6 +138,11 @@ internal class DaemonSettings(
                     ?.toIntOrNull()
                     ?.takeIf { it in 0..MAX_IDLE_LINGER_MINUTES }
                 ?: DEFAULT_IDLE_LINGER_MINUTES,
+            proxyPort = System.getenv("WAILO_PROXY_PORT")
+                ?.toIntOrNull()
+                ?.takeIf { it in 1..65535 }
+                ?: values.getProperty(PROXY_PORT)?.toIntOrNull()?.takeIf { it in 1..65535 }
+                ?: DEFAULT_PROXY_PORT,
         )
     }
 
@@ -146,6 +157,7 @@ internal class DaemonSettings(
             setProperty(MCP_ACCESS, config.mcpAccess.toString())
             setProperty(MCP_REDACT_SECRETS, config.mcpRedactSecrets.toString())
             setProperty(IDLE_LINGER_MINUTES, config.idleLingerMinutes.toString())
+            setProperty(PROXY_PORT, config.proxyPort.toString())
         }
         Files.createDirectories(path.parent)
         setOwnerOnly(path.parent, directory = true)
@@ -189,6 +201,7 @@ internal class DaemonSettings(
         const val MCP_ACCESS = "mcpAccess"
         const val MCP_REDACT_SECRETS = "mcpRedactSecrets"
         const val IDLE_LINGER_MINUTES = "idleLingerMinutes"
+        const val PROXY_PORT = "proxyPort"
     }
 }
 

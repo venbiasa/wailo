@@ -33,6 +33,8 @@ import com.venbiasa.wailo.daemon.DaemonClient
 import com.venbiasa.wailo.daemon.DaemonLauncher
 import com.venbiasa.wailo.daemon.UsbConnectionStatus
 import com.venbiasa.wailo.daemon.UsbDeviceInfo
+import com.venbiasa.wailo.engine.BodyRef
+import com.venbiasa.wailo.engine.CaptureSource
 import com.venbiasa.wailo.engine.ConnectedDevice
 import com.venbiasa.wailo.engine.DeviceTransport
 import com.venbiasa.wailo.engine.WailoEngine
@@ -49,6 +51,8 @@ import com.venbiasa.wailo.shared.CaptureFilterState
 import com.venbiasa.wailo.shared.DeviceConnectionStatus
 import com.venbiasa.wailo.shared.DeviceInfo
 import com.venbiasa.wailo.shared.DeviceTransportKind
+import com.venbiasa.wailo.shared.BodyHandle
+import com.venbiasa.wailo.shared.BodyLoader
 import com.venbiasa.wailo.shared.FlowEntry
 import com.venbiasa.wailo.shared.MapLocalLayoutCodec
 import com.venbiasa.wailo.shared.MapLocalNode
@@ -60,6 +64,7 @@ import com.venbiasa.wailo.shared.PairingRefusal
 import com.venbiasa.wailo.shared.PairingState
 import com.venbiasa.wailo.shared.PausedFlow
 import com.venbiasa.wailo.shared.PickedFile
+import com.venbiasa.wailo.shared.ProxyState
 import com.venbiasa.wailo.shared.RuleNode
 import com.venbiasa.wailo.shared.ResponseHeader
 import com.venbiasa.wailo.shared.SeedLayoutCodec
@@ -133,6 +138,10 @@ private val MinBreakpointWindowSize = DpSize(560.dp, 420.dp)
 
 // debounce (used below to coalesce window resize/move writes) is still a coroutines preview API.
 @OptIn(FlowPreview::class)
+// The engine's handle, remapped for the viewer at the same boundary CapturedExchange is: `shared` is a
+// sibling of `engine`, not a consumer of it.
+private fun BodyRef.toHandle() = BodyHandle(id = id, size = size)
+
 private fun runWailo(engine: DaemonClient) = application {
     val rows by engine.exchanges.collectAsState()
     val capturing by engine.capturing.collectAsState()
@@ -210,6 +219,20 @@ private fun runWailo(engine: DaemonClient) = application {
     // running with no Studio open — this window only shows and flips them.
     val mcpAccess by engine.mcpAccess.collectAsState()
     val mcpRedactSecrets by engine.mcpRedactSecrets.collectAsState()
+
+    // The bundled proxy, likewise daemon-owned (ADR-0070): a browser pointed at it must not lose its
+    // network because this window closed, so Studio only asks. The daemon answers with the state it
+    // actually reached, which is how a refused port gets reported instead of a switch that lies.
+    val daemonProxy by engine.proxy.collectAsState()
+    val proxy = ProxyState(
+        running = daemonProxy.running,
+        port = daemonProxy.port,
+        connections = daemonProxy.connections,
+        exchanges = daemonProxy.exchanges,
+        error = daemonProxy.error,
+    )
+    val setProxyEnabled: (Boolean) -> Unit = { enabled -> scope.launch { engine.setProxyEnabled(enabled) } }
+    val applyProxyPort: (Int) -> Unit = { port -> scope.launch { engine.setProxyPort(port) } }
 
     // The address devices should dial. The server binds every interface; we surface the host's LAN
     // IPv4 (not the wildcard) so a physical device knows where to point, falling back to localhost. The
@@ -290,7 +313,18 @@ private fun runWailo(engine: DaemonClient) = application {
                 it.platform,
                 it.exchange,
                 edited = it.exchange.edited,
+                requestBody = it.requestBody?.toHandle(),
+                responseBody = it.responseBody?.toHandle(),
+                viaProxy = it.source == CaptureSource.PROXY,
             )
+        }
+    }
+
+    // Bodies stay on the daemon and come back a range at a time (ADR-0069), so the viewer is given the
+    // means to fetch them rather than the bytes themselves.
+    val bodyLoader = remember(engine) {
+        BodyLoader { handle, offset, length ->
+            engine.readBody(BodyRef(handle.id, handle.size), offset, length)
         }
     }
     // The viewer formats timestamps in commonMain (no java.time), so pass the host's zone offset.
@@ -867,6 +901,7 @@ private fun runWailo(engine: DaemonClient) = application {
         }
         WailoApp(
             entries = entries,
+            bodyLoader = bodyLoader,
             zoneOffsetMillis = zoneOffsetMillis,
             darkTheme = darkTheme,
             onToggleDarkTheme = { setDarkTheme(!darkTheme) },
@@ -925,6 +960,9 @@ private fun runWailo(engine: DaemonClient) = application {
             seedsEnabled = seedsEnabled,
             onSeedsEnabledChange = onSeedsEnabledChange,
             openSeedPanelSignal = openSeedPanelRequests,
+            proxy = proxy,
+            onProxyEnabledChange = setProxyEnabled,
+            onApplyProxyPort = applyProxyPort,
             toolPanelWidthRatio = toolPanelWidthRatio,
             onToolPanelWidthRatioChange = { toolPanelWidthRatio = it },
         )

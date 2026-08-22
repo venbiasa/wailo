@@ -28,16 +28,27 @@ fun main() {
     } else {
         InMemoryPairingKeyStore()
     }
+    // Opened before the host, because the engine is built around it and because clearing a dead
+    // daemon's leftovers is the first thing this process owes the disk.
+    val bodies = SpoolBodyStore.open()
     val host = try {
         HeadlessHost.start(
             port = config.capturePort,
             maxRetained = config.maxRetained,
             requirePairing = config.requirePairing,
             pairingKeyStore = keyStore,
+            bodyStore = bodies,
         )
     } catch (failure: Exception) {
+        bodies.close()
         System.err.println("wailo-daemon: ${failure.message}")
         exitProcess(1)
+    }
+    // Retire a slice of the oldest traffic rather than a fixed number of bytes: the store re-checks
+    // after every further 32 MiB spooled, so a volume that is still filling keeps trimming until it
+    // isn't. Forgetting the start of a capture beats refusing to record the rest of it.
+    bodies.onPressure = {
+        host.engine.evictOldest((host.engine.exchanges.value.size / 10).coerceAtLeast(1))
     }
     val runtime = DaemonRuntime(
         host = host,
@@ -47,6 +58,7 @@ fun main() {
         pairingSupported = KeychainPairingKeyStore.isSupported,
         mcpAccess = config.mcpAccess,
         mcpRedactSecrets = config.mcpRedactSecrets,
+        proxyPort = config.proxyPort,
     )
     val stopped = CountDownLatch(1)
     val stopping = AtomicBoolean()
@@ -57,6 +69,7 @@ fun main() {
             runCatching { idleWatchdog.close() }
             runCatching { server.close() }
             runtime.close()
+            runCatching { bodies.close() }
             runCatching { instanceLock.close() }
             stopped.countDown()
         }
@@ -65,6 +78,7 @@ fun main() {
         DaemonServer(runtime, onStop = stop).also(DaemonServer::start)
     } catch (failure: Exception) {
         runtime.close()
+        bodies.close()
         instanceLock.close()
         System.err.println("wailo-daemon: could not publish the control channel: ${failure.message}")
         exitProcess(1)
@@ -72,7 +86,9 @@ fun main() {
     val captureActivity = DaemonCaptureActivity(host.engine.exchanges, host.engine.pausedExchanges)
     idleWatchdog = DaemonIdleWatchdog(
         lingerMillis = config.idleLingerMinutes * 60_000L,
-        referenced = { server.references > 0 },
+        // A running proxy counts as a reference in its own right: something out there has its network
+        // pointed at this process, and exiting because no window is open would take that network down.
+        referenced = { server.references > 0 || runtime.proxyRunning },
         // A capturing app extends the window the same way a CLI command does, rather than pinning the
         // daemon outright: what earns the process its life is traffic, not a socket a silent app happens
         // to be holding.

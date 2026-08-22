@@ -20,6 +20,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import com.venbiasa.wailo.shared.PairingAction
 import com.venbiasa.wailo.shared.PairingState
+import com.venbiasa.wailo.shared.ProxyState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -65,6 +66,9 @@ internal fun SettingsManager(
     usbPort: Int,
     usbPortError: String?,
     onApplyUsbPort: (Int) -> Unit,
+    proxy: ProxyState,
+    onProxyEnabledChange: (Boolean) -> Unit,
+    onApplyProxyPort: (Int) -> Unit,
     maxRetained: Int,
     retainedCount: Int,
     maxRetainedError: String?,
@@ -97,9 +101,9 @@ internal fun SettingsManager(
             RowDivider()
 
             Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
-                SectionHeader("Connection")
+                SectionHeader("Socket")
                 NumberField(
-                    label = "Capture server port",
+                    label = "Socket port",
                     value = listenPort,
                     maxDigits = MaxPortDigits,
                     placeholder = "8899",
@@ -130,6 +134,33 @@ internal fun SettingsManager(
                             "mismatch looks exactly like an app that isn't running.",
                     )
                 }
+
+                SectionHeader("Proxy")
+                ToggleRow(
+                    label = "Capture clients that have no Wailo SDK",
+                    checked = proxy.running,
+                    onCheckedChange = onProxyEnabledChange,
+                    error = proxy.error,
+                    help = "Point a browser, a CLI, or an emulator at ${proxy.address} and its traffic " +
+                        "joins the list, ticked in the Proxy column. HTTPS is tunnelled but not " +
+                        "decrypted — that needs a certificate Wailo does not have yet.",
+                )
+                RowDivider()
+                NumberField(
+                    label = "Proxy port",
+                    value = proxy.port,
+                    maxDigits = MaxPortDigits,
+                    placeholder = "9090",
+                    // The bind verdict belongs to the switch above, which is what asked for it; repeating
+                    // it here would show the same failure twice.
+                    error = null,
+                    canReapplyUnchanged = false,
+                    onApply = onApplyProxyPort,
+                    status = proxy.address,
+                    statusPrefix = "Clients point at ",
+                    help = "Changing it while the proxy runs restarts the listener, so anything already " +
+                        "pointed at the old port loses its network until you move it too.",
+                )
 
                 SectionHeader("Capture")
                 NumberField(
@@ -239,6 +270,9 @@ private fun ToggleRow(
     checked: Boolean,
     onCheckedChange: (Boolean) -> Unit,
     help: String,
+    // Only for a flip that something outside this process can refuse — a listener that could not bind.
+    // Without it such a switch springs back with no explanation and reads as a broken control.
+    error: String? = null,
 ) {
     Column(
         Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
@@ -258,6 +292,13 @@ private fun ToggleRow(
                 color = MaterialTheme.colorScheme.onSurface,
             )
             CompactSwitch(checked = checked, onCheckedChange = onCheckedChange)
+        }
+        if (error != null) {
+            Text(
+                error,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.error,
+            )
         }
         MutedText(help)
     }

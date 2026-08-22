@@ -54,6 +54,7 @@ import com.venbiasa.wailo.shared.FlowEntry
 import com.venbiasa.wailo.shared.MapLocalNode
 import com.venbiasa.wailo.shared.MapLocalRuleDef
 import com.venbiasa.wailo.shared.PickedFile
+import com.venbiasa.wailo.shared.ProxyState
 import com.venbiasa.wailo.shared.ResponseHeader
 import com.venbiasa.wailo.shared.SeedNode
 import com.venbiasa.wailo.shared.SeedRuleDef
@@ -147,6 +148,9 @@ internal fun WailoViewer(
     seedsEnabled: Boolean,
     onSeedsEnabledChange: (Boolean) -> Unit,
     openSeedPanelSignal: Int,
+    proxy: ProxyState,
+    onProxyEnabledChange: (Boolean) -> Unit,
+    onApplyProxyPort: (Int) -> Unit,
     toolPanelWidthRatio: Float,
     onToolPanelWidthRatioChange: (Float) -> Unit,
 ) {
@@ -216,7 +220,7 @@ internal fun WailoViewer(
                 }
                 FilterKey.StatusCode -> codes
                 FilterKey.Client -> availableAppIds
-                FilterKey.Edited -> listOf("true", "false")
+                FilterKey.Edited, FilterKey.Proxy -> listOf("true", "false")
             }
         }
         suggest
@@ -295,6 +299,7 @@ internal fun WailoViewer(
                                 capturing = capturing,
                                 onToggleCapture = onToggleCapture,
                                 onClear = onClear,
+                                proxy = proxy,
                             )
                             RowDivider()
                             // The bookmark bar only exists once there is something to show, so an empty
@@ -528,6 +533,9 @@ internal fun WailoViewer(
                                 usbPort = usbPort,
                                 usbPortError = usbPortError,
                                 onApplyUsbPort = onApplyUsbPort,
+                                proxy = proxy,
+                                onProxyEnabledChange = onProxyEnabledChange,
+                                onApplyProxyPort = onApplyProxyPort,
                                 maxRetained = maxRetained,
                                 // The whole capture, not the filtered view: the cap is about what the
                                 // engine is holding, which no display filter changes.
@@ -549,6 +557,7 @@ internal fun WailoViewer(
                 ToolRail(
                     darkTheme = darkTheme,
                     onToggleDarkTheme = onToggleDarkTheme,
+                    proxyRunning = proxy.running,
                     openPanel = openPanel,
                     onSelectPanel = { panel ->
                         // Rail buttons are toggles: picking the open panel closes it.
@@ -613,6 +622,7 @@ private fun seededHeaders(responseHeaders: List<Header>): List<ResponseHeader> {
 private fun ToolRail(
     darkTheme: Boolean,
     onToggleDarkTheme: () -> Unit,
+    proxyRunning: Boolean,
     openPanel: ToolPanel?,
     onSelectPanel: (ToolPanel) -> Unit,
 ) {
@@ -669,10 +679,13 @@ private fun ToolRail(
             onClick = { onSelectPanel(ToolPanel.Devices) },
         )
         Spacer(Modifier.weight(1f))
+        // Settings is where the proxy is switched on, so its button carries the running marker: the top
+        // bar says where the proxy is listening, but only once it already is.
         ToolRailButton(
             icon = Res.drawable.ic_settings,
-            contentDescription = "Settings",
+            contentDescription = if (proxyRunning) "Settings (proxy running)" else "Settings",
             selected = openPanel == ToolPanel.Settings,
+            active = proxyRunning,
             onClick = { onSelectPanel(ToolPanel.Settings) },
         )
     }
@@ -696,9 +709,16 @@ private fun ToolRailButton(
     contentDescription: String,
     selected: Boolean,
     onClick: () -> Unit,
+    // Whether the tool behind this button is doing something right now, which is a different question
+    // from whether its panel is open. Only a tool with a running part uses it.
+    active: Boolean = false,
 ) {
     val background = if (selected) MaterialTheme.colorScheme.surfaceVariant else Color.Transparent
-    val tint = if (selected) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant
+    val tint = when {
+        active -> LocalWailoColors.current.info
+        selected -> MaterialTheme.colorScheme.onSurface
+        else -> MaterialTheme.colorScheme.onSurfaceVariant
+    }
     // The rail is icon-only; hovering names the tool so an unfamiliar glyph is still legible.
     HoverTooltip(label = contentDescription) {
         Box(
@@ -726,6 +746,7 @@ private fun TopBar(
     capturing: Boolean,
     onToggleCapture: () -> Unit,
     onClear: () -> Unit,
+    proxy: ProxyState,
 ) {
     val scope = rememberCoroutineScope()
     var retrying by remember { mutableStateOf(false) }
@@ -755,36 +776,23 @@ private fun TopBar(
             )
         }
         Spacer(Modifier.width(8.dp))
-        // The address a device should dial, prefixed by a recording dot: green while capturing, muted
-        // when paused, so the dot always agrees with the pause/resume button. A server that couldn't bind
-        // its port overrides both and goes red — otherwise this reads as a working endpoint while nothing
-        // is listening and no traffic will ever arrive, with no hint that the port (in Settings) is why.
-        Box(
-            Modifier.size(8.dp).background(
-                color = when {
-                    !listening -> MaterialTheme.colorScheme.error
-                    capturing -> LocalWailoColors.current.success
-                    else -> MaterialTheme.colorScheme.onSurfaceVariant
-                },
-                shape = CircleShape,
-            ),
+        // Both capture paths, always drawn, in the same shape: a dot for whether traffic is arriving and
+        // the address to point something at. Both are permanent so their absence never has to be read as
+        // an answer — an indicator that vanishes when off leaves "not capturing" and "no such feature"
+        // looking identical.
+        //
+        // Pausing greys both at once, because a paused capture keeps every listener bound and records
+        // from neither; a green dot over a path that is dropping everything would contradict the
+        // pause button two icons to the left.
+        ListenerStatus(
+            // A listener that could not bind is the one case worth breaking grey/green for: otherwise
+            // this reads as a working endpoint while no traffic can ever arrive, with nothing to say the
+            // port (in Settings) is why.
+            live = capturing && listening,
+            failed = !listening,
+            address = if (listening) listenAddress else "not listening",
+            name = "Socket",
         )
-        Spacer(Modifier.width(6.dp))
-        val addressColor = if (listening) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error
-        SelectionContainer {
-            Text(
-                listenAddress,
-                style = MaterialTheme.typography.labelMedium,
-                color = addressColor,
-            )
-        }
-        if (!listening) {
-            Text(
-                " — not listening",
-                style = MaterialTheme.typography.labelMedium,
-                color = addressColor,
-            )
-        }
         // The engine retakes a port it lost on its own, but not one it never got — something else was
         // holding it, and only the user knows when that's over. Offered here rather than only in Settings
         // because this is where the failure is visible, and it's a retry, not a setting to change.
@@ -805,11 +813,63 @@ private fun TopBar(
             ) {
                 Icon(
                     imageVector = vectorResource(Res.drawable.ic_refresh),
-                    contentDescription = "Retry binding the capture port",
+                    contentDescription = "Retry binding the socket port",
                     tint = MaterialTheme.colorScheme.error,
                     modifier = Modifier.size(16.dp),
                 )
             }
         }
+        Spacer(Modifier.width(14.dp))
+        ListenerStatus(
+            live = capturing && proxy.running,
+            // Off is the proxy's resting state, so only a start that was actually refused is a failure.
+            failed = proxy.error != null,
+            address = proxy.address,
+            name = "Proxy",
+        )
     }
+}
+
+/**
+ * One capture path in the top bar: a state dot, the address, and which path it is.
+ *
+ * The name is bracketed after the address rather than prefixed so the addresses line up as a column and
+ * read as the primary content — the label answers "which one is this", which is the second question.
+ *
+ * The dot carries the difference between off and recording; only a failure also reddens the address, since
+ * that is the one state the user has to act on. The label is the quietest step (`onSurfaceDisabled`, under
+ * the address's `onSurfaceVariant`) because it is recognised rather than read — but not `outline`, a
+ * hairline token that as text on `surfaceContainer` is barely a shade off the bar.
+ */
+@Composable
+private fun ListenerStatus(
+    live: Boolean,
+    failed: Boolean,
+    address: String,
+    name: String,
+) {
+    Box(
+        Modifier.size(8.dp).background(
+            color = when {
+                failed -> MaterialTheme.colorScheme.error
+                live -> LocalWailoColors.current.success
+                else -> MaterialTheme.colorScheme.outline
+            },
+            shape = CircleShape,
+        ),
+    )
+    Spacer(Modifier.width(6.dp))
+    SelectionContainer {
+        Text(
+            address,
+            style = MaterialTheme.typography.labelMedium,
+            color = if (failed) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+    Spacer(Modifier.width(4.dp))
+    Text(
+        "[$name]",
+        style = MaterialTheme.typography.labelSmall,
+        color = LocalWailoColors.current.onSurfaceDisabled,
+    )
 }

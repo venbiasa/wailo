@@ -22,13 +22,19 @@ Two boundaries keep the system decoupled:
   holds. Studio, CLI, and MCP all auto-start and attach to it (ADR-0058).
 
 ```
-[App under test] -> Wailo SDK --(protobuf over WebSocket)--> daemon -> engine -> host
-                                                          daemon -> Studio / CLI / MCP
+[App under test]  -> Wailo SDK --(protobuf over WebSocket)--> daemon -> engine -> host
+[Browser / CLI]   -> HTTP proxy ---------------------------> daemon -> Studio / CLI / MCP
 ```
+
+For anything that cannot host the SDK — a browser, a CLI, a third-party app — the daemon can also run a
+bundled HTTP proxy (off by default). The two paths are called **Socket** (an instrumented app opens a
+WebSocket and reports what it saw) and **Proxy** (Wailo sits in the path and relays); both land in the
+same timeline, and every row says which it came by. HTTPS through the proxy is tunnelled without being
+decrypted until you install a local certificate and unlock a host by name (ADR-0070/0071).
 
 The repo is **two Gradle builds** joined only by `protocol`: the **SDK build** (repo root — `protocol`,
 `sdk-android`, the Gradle plugin, and the samples) is pinned to a conservative toolchain so it's consumable
-inside host apps, while the **`studio/` build** (`engine`, `host`, `daemon`, `shared`, `desktopApp`, `cli`, `mcp`)
+inside host apps, while the **`studio/` build** (`engine`, `host`, `proxy`, `daemon`, `shared`, `desktopApp`, `cli`, `mcp`)
 runs a modern toolchain
 and consumes `protocol` as the published `wailo-protocol` artifact (ADR-0015).
 
@@ -43,6 +49,7 @@ and consumes `protocol` as the published `wailo-protocol` artifact (ADR-0015).
 | `sdk-ios`       | Swift package; `WailoURLProtocol` (URLSession) - the injected iOS SDK |
 | `engine`        | JVM library; WebSocket server + multi-session store + query API — **studio build** |
 | `host`          | JVM library; Seed spend + traffic wait/find helpers over `engine` (CLI/MCP) — **studio build** |
+| `proxy`         | JVM library; the bundled HTTP proxy — a second capture path for clients without the SDK — **studio build** |
 | `daemon`        | Persistent local service + authenticated client; owns engine, adb, usbmuxd, and pairing — **studio build** |
 | `shared`        | JVM + Compose Multiplatform viewer UI + view models — **studio build** |
 | `desktopApp`    | Compose Desktop client of `daemon` — **studio build**               |

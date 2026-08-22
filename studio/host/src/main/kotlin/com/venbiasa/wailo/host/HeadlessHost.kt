@@ -1,7 +1,10 @@
 package com.venbiasa.wailo.host
 
+import com.venbiasa.wailo.engine.BodyRef
+import com.venbiasa.wailo.engine.BodyStore
 import com.venbiasa.wailo.engine.CapturedExchange
 import com.venbiasa.wailo.engine.ConnectedDevice
+import com.venbiasa.wailo.engine.InMemoryBodyStore
 import com.venbiasa.wailo.engine.MapLocalBodyProvider
 import com.venbiasa.wailo.engine.PausedExchange
 import com.venbiasa.wailo.engine.WailoEngine
@@ -238,6 +241,13 @@ class HeadlessHost private constructor(
 
     fun listExchanges(): List<CapturedExchange> = engine.exchanges.value
 
+    /**
+     * Read a captured body back by range. Every frontend goes through this rather than getting bytes
+     * with the row: a poll that carried them would put a session's whole traffic on the wire, and into
+     * the client's heap, to render a list of URLs.
+     */
+    fun readBody(ref: BodyRef, offset: Long, length: Int): ByteArray = engine.readBody(ref, offset, length)
+
     fun listHolds(): List<PausedExchange> = engine.pausedExchanges.value
 
     fun resumeHold(
@@ -414,6 +424,7 @@ class HeadlessHost private constructor(
             maxRetained: Int = WailoEngine.DEFAULT_MAX_RETAINED,
             requirePairing: Boolean = false,
             pairingKeyStore: PairingKeyStore = InMemoryPairingKeyStore(),
+            bodyStore: BodyStore = InMemoryBodyStore(),
             scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
         ): HeadlessHost {
             val engine = WailoEngine(
@@ -421,6 +432,7 @@ class HeadlessHost private constructor(
                 maxRetained = maxRetained,
                 requirePairing = requirePairing,
                 pairings = PairingManager(pairingKeyStore),
+                bodyStore = bodyStore,
             )
             val host = HeadlessHost(engine, scope)
             if (!host.start()) {

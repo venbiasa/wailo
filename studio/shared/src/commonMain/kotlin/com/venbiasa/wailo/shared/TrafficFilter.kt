@@ -30,6 +30,15 @@ internal enum class FilterKey(val label: String, val token: String) {
     StatusCode("Status Code", "status"),
     Client("Client", "client"),
     Edited("Edited", "edited"),
+    Proxy("Proxy", "proxy"),
+    ;
+
+    /**
+     * A field whose whole value space is true/false. Named rather than tested field-by-field because
+     * four separate places have to agree on it — the matchers offered, whether several values make
+     * sense, what the query parser accepts, and what the add-filter card will commit.
+     */
+    val isBoolean: Boolean get() = this == Edited || this == Proxy
 }
 
 /**
@@ -80,13 +89,13 @@ internal data class MatcherOption(val matcher: FilterMatcher, val negated: Boole
 /**
  * The matchers the add-filter modal offers for a field, in menu order — the first is that field's
  * default. Numeric comparisons are offered only where the value is genuinely a number, and only
- * affirmatively (see [FilterMatcher] on why their negations aren't their mirrors). Edited is a plain
- * boolean, so "is" is the only sensible test.
+ * affirmatively (see [FilterMatcher] on why their negations aren't their mirrors). A boolean field has
+ * a two-value space, so "is" is the only sensible test.
  */
 internal val FilterKey.matcherOptions: List<MatcherOption>
-    get() = when (this) {
-        FilterKey.Edited -> listOf(MatcherOption(FilterMatcher.Equals, negated = false))
-        FilterKey.StatusCode -> listOf(
+    get() = when {
+        isBoolean -> listOf(MatcherOption(FilterMatcher.Equals, negated = false))
+        this == FilterKey.StatusCode -> listOf(
             MatcherOption(FilterMatcher.Equals, negated = false),
             MatcherOption(FilterMatcher.Equals, negated = true),
             MatcherOption(FilterMatcher.Gte, negated = false),
@@ -113,7 +122,7 @@ internal val FilterKey.defaultMatcher: MatcherOption
 
 /** Whether a field's value field should accept several values ("is one of"). Numbers and booleans don't. */
 internal val FilterKey.acceptsMultipleValues: Boolean
-    get() = this != FilterKey.Edited
+    get() = !isBoolean
 
 /**
  * How a clause reads on its pill. A single value keeps the plain verb ("URL contains orders"); several
@@ -177,6 +186,7 @@ private class RowValues(entry: FlowEntry) {
     val codeText: String = code?.toString().orEmpty()
     val client: String = entry.appId
     val edited: Boolean = entry.edited
+    val proxy: Boolean = entry.viaProxy
 
     fun text(key: FilterKey): String = when (key) {
         FilterKey.Method -> method
@@ -184,6 +194,7 @@ private class RowValues(entry: FlowEntry) {
         FilterKey.StatusCode -> codeText
         FilterKey.Client -> client
         FilterKey.Edited -> edited.toString()
+        FilterKey.Proxy -> proxy.toString()
     }
 }
 

@@ -1,5 +1,6 @@
 package com.venbiasa.wailo.daemon
 
+import com.venbiasa.wailo.engine.BodyRef
 import com.venbiasa.wailo.engine.CapturedExchange
 import com.venbiasa.wailo.engine.ConnectedDevice
 import com.venbiasa.wailo.engine.PausedExchange
@@ -165,6 +166,10 @@ class DaemonClient internal constructor(
     private val _adbDevices = MutableStateFlow<List<AdbDeviceInfo>>(emptyList())
     val adbDevices: StateFlow<List<AdbDeviceInfo>> = _adbDevices.asStateFlow()
 
+    /** The bundled proxy's daemon-owned state (ADR-0070): running, where, and what it is carrying. */
+    private val _proxy = MutableStateFlow(ProxyStatus())
+    val proxy: StateFlow<ProxyStatus> = _proxy.asStateFlow()
+
     private var mapHash: String? = null
     private var breakpointHash: String? = null
     private var seedHash: String? = null
@@ -232,6 +237,21 @@ class DaemonClient internal constructor(
         _exchanges.value = emptyList()
     }
 
+    /**
+     * Fetch a slice of a captured body. Polls carry handles, not bytes (ADR-0069), so anything that
+     * wants to show, search, or export a body asks for the part it is about to use — and a viewer
+     * scrolled into the middle of a huge response never pulls the beginning of it.
+     */
+    suspend fun readBody(ref: BodyRef, offset: Long = 0, length: Int): ByteArray {
+        if (length <= 0 || offset >= ref.size) return ByteArray(0)
+        val response = rpc.call(
+            "read_body",
+            DaemonJson.encodeToJsonElement(ReadBodyRequest(ref.id, ref.size, offset, length)),
+            ReadBodyResponse.serializer(),
+        )
+        return response.bytesBase64.decodeBase64()
+    }
+
     suspend fun setCapturing(enabled: Boolean) {
         command("set_capturing", BooleanValue(enabled))
         _capturing.value = enabled
@@ -250,6 +270,31 @@ class DaemonClient internal constructor(
     suspend fun setUsbPort(port: Int) {
         command("set_usb_port", IntValue(port))
         _usbPort.value = port
+    }
+
+    /**
+     * Start or stop the bundled proxy, optionally moving it first. The daemon answers with the state it
+     * actually reached rather than an acknowledgement: a port something else holds is the common case,
+     * and the caller has to be able to say so.
+     */
+    suspend fun setProxyEnabled(enabled: Boolean, port: Int? = null): ProxyStatus {
+        val status = rpc.call(
+            "set_proxy",
+            DaemonJson.encodeToJsonElement(SetProxyRequest(enabled, port)),
+            ProxyStatusDto.serializer(),
+        ).toDomain()
+        _proxy.value = status
+        return status
+    }
+
+    suspend fun setProxyPort(port: Int): ProxyStatus {
+        val status = rpc.call(
+            "set_proxy_port",
+            DaemonJson.encodeToJsonElement(IntValue(port)),
+            ProxyStatusDto.serializer(),
+        ).toDomain()
+        _proxy.value = status
+        return status
     }
 
     /**
@@ -532,6 +577,7 @@ class DaemonClient internal constructor(
         _adbDevices.value = response.adbDevices.map {
             AdbDeviceInfo(it.serial, it.name, AdbConnectionStatus.valueOf(it.status), it.error)
         }
+        response.proxy?.let { _proxy.value = it.toDomain() }
         return response.exchangesCaughtUp
     }
 

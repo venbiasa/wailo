@@ -127,11 +127,14 @@ internal suspend fun dispatch(host: DaemonClient, args: ParsedArgs): CommandResu
                     req?.headers?.forEach { appendLine("  > ${it.name}: ${it.value_}") }
                     appendLine("response ${res?.code ?: row.exchange.error}")
                     res?.headers?.forEach { appendLine("  < ${it.name}: ${it.value_}") }
-                    val body = res?.body?.utf8() ?: req?.body?.utf8()
-                    if (!body.isNullOrEmpty()) {
+                    // One extra byte past the ceiling is what tells "exactly this long" from "longer
+                    // than we printed" without pulling a payload of unbounded size off the daemon.
+                    val shownRef = row.responseBody ?: row.requestBody
+                    val fetched = shownRef?.let { host.readBody(it, length = args.bodyChars + 1) }
+                    if (fetched != null && fetched.isNotEmpty()) {
                         appendLine("--- body ---")
-                        append(body.take(args.bodyChars))
-                        if (body.length > args.bodyChars) append("\n… truncated")
+                        append(String(fetched, 0, minOf(fetched.size, args.bodyChars), Charsets.UTF_8))
+                        if (shownRef.size > args.bodyChars) append("\n… truncated")
                     }
                 }.trimEnd(),
             )
@@ -322,10 +325,31 @@ internal suspend fun dispatch(host: DaemonClient, args: ParsedArgs): CommandResu
             host.setMcpRedactSecrets(enabled)
             CommandResult("mcp_redaction=$enabled")
         }
+        "set_proxy", "set-proxy", "proxy" -> {
+            val enabled = args.flag ?: return CommandResult("set_proxy requires --on or --off", exitCode = 2)
+            val status = host.setProxyEnabled(enabled, args.port.takeIf { args.portSpecified })
+            CommandResult(
+                if (status.running) {
+                    "proxy=on address=${status.port}"
+                } else {
+                    "proxy=off" + (status.error?.let { " error=$it" } ?: "")
+                },
+                // A start that could not bind is a failure the caller has to be able to branch on.
+                exitCode = if (enabled && !status.running) 1 else 0,
+            )
+        }
+        "proxy_status", "proxy-status" -> host.proxy.value.let { status ->
+            CommandResult(
+                "proxy=${if (status.running) "on" else "off"} port=${status.port} " +
+                    "clients=${status.connections} exchanges=${status.exchanges}" +
+                    (status.error?.let { " error=$it" } ?: ""),
+            )
+        }
         "status", "daemon_status", "daemon-status" -> CommandResult(
             "listening=${host.listening.value} port=${host.capturePort.value} " +
                 "devices=${host.connectedDevices.value.size} exchanges=${host.exchanges.value.size} " +
                 "capturing=${host.capturing.value} " +
+                "proxy=${if (host.proxy.value.running) "on:${host.proxy.value.port}" else "off"} " +
                 "mcp_access=${host.mcpAccess.value} mcp_redaction=${host.mcpRedactSecrets.value}",
         )
         "stop", "daemon_stop", "daemon-stop" -> {
@@ -472,6 +496,8 @@ internal enum class Command(val verb: String) {
     WaitExchange("wait_exchange"),
     WaitHold("wait_hold"),
     Rebind("rebind"),
+    SetProxy("set_proxy"),
+    ProxyStatus("proxy_status"),
     SetMcpAccess("set_mcp_access"),
     SetMcpRedaction("set_mcp_redaction"),
     Status("status"),
@@ -609,6 +635,8 @@ private fun printUsage() {
         wailo-cli wait_exchange [--url S] [--url-pattern GLOB] [--method M] [--status C] [--timeout SEC]
         wailo-cli wait_hold [--timeout SEC]
         wailo-cli rebind --port N
+        wailo-cli set_proxy --on|--off [--port N]
+        wailo-cli proxy_status
         wailo-cli set_mcp_access --on|--off
         wailo-cli set_mcp_redaction --on|--off
 
@@ -619,6 +647,10 @@ private fun printUsage() {
         Seeds are canned responses that answer held exchanges in order (ADR-0041). set_seed builds the
         library; fill_seeds arms every enabled one and sweeps the holds already waiting, and each hold it
         answers spends a seed. list_seeds shows which are still armed.
+
+        set_proxy starts the bundled HTTP proxy so traffic from anything on this machine — a browser, a
+        CLI, a simulator — is captured without the SDK. It listens on loopback, off by default, and
+        tunnels HTTPS without decrypting it (ADR-0071). While it runs it keeps the daemon alive.
 
         set_mcp_access gates whether AI tools reach this capture at all; set_mcp_redaction decides
         whether what they read has its credentials stripped. Both are also in Studio's Settings panel.

@@ -139,13 +139,28 @@ fun WailoApp(
     seedsEnabled: Boolean = true,
     onSeedsEnabledChange: (Boolean) -> Unit = {},
     openSeedPanelSignal: Int = 0,
+    /**
+     * The bundled proxy's daemon-owned state (ADR-0070). Studio is a client of it like every other
+     * frontend — [onProxyEnabledChange] and [onApplyProxyPort] ask the daemon, and what comes back is
+     * what this shows, including a port it refused to bind.
+     */
+    proxy: ProxyState = ProxyState(),
+    onProxyEnabledChange: (Boolean) -> Unit = {},
+    onApplyProxyPort: (Int) -> Unit = {},
     toolPanelWidthRatio: Float = ToolPanelLayout.DefaultWidthRatio,
     onToolPanelWidthRatioChange: (Float) -> Unit = {},
+    /**
+     * How a body view gets its bytes. Rows arrive without them (ADR-0069), so this is what turns a
+     * [FlowEntry]'s handle into something to render. Defaults to reading nothing, which is what a
+     * preview composed outside a running Studio should show.
+     */
+    bodyLoader: BodyLoader = BodyLoader { _, _, _ -> ByteArray(0) },
 ) {
     WailoTheme(darkTheme = darkTheme) {
         val density = LocalDensity.current
         CompositionLocalProvider(
             LocalDensity provides Density(density.density, density.fontScale * textScale),
+            LocalBodyLoader provides bodyLoader,
         ) {
             WailoViewer(
                 entries = entries,
@@ -202,6 +217,9 @@ fun WailoApp(
                 seedsEnabled = seedsEnabled,
                 onSeedsEnabledChange = onSeedsEnabledChange,
                 openSeedPanelSignal = openSeedPanelSignal,
+                proxy = proxy,
+                onProxyEnabledChange = onProxyEnabledChange,
+                onApplyProxyPort = onApplyProxyPort,
                 toolPanelWidthRatio = toolPanelWidthRatio,
                 onToolPanelWidthRatioChange = onToolPanelWidthRatioChange,
             )

@@ -1,0 +1,33 @@
+---
+adr: 0069
+title: Captured bodies live in an encrypted session spool, and an exchange only holds a reference
+date: "2026-08-21"
+status: accepted
+relations: amends ADR-0061 (traffic stays a session — the session is now partly on disk); extends ADR-0003/0055/0058; prerequisite for the bundled proxy
+---
+# ADR-0069 — Captured bodies live in an encrypted session spool, and an exchange only holds a reference
+
+- Status: Accepted; implemented as `engine`'s `BodyStore`/`BodyRef` port with `daemon`'s `SpoolBodyStore`, a `read_body` control command, and lazy reads in Studio, CLI, and MCP.
+- Context: A retained exchange used to hold its payloads whole, so how long a capture could run was a function of how much memory the traffic happened to need. That survived while every producer was an SDK with a per-body cap: the device truncated, and `maxRetained` × cap was a number we could reason about. It does not survive a proxy. A proxy has no cap and no cooperating client — it will stream a video file or a multi-gigabyte download through Wailo, and the only honest answer to "how big can a body be" is "bigger than RAM". Capping proxy bodies would make the proxy strictly worse at the job people buy a proxy for. Meanwhile the eventual editor has the same problem from the other side: it cannot edit what it cannot open. So the bytes have to leave the heap before either feature is built, which makes this a prerequisite rather than a part of the proxy work.
+- Decision:
+  - **An exchange is metadata; bodies are handles.** `CapturedExchange` keeps the protobuf with its `body` fields emptied and carries a nullable `BodyRef` per side. Everything that *describes* a body without being one — `body_size`, `body_truncated`, `Content-Type` — stays on the protobuf, so a list row still renders from what the poll already delivered. A null handle means the body was empty; there is nothing to fetch.
+  - **`engine` gets a `BodyStore` port, not a filesystem.** It spools on receipt, reads back by range, and releases on eviction, exactly the seam `MapLocalBodyProvider` already draws (invariant #2). `InMemoryBodyStore` keeps the old behaviour for tests and any engine built without a daemon.
+  - **The daemon's implementation is an encrypted, session-scoped spool.** Bodies go to a per-run directory under `~/.wailo/bodies/` (owner-only), sealed with AES-GCM under a 256-bit key generated at startup and never written down. A previous daemon's leftovers are deleted on open and this session's directory is deleted on close.
+  - **Sealed in 64 KiB chunks, at a fixed stride.** Each chunk gets a fresh nonce and authenticates `"<body-id>/<index>"` as associated data. Because every chunk but the last is the same length on disk, chunk *i* is at `i * stride` with no index to maintain — a viewer scrolled into the middle of a 4 GiB response decrypts one chunk, and chunks cannot be reordered or grafted between bodies.
+  - **Reads are lazy and bounded, everywhere.** Snapshots and polls stay metadata-only; a `read_body` control command returns a base64 range. Studio fetches only when a Body or Raw tab is actually showing, and only a preview's worth; MCP and CLI take an explicit limit and report `output_truncated` against the handle's real size.
+  - **Disk pressure retires the oldest traffic.** The store samples the volume's free space every 32 MiB spooled and, below a 2 GiB reserve, asks the engine to evict its oldest exchanges. Forgetting the start of a capture beats refusing to record the rest of it.
+  - **A body the store refuses is truncated, not empty.** If spooling fails, the row is still recorded with that side marked `body_truncated` and its `body_size` intact — the same vocabulary a device uses when it gives up mid-capture. Silently recording an empty body would be a lie the UI cannot detect.
+- Alternatives considered:
+  - **Keep bodies in memory and cap them harder:** rejected — it makes the proxy useless for exactly the traffic that needs a proxy, and the cap that keeps a phone's SDK honest is not one a desktop should impose on a desktop-sized download.
+  - **Plaintext spool files, deleted on exit:** rejected — captured traffic is the most sensitive thing Wailo touches, and moving it from a heap to a file under `$HOME` widens the readership from "this process" to "anything running as this user, plus every backup and recovery tool that sees the volume". An ephemeral key keeps the blast radius where it was; a crash then leaves unreadable bytes rather than a session's worth of bearer tokens.
+  - **Persist bodies across runs, keyed to a durable key:** rejected — it contradicts ADR-0061 (traffic is a session, not configuration), and a durable key would have to be stored somewhere, which is the thing being avoided.
+  - **One sealed blob per body:** rejected — GCM authenticates on `doFinal`, so any read of a 4 GiB body would decrypt all of it. Chunking is what makes a range read a range read.
+  - **A memory-mapped or SQLite-backed store:** rejected for now — mapping fights the eviction model (a released body must actually free space), and SQLite would add a dependency and a schema to a thing whose entire lifetime is one process.
+  - **`fsync` each body:** rejected — these bytes are deleted on the way out, so durability buys nothing and costs latency on every captured response.
+- Consequences:
+  - `maxRetained` now counts exchanges whose cost is metadata, so the same cap holds far more traffic; the ceiling exists for list size, not for the heap.
+  - The control protocol went to version 7: `CapturedExchangeDto` carries body references instead of inline bytes, so an older frontend cannot read a newer daemon's rows (the existing version check already replaces an incompatible daemon).
+  - A frontend that wants bytes must be able to suspend. `WailoMcpService.getExchange` and the body-consuming context actions (Copy cURL, Map Local, Seed from an exchange) became async; the UI shows a body once it arrives rather than in the same frame as the row.
+  - Body text is no longer searchable from the retained snapshot alone — filtering by body content would need a streaming search through the store, which the virtual viewer work will have to provide.
+  - The spool is a new thing that can fail (full volume, read-only `$HOME`). Every path through it degrades rather than throws: a failed read is empty bytes, a failed spool is a truncated side, a failed release is a file that the session's directory removal will collect anyway.
+  - SDK ingress still arrives with the body inline and capped by the device; this ADR only changes where those bytes go after decoding. Chunked device-side transport, and the proxy's stream-to-spool ingress, are later work that this port exists to receive.

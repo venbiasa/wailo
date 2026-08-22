@@ -1,5 +1,6 @@
 package com.venbiasa.wailo.mcp
 
+import com.venbiasa.wailo.engine.BodyRef
 import com.venbiasa.wailo.engine.CapturedExchange
 import com.venbiasa.wailo.engine.PausedExchange
 import com.venbiasa.wailo.engine.WailoEngine
@@ -17,7 +18,6 @@ import kotlin.time.Duration.Companion.seconds
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withTimeoutOrNull
-import okio.ByteString
 import okio.ByteString.Companion.toByteString
 
 internal data class McpToolResponse(
@@ -143,7 +143,7 @@ internal class WailoMcpService(
         return exchangeListResult(rows)
     }
 
-    private fun getExchange(arguments: ToolArguments): McpToolResponse {
+    private suspend fun getExchange(arguments: ToolArguments): McpToolResponse {
         val id = arguments.requiredString("id")
         val bodyLimit = arguments.int("body_bytes", DEFAULT_BODY_LIMIT).inRange("body_bytes", 0..MAX_BODY_LIMIT)
         val row = backend.findExchangeById(id) ?: throw ToolFailure("Exchange not found: $id")
@@ -555,47 +555,82 @@ internal class WailoMcpService(
         "edited" to row.exchange.edited,
     )
 
-    private fun exchangeDetail(row: CapturedExchange, bodyLimit: Int): Map<String, Any?> =
+    private suspend fun exchangeDetail(row: CapturedExchange, bodyLimit: Int): Map<String, Any?> =
         exchangeSummary(row) + mapOf(
-            "request" to row.exchange.request?.let { requestData(it, bodyLimit) },
-            "response" to row.exchange.response?.let { responseData(it, bodyLimit) },
+            "request" to row.exchange.request?.let {
+                requestData(it, spooled(row.requestBody, bodyLimit), row.requestBody.capturedBytes(), bodyLimit)
+            },
+            "response" to row.exchange.response?.let {
+                responseData(it, spooled(row.responseBody, bodyLimit), row.responseBody.capturedBytes(), bodyLimit)
+            },
         )
 
+    /**
+     * A hold's bytes are still inline: a breakpoint hit is an in-flight request the device is holding
+     * open, not a recorded exchange, so it never went through the body store.
+     */
     private fun holdDetail(hold: PausedExchange, bodyLimit: Int): Map<String, Any?> = mapOf(
         "correlation_id" to hold.correlationId,
         "device_name" to hold.deviceName,
         "app_id" to hold.appId,
         "platform" to hold.platform,
         "phase" to hold.phaseName(),
-        "request" to hold.request?.let { requestData(it, bodyLimit) },
-        "response" to hold.response?.let { responseData(it, bodyLimit) },
+        "request" to hold.request?.let { requestData(it, it.body.toByteArray(), it.body.size.toLong(), bodyLimit) },
+        "response" to hold.response?.let { responseData(it, it.body.toByteArray(), it.body.size.toLong(), bodyLimit) },
     )
 
-    private fun requestData(request: HttpRequest, bodyLimit: Int): Map<String, Any?> = mapOf(
+    /**
+     * Fetch as much of a captured body as redaction needs, which is not the same as what the agent asked
+     * for: [renderBody] redacts before it truncates, because a JSON body cut to the output limit first
+     * would no longer parse and would fall back to the coarser text sweep. Past [MAX_BODY_LIMIT] that
+     * fallback is what happens anyway — the alternative is pulling a payload of unbounded size across
+     * the control channel to redact a prefix of it.
+     */
+    private suspend fun spooled(ref: BodyRef?, limit: Int): ByteArray =
+        if (ref == null) ByteArray(0) else backend.readBody(ref, maxOf(limit, MAX_BODY_LIMIT))
+
+    private fun BodyRef?.capturedBytes(): Long = this?.size ?: 0L
+
+    private fun requestData(
+        request: HttpRequest,
+        body: ByteArray,
+        capturedBytes: Long,
+        bodyLimit: Int,
+    ): Map<String, Any?> = mapOf(
         "method" to request.method,
         "url" to shown(request.url),
         "headers" to shown(request.headers).map(::headerData),
-        "body" to bodyData(request.body, request.body_size, request.body_truncated, request.headers, bodyLimit),
+        "body" to bodyData(body, capturedBytes, request.body_size, request.body_truncated, request.headers, bodyLimit),
     )
 
-    private fun responseData(response: HttpResponse, bodyLimit: Int): Map<String, Any?> = mapOf(
+    private fun responseData(
+        response: HttpResponse,
+        body: ByteArray,
+        capturedBytes: Long,
+        bodyLimit: Int,
+    ): Map<String, Any?> = mapOf(
         "status_code" to response.code,
         "message" to response.message,
         "headers" to shown(response.headers).map(::headerData),
-        "body" to bodyData(response.body, response.body_size, response.body_truncated, response.headers, bodyLimit),
+        "body" to bodyData(body, capturedBytes, response.body_size, response.body_truncated, response.headers, bodyLimit),
     )
 
     private fun bodyData(
-        body: ByteString,
+        bytes: ByteArray,
+        capturedBytes: Long,
         declaredSize: Long,
         sourceTruncated: Boolean,
         headers: List<Header>,
         limit: Int,
     ): Map<String, Any?> {
-        val bytes = body.toByteArray()
-        return renderBody(bytes, headers, limit) + mapOf(
-            // Sizes describe the captured traffic, not this redacted view of it, so they stay as captured.
-            "captured_bytes" to bytes.size,
+        val rendered = renderBody(bytes, headers, limit)
+        return rendered + mapOf(
+            // A prefix fetch is a truncation too, and the caller can only tell from here: [renderBody]
+            // sees the bytes it was handed and has no idea more of them exist.
+            "output_truncated" to (rendered["output_truncated"] == true || bytes.size < capturedBytes),
+            // Sizes describe the captured traffic, not this redacted view of it, so they stay as
+            // captured — the handle knows the real length even when only a prefix of it was fetched.
+            "captured_bytes" to capturedBytes,
             "declared_bytes" to declaredSize,
             "source_truncated" to sourceTruncated,
         )

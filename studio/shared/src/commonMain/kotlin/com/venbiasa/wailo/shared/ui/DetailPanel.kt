@@ -46,6 +46,7 @@ import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import com.venbiasa.wailo.protocol.Header
 import com.venbiasa.wailo.protocol.HttpExchange
+import com.venbiasa.wailo.shared.BodyHandle
 import com.venbiasa.wailo.shared.FlowEntry
 import com.venbiasa.wailo.shared.format.BodyContent
 import com.venbiasa.wailo.shared.format.UrlPart
@@ -71,6 +72,8 @@ internal fun DetailPanel(
         RowDivider()
         RequestResponseSplit(
             exchange = exchange,
+            requestBody = entry.requestBody,
+            responseBody = entry.responseBody,
             modifier = Modifier.weight(1f).fillMaxWidth(),
         )
     }
@@ -201,6 +204,8 @@ private fun urlAnnotated(url: String): AnnotatedString {
 @Composable
 private fun RequestResponseSplit(
     exchange: HttpExchange,
+    requestBody: BodyHandle?,
+    responseBody: BodyHandle?,
     modifier: Modifier,
 ) {
     val request = exchange.request
@@ -215,7 +220,7 @@ private fun RequestResponseSplit(
             present = request != null,
             startLine = "$method ${request?.url ?: ""}".trim(),
             headers = request?.headers ?: emptyList(),
-            body = request?.body ?: ByteString.EMPTY,
+            body = requestBody,
             declaredSize = request?.body_size ?: 0L,
             truncated = request?.body_truncated == true,
             notice = "No request captured.",
@@ -229,7 +234,7 @@ private fun RequestResponseSplit(
             present = response != null,
             startLine = responseStartLine(response?.code, response?.message ?: ""),
             headers = response?.headers ?: emptyList(),
-            body = response?.body ?: ByteString.EMPTY,
+            body = responseBody,
             declaredSize = response?.body_size ?: 0L,
             truncated = response?.body_truncated == true,
             notice = if (exchange.error.isNotEmpty()) {
@@ -367,7 +372,7 @@ private fun MessagePane(
     present: Boolean,
     startLine: String,
     headers: List<Header>,
-    body: ByteString,
+    body: BodyHandle?,
     declaredSize: Long,
     truncated: Boolean,
     notice: String,
@@ -398,13 +403,25 @@ private fun MessagePane(
             modifier = Modifier.fillMaxWidth(),
             trailingLabel = caption.uppercase(),
         )
+        // Fetched only for the two tabs that show bytes: opening a row on Headers should cost headers.
+        // Switching away and back re-reads, which is a local socket and a decrypt, not a network trip.
+        val shownBody = body.takeIf { tab == MessageTab.Body || tab == MessageTab.Raw }
+        val bytes = rememberBodyBytes(shownBody)
+        val capturedSize = body?.size ?: 0L
         Box(Modifier.weight(1f).fillMaxWidth()) {
             // The Body tab owns its own scrolling: its previewers include a lazy hex dump and a
             // centered image, neither of which can live inside the shared vertical scroll the
             // text-based tabs use.
             when {
                 tab == MessageTab.Body -> {
-                    BodyPreview(body, headers.contentType(), declaredSize, truncated, Modifier.fillMaxSize())
+                    BodyPreview(
+                        body = bytes,
+                        capturedSize = capturedSize,
+                        contentType = headers.contentType(),
+                        declaredSize = declaredSize,
+                        truncated = truncated,
+                        modifier = Modifier.fillMaxSize(),
+                    )
                 }
                 else -> {
                     SelectionContainer {
@@ -412,7 +429,8 @@ private fun MessagePane(
                             when (tab) {
                                 MessageTab.Headers -> HeadersContent(headers)
                                 MessageTab.Auth -> AuthContent(headers)
-                                MessageTab.Raw -> RawContent(startLine, headers, body, declaredSize, truncated)
+                                MessageTab.Raw ->
+                                    RawContent(startLine, headers, bytes, capturedSize, declaredSize, truncated)
                                 MessageTab.Body -> Unit
                             }
                         }
@@ -461,6 +479,7 @@ private fun RawContent(
     startLine: String,
     headers: List<Header>,
     body: ByteString,
+    capturedSize: Long,
     declaredSize: Long,
     truncated: Boolean,
 ) {
@@ -484,6 +503,10 @@ private fun RawContent(
     }
     if (truncated) {
         MutedText("(truncated during capture • declared ${formatBytes(declaredSize)})")
+        Spacer(Modifier.height(4.dp))
+    }
+    if (capturedSize > body.size) {
+        MutedText("(showing the first ${formatBytes(body.size.toLong())} of ${formatBytes(capturedSize)})")
         Spacer(Modifier.height(4.dp))
     }
     Text(

@@ -71,6 +71,7 @@ internal enum class TrafficColumn(
     Request("Request", 96.dp, 72.dp),
     Response("Response", 104.dp, 76.dp),
     Edited("Edited", 76.dp, 60.dp),
+    Proxy("Proxy", 72.dp, 60.dp),
 }
 
 /** Live per-column widths, seeded from [TrafficColumn.defaultWidth] and mutated in place as the user drags. */

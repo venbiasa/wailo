@@ -31,6 +31,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.venbiasa.wailo.shared.BodyHandle
+import com.venbiasa.wailo.shared.LocalBodyLoader
+import com.venbiasa.wailo.shared.prefix
 import com.venbiasa.wailo.shared.format.ImageFormat
 import com.venbiasa.wailo.shared.format.PreviewKind
 import com.venbiasa.wailo.shared.format.analyzeBody
@@ -41,20 +44,43 @@ import com.venbiasa.wailo.shared.format.prettyPrintJson
 import okio.ByteString
 import org.jetbrains.compose.resources.decodeToImageBitmap
 
-// Text/hex are capped so a multi-megabyte payload can't stall the viewer; the raw bytes are still
-// on the exchange, and Raw/Hex note when more was captured than is shown.
+// Text/hex are capped so a multi-megabyte payload can't stall the viewer; Raw/Hex note when more was
+// captured than is shown.
 private const val MaxTextChars = 500_000
 private const val MaxHexBytes = 1_000_000
+
+/** One fetch that satisfies both ceilings above, so switching previewers never goes back to the daemon. */
+internal const val PreviewByteLimit = 2 * 1024 * 1024
+
+/**
+ * Fetch the part of a captured body a previewer can actually show, and recompose when it lands.
+ *
+ * A prefix, not the payload: a body is bounded by the disk it was spooled to (ADR-0069), and every
+ * previewer below already refuses to render more than a couple of megabytes anyway. A null handle — no
+ * body, or a tab that is not showing one — reads as empty and starts no fetch.
+ */
+@Composable
+internal fun rememberBodyBytes(handle: BodyHandle?, limit: Int = PreviewByteLimit): ByteString {
+    val loader = LocalBodyLoader.current
+    var bytes by remember(handle) { mutableStateOf(ByteString.EMPTY) }
+    LaunchedEffect(handle, limit) { bytes = loader.prefix(handle, limit) }
+    return bytes
+}
 
 /**
  * Renders a request/response body with the previewer that fits it, chosen by [analyzeBody]. When more
  * than one previewer applies, a compact switch lets the user override (e.g. read an image's bytes as
  * hex, or a JSON body as plain text); the choice re-defaults whenever the body changes so stepping
  * through rows always opens the best view.
+ *
+ * [body] is the prefix that was fetched and [capturedSize] is how long the body actually is; they differ
+ * once a payload is larger than a viewer should hold (ADR-0069), and the difference is shown rather than
+ * hidden — "the rest is missing" and "the rest is not on screen yet" are not the same claim.
  */
 @Composable
 internal fun BodyPreview(
     body: ByteString,
+    capturedSize: Long,
     contentType: String?,
     declaredSize: Long,
     truncated: Boolean,
@@ -66,6 +92,7 @@ internal fun BodyPreview(
         return
     }
     var selected by remember(body) { mutableStateOf(analysis.default) }
+    val partial = capturedSize > body.size
 
     Column(modifier) {
         if (analysis.previewers.size > 1) {
@@ -81,6 +108,12 @@ internal fun BodyPreview(
         if (truncated && selected != PreviewKind.Image) {
             MutedText(
                 "(truncated during capture • declared ${formatBytes(declaredSize)})",
+                Modifier.padding(start = 16.dp, end = 16.dp, top = 8.dp),
+            )
+        }
+        if (partial && selected != PreviewKind.Image) {
+            MutedText(
+                "(showing the first ${formatBytes(body.size.toLong())} of ${formatBytes(capturedSize)})",
                 Modifier.padding(start = 16.dp, end = 16.dp, top = 8.dp),
             )
         }

@@ -1,6 +1,7 @@
 package com.venbiasa.wailo.mcp
 
 import com.venbiasa.wailo.daemon.DaemonClient
+import com.venbiasa.wailo.engine.BodyRef
 import com.venbiasa.wailo.engine.CapturedExchange
 import com.venbiasa.wailo.engine.ConnectedDevice
 import com.venbiasa.wailo.engine.PausedExchange
@@ -58,6 +59,13 @@ internal interface McpBackend {
 
     fun findExchangeById(id: String): CapturedExchange?
     fun findHold(id: String): PausedExchange?
+
+    /**
+     * Read the first [limit] bytes behind a captured body's handle. Bodies do not travel with rows
+     * (ADR-0069), and an agent has a body budget anyway, so a tool fetches exactly the prefix it is
+     * about to render.
+     */
+    suspend fun readBody(ref: BodyRef, limit: Int): ByteArray
     suspend fun waitForExchange(timeout: Duration, predicate: (CapturedExchange) -> Boolean): CapturedExchange?
     suspend fun waitForHold(timeout: Duration, predicate: (PausedExchange) -> Boolean): PausedExchange?
     suspend fun clear()
@@ -121,6 +129,7 @@ internal class DaemonMcpBackend(
 
     override fun findExchangeById(id: String) = daemon.findExchangeById(id)
     override fun findHold(id: String) = daemon.findHold(id)
+    override suspend fun readBody(ref: BodyRef, limit: Int) = daemon.readBody(ref, length = limit)
     override suspend fun waitForExchange(timeout: Duration, predicate: (CapturedExchange) -> Boolean) =
         daemon.waitForExchange(timeout, predicate)
     override suspend fun waitForHold(timeout: Duration, predicate: (PausedExchange) -> Boolean) =
@@ -185,6 +194,7 @@ internal class LocalMcpBackend(
 
     override fun findExchangeById(id: String) = host.findExchangeById(id)
     override fun findHold(id: String) = host.queries.findHold(id)
+    override suspend fun readBody(ref: BodyRef, limit: Int) = host.readBody(ref, offset = 0, length = limit)
     override suspend fun waitForExchange(timeout: Duration, predicate: (CapturedExchange) -> Boolean) =
         host.queries.waitForExchange(timeout = timeout, predicate = predicate)
     override suspend fun waitForHold(timeout: Duration, predicate: (PausedExchange) -> Boolean) =

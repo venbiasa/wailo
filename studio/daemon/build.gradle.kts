@@ -24,6 +24,8 @@ application {
 
 dependencies {
     api(projects.host)
+    // The daemon is the only thing that adapts the relay to the engine (ADR-0070); no frontend sees it.
+    implementation(projects.proxy)
     implementation(libs.kotlinx.serialization.json)
 
     testImplementation(kotlin("test"))

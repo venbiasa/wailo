@@ -1,5 +1,6 @@
 package com.venbiasa.wailo.daemon
 
+import com.venbiasa.wailo.engine.BodyRef
 import com.venbiasa.wailo.host.HeadlessHost
 import com.venbiasa.wailo.host.HostBreakpointRule
 import com.venbiasa.wailo.host.HostMapLocalRule
@@ -58,8 +59,18 @@ internal class DaemonRuntime(
     private val pairingSupported: Boolean,
     mcpAccess: Boolean = true,
     mcpRedactSecrets: Boolean = true,
+    proxyPort: Int = DEFAULT_PROXY_PORT,
     private val fixtures: DaemonFixturesStore = DaemonFixturesStore(),
 ) : AutoCloseable {
+    /**
+     * The bundled proxy, off until something explicitly starts it (ADR-0070). Daemon-owned like every
+     * other master, so a CLI or menu bar session can start and stop it with no window open.
+     */
+    private val proxy = ProxyController(host.engine, proxyPort)
+
+    /** Whether the proxy is holding this daemon up: a client pointed at a dead one loses its network. */
+    val proxyRunning: Boolean get() = proxy.running
+
     // Daemon-owned rather than engine-owned: neither value changes what is captured, only what an MCP
     // client is allowed to do with it, and both must outlive whichever frontend flipped them.
     private val _mcpAccess = MutableStateFlow(mcpAccess)
@@ -176,7 +187,24 @@ internal class DaemonRuntime(
             adbSupported = adb.supported,
             adbExecutable = adb.executablePath,
             adbDevices = adb.devices.value.map { AdbDeviceDto(it.serial, it.name, it.status.name, it.error) },
+            proxy = proxy.sample().toDto(),
         )
+    }
+
+    fun setProxyEnabled(enabled: Boolean, port: Int? = null): ProxyStatus {
+        if (port != null) proxy.setPort(port)
+        if (enabled) proxy.start() else proxy.stop()
+        val status = proxy.sample()
+        // Persisted after the attempt, so a port that would not bind is not the one a restart retries.
+        if (status.running) settings.update { it.copy(proxyPort = status.port) }
+        return status
+    }
+
+    fun setProxyPort(port: Int): ProxyStatus {
+        proxy.setPort(port)
+        val status = proxy.sample()
+        settings.update { it.copy(proxyPort = port) }
+        return status
     }
 
     suspend fun rebind(port: Int): Boolean {
@@ -317,6 +345,7 @@ internal class DaemonRuntime(
     }
 
     override fun close() {
+        proxy.close()
         usb.close()
         adb.close()
         host.stop()
@@ -539,6 +568,15 @@ internal class DaemonServer(
                 runtime.host.clear()
                 success()
             }
+            "read_body" -> {
+                val value = request.decode(ReadBodyRequest.serializer())
+                val bytes = runtime.host.readBody(
+                    BodyRef(value.id, value.size),
+                    value.offset,
+                    value.length.coerceAtMost(MAX_BODY_READ_BYTES),
+                )
+                success(DaemonJson.encodeToJsonElement(ReadBodyResponse(bytes.encodeBase64())))
+            }
             "set_capturing" -> {
                 runtime.host.setCapturing(request.decode(BooleanValue.serializer()).value)
                 success()
@@ -579,6 +617,15 @@ internal class DaemonServer(
                 runtime.setUsbPort(request.decode(IntValue.serializer()).value)
                 success()
             }
+            "set_proxy" -> {
+                val value = request.decode(SetProxyRequest.serializer())
+                success(DaemonJson.encodeToJsonElement(runtime.setProxyEnabled(value.enabled, value.port).toDto()))
+            }
+            "set_proxy_port" -> success(
+                DaemonJson.encodeToJsonElement(
+                    runtime.setProxyPort(request.decode(IntValue.serializer()).value).toDto(),
+                ),
+            )
             "set_capture_filter" -> {
                 val value = request.decode(CaptureFilterRequest.serializer())
                 runtime.updateCaptureFilter(
@@ -723,6 +770,13 @@ internal class DaemonServer(
 
     private companion object {
         const val STOP_RESPONSE_GRACE_MS = 100L
+
+        /**
+         * The most one `read_body` may return. A range read exists so a caller never has to hold a whole
+         * body; a caller that asks for one anyway gets a page at a time instead of taking the daemon's
+         * heap down with it.
+         */
+        const val MAX_BODY_READ_BYTES = 8 * 1024 * 1024
     }
 }
 

@@ -25,6 +25,8 @@ internal data class MenuState(
     // rather than as a switch that flips back on the next poll.
     val allowlistConfigured: Boolean,
     val blocklistConfigured: Boolean,
+    val proxyRunning: Boolean,
+    val proxyPort: Int,
     val studioAttached: Boolean,
 ) {
     val address: String get() = "$lanAddress:$capturePort"
@@ -36,6 +38,7 @@ internal data class MenuState(
 internal class MenuActions(
     val showStudio: () -> Unit,
     val setCapturing: (Boolean) -> Unit,
+    val setProxyEnabled: (Boolean) -> Unit,
     val setMapLocalEnabled: (Boolean) -> Unit,
     val setBreakpointsEnabled: (Boolean) -> Unit,
     val setSeedsEnabled: (Boolean) -> Unit,
@@ -60,6 +63,9 @@ internal class TrayMenu(
     // and what address there is to copy.
     private val showStudio = MenuItem("Show Studio").apply { isEnabled = false }
     private val recordTraffic = CheckboxMenuItem("Record Traffic")
+    // A daemon-owned listener with no window behind it, so it qualifies for a row of its own (ADR-0066) —
+    // and a headless session is the case where the menu bar is the only place it can be turned off.
+    private val proxy = CheckboxMenuItem("Proxy")
     private val listenOn = Menu("Listen on").apply { isEnabled = false }
     // The parent row already spells the address out, so these say only what they do with it.
     private val copyAddress = MenuItem("Copy")
@@ -85,6 +91,7 @@ internal class TrayMenu(
         add(showStudio)
         addSeparator()
         add(recordTraffic)
+        add(proxy)
         addSeparator()
         listenOn.add(copyAddress)
         listenOn.add(copyHost)
@@ -112,6 +119,7 @@ internal class TrayMenu(
         // itemStateChanged fires after AWT has already flipped the box, so the daemon is told what the user
         // now sees. A refused write is corrected by the next poll rather than fought here.
         recordTraffic.addItemListener { actions.setCapturing(recordTraffic.state) }
+        proxy.addItemListener { actions.setProxyEnabled(proxy.state) }
         mapLocal.addItemListener { actions.setMapLocalEnabled(mapLocal.state) }
         breakpoints.addItemListener { actions.setBreakpointsEnabled(breakpoints.state) }
         seeds.addItemListener { actions.setSeedsEnabled(seeds.state) }
@@ -137,6 +145,10 @@ internal class TrayMenu(
             else -> "Wailo — paused on ${next.address}"
         }
         recordTraffic.state = next.capturing
+        // The port is in the label because it is the thing a user needs when pointing something at it,
+        // and there is nowhere else in this menu to read it.
+        proxy.label = if (next.proxyRunning) "Proxy on ${next.proxyPort}" else "Proxy"
+        proxy.state = next.proxyRunning
         mapLocal.state = next.mapLocalEnabled
         breakpoints.state = next.breakpointsEnabled
         seeds.state = next.seedsEnabled

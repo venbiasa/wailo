@@ -29,7 +29,7 @@ class CurlCommandTest {
               -H 'Content-Type: application/json' \
               -d '{"name":"O'"'"'Reilly"}'
             """.trimIndent(),
-            request.toCurlCommand(),
+            request.toCurlCommand(request.body),
         )
     }
 
@@ -45,7 +45,7 @@ class CurlCommandTest {
             curl 'https://api.example.com/users' \
               -X 'GET'
             """.trimIndent(),
-            request.toCurlCommand(),
+            request.toCurlCommand(request.body),
         )
     }
 
@@ -63,7 +63,7 @@ class CurlCommandTest {
               -X 'POST' \
               --data-raw '@literal'
             """.trimIndent(),
-            request.toCurlCommand(),
+            request.toCurlCommand(request.body),
         )
     }
 
@@ -81,7 +81,7 @@ class CurlCommandTest {
               -X 'PUT' \
               --data-binary @-
             """.trimIndent(),
-            request.toCurlCommand(),
+            request.toCurlCommand(request.body),
         )
     }
 }

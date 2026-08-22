@@ -5,10 +5,14 @@ import okio.ByteString
 import okio.ByteString.Companion.encodeUtf8
 
 /**
- * Builds a shell-safe cURL command for the captured request, including every captured header and body
- * byte. Text bodies stay readable; arbitrary binary bodies are piped through `printf` as octal escapes.
+ * Builds a shell-safe cURL command for the captured request, including every captured header. Text
+ * bodies stay readable; arbitrary binary bodies are piped through `printf` as octal escapes.
+ *
+ * [body] is passed in rather than read off the request, because a captured request no longer carries
+ * its bytes (ADR-0069) — the caller fetches them, and is the one that decides how much of an enormous
+ * payload it is willing to paste into a shell command.
  */
-internal fun HttpRequest.toCurlCommand(): String {
+internal fun HttpRequest.toCurlCommand(body: ByteString): String {
     val textBody = body.utf8().takeIf { '\u0000' !in it && it.encodeUtf8() == body }
     val command = buildString {
         append("curl ")

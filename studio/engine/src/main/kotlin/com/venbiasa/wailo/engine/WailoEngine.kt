@@ -50,7 +50,10 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import okio.ByteString
 import okio.ByteString.Companion.toByteString
+import java.io.ByteArrayInputStream
+import java.io.InputStream
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.ServerSocket
@@ -61,13 +64,35 @@ import javax.jmdns.JmDNS
 import javax.jmdns.ServiceInfo
 import kotlin.time.Duration.Companion.seconds
 
-/** One captured exchange plus the identity of the session that produced it. */
+/**
+ * Which capture path produced a row (ADR-0070). Deliberately not on the protobuf: a proxied exchange is
+ * built here and never crosses the device wire, so putting the field there would push a change through
+ * the consumer-pinned SDK build to describe something no device can send.
+ */
+enum class CaptureSource {
+    SDK,
+    PROXY,
+}
+
+/**
+ * One captured exchange plus the identity of the session that produced it.
+ *
+ * [exchange] carries the metadata only: its request/response `body` fields are empty by construction,
+ * and the bytes live in the engine's [BodyStore] behind [requestBody]/[responseBody]. Everything that
+ * describes a body without being one — `body_size`, `body_truncated`, `Content-Type` — is still on the
+ * protobuf, so a list row costs nothing to render. A null handle means the body was empty.
+ */
 data class CapturedExchange(
     val deviceName: String,
     val appId: String,
     val platform: String,
     val exchange: HttpExchange,
-)
+    val requestBody: BodyRef? = null,
+    val responseBody: BodyRef? = null,
+    val source: CaptureSource = CaptureSource.SDK,
+) {
+    internal val bodyRefs: List<BodyRef> get() = listOfNotNull(requestBody, responseBody)
+}
 
 /**
  * A request/response a device has paused at a breakpoint and is holding open until the desktop decides
@@ -112,7 +137,7 @@ fun interface MapLocalBodyProvider {
  * answers a device's [BodyRequest] by reading the body through [bodyProvider]. It likewise pushes
  * [BreakpointRules] and, when a device pauses a matching request/response, surfaces it via
  * [pausedExchanges] and releases it through [resumeBreakpoint]/[abortBreakpoint] (ADR-0027). UI-agnostic
- * by design: no Compose here, and no filesystem access beyond the provider seam.
+ * by design: no Compose here, and no filesystem access beyond the [bodyProvider] and [BodyStore] seams.
  */
 class WailoEngine(
     port: Int = DEFAULT_PORT,
@@ -130,6 +155,12 @@ class WailoEngine(
      */
     val pairings: PairingManager = PairingManager(InMemoryPairingKeyStore()),
     requirePairing: Boolean = false,
+    /**
+     * Where captured bodies go once decoded. Defaults to the heap so a bare engine behaves as it always
+     * did; the daemon passes the encrypted on-disk spool, which is what makes a capture bounded by disk
+     * rather than by RAM. The engine never closes it — it belongs to whoever built it.
+     */
+    private val bodyStore: BodyStore = InMemoryBodyStore(),
 ) {
     private val _requirePairing = MutableStateFlow(requirePairing)
 
@@ -230,9 +261,10 @@ class WailoEngine(
     private val _maxRetained = MutableStateFlow(maxRetained.coerceIn(RETAINED_RANGE))
 
     /**
-     * How many exchanges [exchanges] holds before the oldest fall off. Some cap has to exist — bodies are
-     * kept whole in memory and a capture has no natural end — but where it belongs is a judgement only the
-     * person watching the traffic can make, so it moves at runtime via [setMaxRetained].
+     * How many exchanges [exchanges] holds before the oldest fall off. Some cap has to exist — a capture
+     * has no natural end — but where it belongs is a judgement only the person watching the traffic can
+     * make, so it moves at runtime via [setMaxRetained]. It counts exchanges rather than bytes because
+     * the bytes are in the [BodyStore], which bounds itself against the volume it is spooling to.
      */
     val maxRetained: StateFlow<Int> = _maxRetained.asStateFlow()
 
@@ -306,6 +338,10 @@ class WailoEngine(
     // Rule pushes run off the caller's thread; serialized so frames to a session never interleave.
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val sendMutex = Mutex()
+
+    // Every edit to [_exchanges] that also frees bodies takes this, so exactly one caller decides which
+    // rows were dropped and is therefore the only one allowed to release their bytes.
+    private val retentionLock = Any()
 
     // Written by listen()/stop(), read by the Bonjour registration coroutine and by [listening].
     @Volatile
@@ -689,9 +725,12 @@ class WailoEngine(
         _capturing.value = enabled
     }
 
-    /** Drop all captured exchanges. Recording state is unchanged. */
+    /** Drop all captured exchanges and their spooled bodies. Recording state is unchanged. */
     fun clear() {
-        _exchanges.value = emptyList()
+        val dropped = synchronized(retentionLock) {
+            _exchanges.value.also { _exchanges.value = emptyList() }
+        }
+        releaseBodies(dropped)
     }
 
     /**
@@ -702,7 +741,13 @@ class WailoEngine(
     fun setMaxRetained(max: Int) {
         val capped = max.coerceIn(RETAINED_RANGE)
         _maxRetained.value = capped
-        _exchanges.update { it.takeLast(capped) }
+        val evicted = synchronized(retentionLock) {
+            val current = _exchanges.value
+            val overflow = (current.size - capped).coerceAtLeast(0)
+            if (overflow > 0) _exchanges.value = current.subList(overflow, current.size)
+            current.subList(0, overflow)
+        }
+        releaseBodies(evicted)
     }
 
     /**
@@ -889,13 +934,114 @@ class WailoEngine(
 
     private fun record(hello: Hello?, exchange: HttpExchange) {
         if (!_capturing.value) return
+        // Spool before the row is published, so nothing can observe an exchange whose bytes are not
+        // fetchable yet. The decoded payload goes out of scope with this frame, which is the point:
+        // the protobuf that arrived is the last thing holding it.
+        val request = spool(exchange.request?.body)
+        val response = spool(exchange.response?.body)
         val row = CapturedExchange(
             deviceName = hello?.device_name ?: "unknown",
             appId = hello?.app_id ?: "unknown",
             platform = hello?.platform ?: "unknown",
-            exchange = exchange,
+            exchange = exchange.stripped(lostRequest = request.lost, lostResponse = response.lost),
+            requestBody = request.ref,
+            responseBody = response.ref,
         )
-        _exchanges.update { (it + row).takeLast(_maxRetained.value) }
+        append(row)
+    }
+
+    private class Spooled(val ref: BodyRef?, val lost: Boolean)
+
+    /**
+     * Hand one side's bytes to the store. A store that cannot take them — a full volume, most likely —
+     * must not take the exchange down with it, and must not leave a row claiming the body was empty
+     * either. Dropping the handle while marking that side truncated says what actually happened: this
+     * many bytes existed and none of them are here, which is the same thing a device says when it gives
+     * up mid-capture.
+     */
+    private fun spool(body: ByteString?): Spooled {
+        if (body == null || body.size == 0) return Spooled(null, lost = false)
+        val ref = runCatching { bodyStore.put(body) }.getOrNull()
+        return Spooled(ref, lost = ref == null)
+    }
+
+    /**
+     * Publish [row] and retire whatever it pushed past the retention cap.
+     *
+     * Serialized rather than done through [MutableStateFlow.update], because the release is not part of
+     * the value: `update` re-runs its block on contention, and a block that had already freed the bytes
+     * of the exchanges it dropped would free them again — or free the wrong ones — on the retry.
+     */
+    private fun append(row: CapturedExchange) {
+        val evicted = synchronized(retentionLock) {
+            val next = _exchanges.value + row
+            val overflow = (next.size - _maxRetained.value).coerceAtLeast(0)
+            _exchanges.value = if (overflow == 0) next else next.subList(overflow, next.size)
+            next.subList(0, overflow)
+        }
+        releaseBodies(evicted)
+    }
+
+    private fun releaseBodies(rows: List<CapturedExchange>) {
+        if (rows.isEmpty()) return
+        runCatching { bodyStore.release(rows.flatMap { it.bodyRefs }) }
+    }
+
+    /**
+     * Retire the [count] oldest exchanges and free their bodies. The store calls this when the volume it
+     * spools to is running out of room: the alternative is to stop capturing, and a live capture that
+     * quietly drops the newest traffic is worse than one that forgets the oldest — which is what the
+     * retention cap already does, just for a different reason.
+     */
+    fun evictOldest(count: Int) {
+        if (count <= 0) return
+        val evicted = synchronized(retentionLock) {
+            val current = _exchanges.value
+            val drop = minOf(count, current.size)
+            if (drop == 0) return
+            _exchanges.value = current.subList(drop, current.size)
+            current.subList(0, drop)
+        }
+        releaseBodies(evicted)
+    }
+
+    private fun HttpExchange.stripped(lostRequest: Boolean, lostResponse: Boolean) = copy(
+        request = request?.let { it.copy(body = ByteString.EMPTY, body_truncated = it.body_truncated || lostRequest) },
+        response = response?.let { it.copy(body = ByteString.EMPTY, body_truncated = it.body_truncated || lostResponse) },
+    )
+
+    /**
+     * Read back the bytes behind a [CapturedExchange]'s handle. Goes through the engine rather than
+     * exposing the store, so a frontend cannot write to it or release someone else's rows.
+     */
+    fun readBody(ref: BodyRef, offset: Long, length: Int): ByteArray =
+        runCatching { bodyStore.read(ref, offset, length) }.getOrDefault(ByteArray(0))
+
+    /** Stream a whole body, for an export or a proxied resume that must not materialize it. */
+    fun openBody(ref: BodyRef): InputStream =
+        runCatching { bodyStore.open(ref) }.getOrElse { ByteArrayInputStream(ByteArray(0)) }
+
+    /**
+     * Open a body sink for a capture path that produces its bytes over time rather than receiving them
+     * whole (ADR-0070). The proxy writes into one of these while the same bytes are on their way to the
+     * client, so a response larger than memory never becomes a value anywhere.
+     */
+    fun openBodySink(): BodySink = bodyStore.openSink()
+
+    /**
+     * Record an exchange this engine did not receive over the device wire — today, one the bundled proxy
+     * relayed. Its bodies are already in the store (see [openBodySink]), so this only publishes the row
+     * and applies the same retention every captured exchange gets.
+     *
+     * Refuses while capture is paused, and drops the bodies rather than leaking them: the caller has
+     * already spooled by the time it can be told no.
+     */
+    fun record(row: CapturedExchange) {
+        if (!_capturing.value) {
+            releaseBodies(listOf(row))
+            return
+        }
+        append(row)
     }
 
     // Best-effort: JmDNS init can block ~1s and fails without a usable network interface; never wedge a bind.
@@ -957,8 +1103,8 @@ class WailoEngine(
 
         /**
          * What [setMaxRetained] will accept. The floor keeps the list long enough to still be a record of
-         * a session rather than of the last few seconds; past the ceiling it is the heap, not this cap,
-         * that decides how long a capture survives, since every retained exchange holds its bodies whole.
+         * a session rather than of the last few seconds; past the ceiling it is the metadata of that many
+         * exchanges, not the cap, that decides what a capture costs.
          */
         val RETAINED_RANGE: IntRange = 100..100000
 

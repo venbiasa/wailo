@@ -32,6 +32,8 @@ flowchart LR
   adb["daemon: adb reverse manager"] --> client
   server --> session["engine: transport-neutral session handler"]
   usb --> session
+  uninstrumented["Browser / CLI / third-party app"] -->|"HTTP proxy"| relay["daemon → proxy: MITM listener"]
+  relay --> store
   session --> store["engine: SessionStore (per device/app)"]
   store --> host["host: Seed spend + queries"]
   host --> daemon["daemon: authenticated loopback RPC"]
@@ -89,15 +91,64 @@ flowchart LR
   device exposing the configured USB port; `Hello` identifies the app after the tunnel opens.
 - Deferred: Windows/Linux iOS USB support.
 
+## The second capture path: the bundled proxy
+
+The SDK cannot reach a third-party app, a shipped binary, a browser, or a CLI. For those, the daemon can
+run an HTTP proxy (`proxy`, off by default, loopback, port 9090 — ADR-0070). It is additive: the SDK stays
+the zero-setup path, and both produce rows in one timeline distinguished by `CapturedExchange.source`.
+
+The two paths are named **Socket** and **Proxy** in the UI, after how traffic reaches Wailo: an
+instrumented app opens a WebSocket and reports what it saw, or Wailo sits in the path and relays. The top
+bar shows both listeners permanently — a dot and `address (Socket)` / `address (Proxy)` — because an
+indicator that disappears when off makes "not capturing" and "no such feature" look the same. Pausing
+capture greys both, since a paused capture keeps every listener bound and records from neither. In the
+traffic list the path is a tick in a `Proxy` column beside `Edited`, filterable like any other field
+(`proxy is true`); the Client column stays the plain client identity.
+
+`Socket` is a UI name only — in code the source is still `CaptureSource.SDK`, since what produced the row
+is the SDK regardless of which transport carried it (LAN WebSocket, usbmux, or `adb reverse`).
+
+- The **daemon owns the listener**, like every other master (ADR-0058/0066). A browser pointed at Wailo
+  must not lose its network because a window closed, so a running proxy is itself a reason the daemon stays
+  alive, and Studio, the CLI (`set_proxy`), and the menu bar all merely ask it to start or stop. In Studio
+  it is a switch and a port under Settings — two scalars, so it gets a section, not a panel — with the
+  address shown in the main window's top bar beside the Socket listener's while it runs.
+- `proxy` depends on `protocol` and the JDK, nothing else. It hands over a protobuf plus body handles
+  through `ProxyCaptureSink`; `daemon` is the only place that maps those onto engine rows. That is what
+  keeps a relay from reaching capture state, and lets the module be tested against loopback origins.
+- **Nothing is buffered whole.** Each body is teed as it is relayed — the client and the origin get the
+  original bytes at their original pace, framing included, while a copy streams into the same encrypted
+  spool an SDK capture uses. A response larger than memory is not a special case. The inspection copy is
+  decoded (gzip/deflate) and its recorded `Content-Length` corrected, so what is stored is what a human
+  wants to read while the wire stays byte-exact.
+- **HTTPS starts locked** (ADR-0071). `CONNECT` is an opaque tunnel: this code never terminates TLS. The
+  tunnel is still recorded as a row saying so, so "not decrypted" is legible rather than looking like
+  traffic Wailo missed. Decryption will need a local root the user installs *and* a host they unlock by
+  name; neither happens on its own.
+- One connection per virtual thread, blocking IO throughout — a proxy is almost entirely parked on a
+  socket, and blocking reads keep the framing code readable.
+- Not yet: rules (Capture Filter, Map Local, Breakpoints, Seeds) apply to SDK traffic only; the proxy is a
+  recorder until they are generalized. It is loopback-only, so a physical device cannot reach it yet.
+
 ## Multi-session model
 
 Each connection is a `Session` (device + app identity from `Hello`). The `engine` keeps sessions and
 per-session flows, plus a merged view. The desktop groups by session in a sidebar.
 
-Captured exchanges are held in the daemon's memory only, so the engine keeps a bounded window of the most recent ones
-(10,000 by default) and drops the oldest past it. The cap is changeable at runtime from Settings and
-persists across restarts; lowering it trims what is already held, since the reason to lower it is memory
-that is already spent.
+Captured exchanges live only for as long as the daemon does, so the engine keeps a bounded window of the
+most recent ones (10,000 by default) and drops the oldest past it. The cap is changeable at runtime from
+Settings and persists across restarts; lowering it trims what is already held, since the reason to lower
+it is a cost that is already being paid.
+
+What that window holds is metadata. A row's request and response bodies are spooled to a `BodyStore` on
+arrival and the exchange keeps only a reference, so a capture is bounded by the volume rather than by RAM
+— which is what lets a proxy stream something larger than memory through it (ADR-0069). The daemon's
+implementation encrypts each body in 64 KiB chunks under a key that only ever exists in its memory, in a
+directory it deletes on the way out, so nothing readable outlives the process. Fixed-size chunks make a
+read a range read: a viewer scrolled into the middle of a huge response decrypts one chunk. Frontends
+never see the store — they ask the daemon for a range and get bounded bytes back, only when something is
+actually looking at that body. When the volume runs low, the store asks the engine to retire its oldest
+exchanges rather than stop recording.
 
 ## Studio surfaces
 
@@ -112,7 +163,7 @@ persisted width (ADR-0021). The panels are:
 | Breakpoints | Pause matching requests/responses for live editing (ADR-0027) | pushed to devices |
 | Seed | Canned responses that answer paused exchanges, in order (ADR-0041) | desktop only — never pushed |
 | Devices | Connected devices, USB/LAN, and Wi-Fi trust (ADR-0039/0040) | host |
-| Settings | Ports, retention, theme, text scale | host, persisted |
+| Settings | Socket/USB/Proxy ports, the proxy switch, retention, AI tool access | host + daemon, persisted |
 
 Held exchanges are edited in a second top-level window, not a modal, so traffic stays browsable beside
 it (ADR-0034). That window is user-owned: it opens from the Breakpoints panel or when a hold needs a
@@ -163,9 +214,10 @@ the daemon is running and returns. `wailo-mcp` remains a client-owned stdio proc
 it is now only a protocol adapter over the daemon. Multiple MCP clients, CLI invocations, and Studio can
 coexist without capture-port conflicts or split state. Map Local, breakpoint rules, and the capture filter
 are daemon files under `~/.wailo/` so a restart still serves the same mocks and filter; Studio's grouped
-layouts ride along as opaque strings. Captured traffic and paused holds remain in-memory session state
-(ADR-0061). Map Local response bytes stay in the daemon's host registry and are fetched lazily through
-`MapLocalBodyProvider`.
+layouts ride along as opaque strings. Captured traffic and paused holds remain session state that dies
+with the daemon (ADR-0061), even though captured bodies now sit in an encrypted spool under
+`~/.wailo/bodies/` rather than on the heap (ADR-0069). Map Local response bytes stay in the daemon's host
+registry and are fetched lazily through `MapLocalBodyProvider`.
 
 Two daemon settings govern that adapter rather than its lifecycle (ADR-0059). AI tool access, on by
 default, is a gate: with it off every MCP tool including `status` is refused, while capture, Studio, and the
@@ -178,7 +230,7 @@ and from `wailo-cli`.
 ## Module layout
 
 See [AGENTS.md](AGENTS.md) for the module dependency rules. `sdk-*` is intentionally isolated from
-`engine`/`host`/`daemon`/`shared`/`desktopApp`/`cli`/`mcp` because it ships inside third-party apps.
+`engine`/`host`/`proxy`/`daemon`/`shared`/`desktopApp`/`cli`/`mcp` because it ships inside third-party apps.
 
 The device-side transport (`CaptureSink` + `WailoClient`) lives inside `sdk-android`. It used to be a
 separate multiplatform `core` module kept thin so iOS could share it; once iOS became native Swift

@@ -1,5 +1,7 @@
 package com.venbiasa.wailo.daemon
 
+import com.venbiasa.wailo.engine.BodyRef
+import com.venbiasa.wailo.engine.CaptureSource
 import com.venbiasa.wailo.engine.CapturedExchange
 import com.venbiasa.wailo.engine.ConnectedDevice
 import com.venbiasa.wailo.engine.DeviceTransport
@@ -21,7 +23,7 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import okio.ByteString.Companion.toByteString
 
-internal const val DAEMON_CONTROL_PROTOCOL_VERSION = 6
+internal const val DAEMON_CONTROL_PROTOCOL_VERSION = 8
 
 /**
  * The one command whose socket is not answered and closed. The daemon holds it open and counts it as a
@@ -116,22 +118,76 @@ internal data class PollResponse(
     val adbSupported: Boolean,
     val adbExecutable: String? = null,
     val adbDevices: List<AdbDeviceDto>,
+    val proxy: ProxyStatusDto? = null,
 )
 
+/**
+ * A row as it crosses the control channel: the exchange's metadata, plus handles for bodies the daemon
+ * is holding. The bytes stay behind `read_body` — a poll that inlined them would push a session's entire
+ * traffic through JSON, twice (base64 in, decode out), to draw a list of URLs (ADR-0069).
+ */
 @Serializable
 internal data class CapturedExchangeDto(
     val deviceName: String,
     val appId: String,
     val platform: String,
     val exchangeBase64: String,
+    val requestBody: BodyRefDto? = null,
+    val responseBody: BodyRefDto? = null,
+    // Which capture path produced the row (ADR-0070). Defaulted, and read leniently, so a value this
+    // build does not know becomes an SDK row rather than an unparseable poll.
+    val source: String = CaptureSource.SDK.name,
 ) {
     fun toDomain() = CapturedExchange(
         deviceName = deviceName,
         appId = appId,
         platform = platform,
         exchange = HttpExchange.ADAPTER.decode(exchangeBase64.decodeBase64()),
+        requestBody = requestBody?.toDomain(),
+        responseBody = responseBody?.toDomain(),
+        source = runCatching { CaptureSource.valueOf(source) }.getOrDefault(CaptureSource.SDK),
     )
 }
+
+@Serializable
+internal data class ProxyStatusDto(
+    val running: Boolean,
+    val port: Int,
+    val connections: Int,
+    val exchanges: Long,
+    val error: String? = null,
+) {
+    fun toDomain() = ProxyStatus(
+        running = running,
+        port = port,
+        connections = connections,
+        exchanges = exchanges,
+        error = error,
+    )
+}
+
+@Serializable
+internal data class SetProxyRequest(val enabled: Boolean, val port: Int? = null)
+
+@Serializable
+internal data class BodyRefDto(val id: String, val size: Long) {
+    fun toDomain() = BodyRef(id = id, size = size)
+}
+
+/**
+ * A bounded slice of one spooled body. [size] rides along so the daemon can locate the last chunk
+ * without an index; a handle from a row that has since been evicted simply reads empty.
+ */
+@Serializable
+internal data class ReadBodyRequest(
+    val id: String,
+    val size: Long,
+    val offset: Long,
+    val length: Int,
+)
+
+@Serializable
+internal data class ReadBodyResponse(val bytesBase64: String)
 
 @Serializable
 internal data class ConnectedDeviceDto(
@@ -367,7 +423,20 @@ internal fun CapturedExchange.toDto() = CapturedExchangeDto(
     appId = appId,
     platform = platform,
     exchangeBase64 = exchange.encode().encodeBase64(),
+    requestBody = requestBody?.toDto(),
+    responseBody = responseBody?.toDto(),
+    source = source.name,
 )
+
+internal fun ProxyStatus.toDto() = ProxyStatusDto(
+    running = running,
+    port = port,
+    connections = connections,
+    exchanges = exchanges,
+    error = error,
+)
+
+internal fun BodyRef.toDto() = BodyRefDto(id = id, size = size)
 
 internal fun ConnectedDevice.toDto() = ConnectedDeviceDto(
     connectionId = connectionId,

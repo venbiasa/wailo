@@ -57,8 +57,11 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.venbiasa.wailo.protocol.Header
-import com.venbiasa.wailo.protocol.HttpResponse
+import com.venbiasa.wailo.shared.BodyHandle
+import com.venbiasa.wailo.shared.BodyLoader
 import com.venbiasa.wailo.shared.FlowEntry
+import com.venbiasa.wailo.shared.LocalBodyLoader
+import com.venbiasa.wailo.shared.prefix
 import com.venbiasa.wailo.shared.format.codeText
 import com.venbiasa.wailo.shared.format.formatBytes
 import com.venbiasa.wailo.shared.format.formatClockTime
@@ -319,11 +322,18 @@ private fun TrafficRow(
     val bookmarked = host in bookmarks
     val allowed = host in allowHosts
     val blocked = host in blockHosts
+    // Bodies are fetched when an action runs, not when the menu is built: a right-click must not pull
+    // megabytes for an entry the user is about to skip past (ADR-0069).
+    val bodyLoader = LocalBodyLoader.current
+    val rowScope = rememberCoroutineScope()
     val actions = buildList {
         if (request != null && url.isNotEmpty()) {
             add(
                 ContextMenuAction("Copy cURL") {
-                    clipboard.setText(AnnotatedString(request.toCurlCommand()))
+                    rowScope.launch {
+                        val body = bodyLoader.prefix(entry.requestBody)
+                        clipboard.setText(AnnotatedString(request.toCurlCommand(body)))
+                    }
                 },
             )
         }
@@ -344,14 +354,29 @@ private fun TrafficRow(
             // tweak; the bytes are copied on select, not per row.
             add(
                 ContextMenuAction("Map Local\u2026") {
-                    onMapLocalFromUrl(url, ruleMethod, response?.headers ?: emptyList(), capturedBody(response))
+                    rowScope.launch {
+                        onMapLocalFromUrl(
+                            url,
+                            ruleMethod,
+                            response?.headers ?: emptyList(),
+                            bodyLoader.capturedBody(entry.responseBody),
+                        )
+                    }
                 },
             )
             // Seed carries the observed status code as well, where Map Local starts at 200: a seed exists
             // to replay this exchange into a hold, so an observed 500 or 429 is usually the whole point.
             add(
                 ContextMenuAction("Seed\u2026") {
-                    onSeedFromUrl(url, ruleMethod, code ?: 0, response?.headers ?: emptyList(), capturedBody(response))
+                    rowScope.launch {
+                        onSeedFromUrl(
+                            url,
+                            ruleMethod,
+                            code ?: 0,
+                            response?.headers ?: emptyList(),
+                            bodyLoader.capturedBody(entry.responseBody),
+                        )
+                    }
                 },
             )
             // Which phase(s) to pause isn't observable from a captured row, so the seeded rule takes the
@@ -403,6 +428,18 @@ private fun TrafficRow(
                         Icon(
                             imageVector = vectorResource(Res.drawable.ic_check),
                             contentDescription = "Edited",
+                            tint = MaterialTheme.colorScheme.onSurface,
+                            modifier = Modifier.size(16.dp),
+                        )
+                    }
+                }
+                // Which path the row arrived by. A mark rather than a label per row: Socket is the
+                // ordinary case, so the column reads as "these few came in the other way".
+                Cell(TrafficColumn.Proxy, widths) {
+                    if (entry.viaProxy) {
+                        Icon(
+                            imageVector = vectorResource(Res.drawable.ic_check),
+                            contentDescription = "Captured through the proxy",
                             tint = MaterialTheme.colorScheme.onSurface,
                             modifier = Modifier.size(16.dp),
                         )
@@ -460,8 +497,8 @@ private fun JumpToLatest(modifier: Modifier, onClick: () -> Unit) {
 
 // The captured response's raw bytes to open a seeded rule's body on, or null when there's nothing to
 // carry. Null, not an empty array: it's what tells the editor to load the rule's own stored body instead.
-private fun capturedBody(response: HttpResponse?): ByteArray? =
-    response?.body?.takeIf { it.size > 0 }?.toByteArray()
+private suspend fun BodyLoader.capturedBody(handle: BodyHandle?): ByteArray? =
+    prefix(handle).takeIf { it.size > 0 }?.toByteArray()
 
 // Scrolls just enough to reveal [index] when it sits past either viewport edge; a fully visible row
 // stays put so keyboard navigation doesn't jolt the list on every keystroke.

@@ -497,7 +497,7 @@ internal fun AddFilterCard(
     // nothing from a pill that looks fine.
     val canAdd = when {
         selectedKey == null || matcher == null || allValues.isEmpty() -> false
-        selectedKey == FilterKey.Edited ->
+        selectedKey.isBoolean ->
             allValues.size == 1 && allValues.first().lowercase() in setOf("true", "false")
         matcher.isNumeric -> allValues.size == 1 && allValues.first().toIntOrNull() != null
         matcher == FilterMatcher.Regex -> allValues.all { runCatching { Regex(it) }.isSuccess }
@@ -707,7 +707,7 @@ internal fun AddFilterCard(
 // What the value field asks for, which is the only hint that a matcher wants a pattern rather than a
 // literal — a wildcard field that just said "Value" would invite a plain string that then matches nothing.
 private fun valuePlaceholder(key: FilterKey?, matcher: FilterMatcher?): String = when {
-    key == FilterKey.Edited -> "true or false"
+    key?.isBoolean == true -> "true or false"
     matcher == null -> "Value"
     matcher.isNumeric -> "Number"
     matcher == FilterMatcher.Wildcard -> "Pattern with *"

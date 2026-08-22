@@ -697,9 +697,12 @@ private fun SeedDetail(
                 }
                 // Reuses the traffic previewer, so an image or binary seed body is shown as itself rather
                 // than as mojibake — a seed can serve any payload Map Local can.
+                // A seed's body is authored here, so it is entirely in memory: what was fetched and what
+                // exists are the same number.
                 PausedTab.Body -> body?.let { bytes ->
                     BodyPreview(
                         body = bytes,
+                        capturedSize = bytes.size.toLong(),
                         contentType = contentType,
                         declaredSize = bytes.size.toLong(),
                         truncated = false,

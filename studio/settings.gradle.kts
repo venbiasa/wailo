@@ -38,6 +38,7 @@ plugins {
 
 include(":engine")
 include(":host")
+include(":proxy")
 include(":daemon")
 include(":shared")
 include(":desktopApp")

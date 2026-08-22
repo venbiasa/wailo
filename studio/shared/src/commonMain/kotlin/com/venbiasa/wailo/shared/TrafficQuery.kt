@@ -111,9 +111,9 @@ private fun buildClause(key: FilterKey, op: String, value: Atom, negatedByPrefix
         else -> listOf(barePart(value.text))
     }
     if (parts.isEmpty()) return null
-    // Edited is a plain boolean with a two-value space, so only equality reads sensibly; anything else
-    // (a substring of "true", a comparison) would be an accident rather than an intent.
-    if (key == FilterKey.Edited) {
+    // A boolean field has a two-value space, so only equality reads sensibly; anything else (a substring
+    // of "true", a comparison) would be an accident rather than an intent.
+    if (key.isBoolean) {
         if (base != FilterMatcher.Contains && base != FilterMatcher.Equals) return null
         return FilterClause(key, FilterMatcher.Equals, parts.map { it.text }, negated)
     }
