@@ -330,7 +330,7 @@ internal suspend fun dispatch(host: DaemonClient, args: ParsedArgs): CommandResu
             val status = host.setProxyEnabled(enabled, args.port.takeIf { args.portSpecified })
             CommandResult(
                 if (status.running) {
-                    "proxy=on address=${status.port}"
+                    "proxy=on address=${status.reachableAddress}"
                 } else {
                     "proxy=off" + (status.error?.let { " error=$it" } ?: "")
                 },
