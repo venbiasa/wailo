@@ -137,6 +137,8 @@ internal fun WailoViewer(
     mapLocalEnabled: Boolean,
     onMapLocalEnabledChange: (Boolean) -> Unit,
     onSeedFromMapLocalRule: (MapLocalRuleDef) -> Unit,
+    onExportRules: suspend () -> String,
+    onImportRules: suspend () -> String,
     breakpointNodes: List<BreakpointNode>,
     onBreakpointLayoutChange: (List<BreakpointNode>) -> Unit,
     breakpointsEnabled: Boolean,
@@ -486,6 +488,8 @@ internal fun WailoViewer(
                                 onSaveBody = onSaveMapLocalBody,
                                 onPickFile = onPickMapLocalFile,
                                 onSeedFromRule = onSeedFromMapLocalRule,
+                                onExportRules = onExportRules,
+                                onImportRules = onImportRules,
                             )
                             ToolPanel.Seed -> SeedManager(
                                 nodes = seedNodes,

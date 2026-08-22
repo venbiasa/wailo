@@ -101,8 +101,10 @@ private val GroupChildIndent = 28.dp
  *
  * The header carries a title, then — heading the right-side actions — the feature master switch
  * ([featureEnabled]/[onFeatureEnabledChange]), any feature-specific [headerActions], an add-rule button
- * ([addRuleIcon]/[addRuleTooltip] → [onAddRule]), a new-group button, and Close; [description] is a
- * one-line caption under it. The master is the single feature on/off (ADR-0030):
+ * ([addRuleIcon]/[addRuleTooltip] → [onAddRule]), a new-group button, [overflowActions] as a three-dot
+ * menu, and Close; [description] is a one-line caption under it. The overflow is placed here rather than
+ * left to the caller so it always lands where a three-dot menu belongs — last, against Close — however
+ * many panels grow one. The master is the single feature on/off (ADR-0030):
  * off dims the list and disables every rule/group switch (their remembered state kept), and the host
  * pushes no rules — so the whole feature goes inert without erasing what's configured, one level above
  * group-gating. [onEditRule] opens a rule (the caller navigates to its editor); a rule isn't committed
@@ -131,6 +133,8 @@ internal fun <T : LayoutRule<T>> GroupedRuleListPage(
     onNodesChange: (List<LayoutNode<T>>) -> Unit,
     onClose: () -> Unit,
     headerActions: @Composable () -> Unit = {},
+    overflowActions: List<ContextMenuAction> = emptyList(),
+    notice: String = "",
     rowActions: (T) -> List<ContextMenuAction> = { emptyList() },
     reorderable: Boolean = true,
     ruleContent: @Composable (T) -> Unit,
@@ -190,11 +194,25 @@ internal fun <T : LayoutRule<T>> GroupedRuleListPage(
                         )
                     }
                 }
+                if (overflowActions.isNotEmpty()) HeaderOverflowMenu(overflowActions)
                 CloseButton(onClose, contentDescription = "Close panel")
             }
             RowDivider()
             if (description.isNotBlank()) {
                 MutedText(description, Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp))
+                RowDivider()
+            }
+            // Sits where the caption does rather than over the list, so the rules an import just added
+            // stay visible behind the sentence describing them.
+            if (notice.isNotBlank()) {
+                Text(
+                    notice,
+                    Modifier.fillMaxWidth()
+                        .background(MaterialTheme.colorScheme.surfaceContainer)
+                        .padding(horizontal = 16.dp, vertical = 10.dp),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
                 RowDivider()
             }
             if (nodes.isEmpty()) {

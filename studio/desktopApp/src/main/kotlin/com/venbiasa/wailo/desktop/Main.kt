@@ -67,6 +67,7 @@ import com.venbiasa.wailo.shared.PausedFlow
 import com.venbiasa.wailo.shared.PickedFile
 import com.venbiasa.wailo.shared.ProxySetupAction
 import com.venbiasa.wailo.shared.ProxyState
+import com.venbiasa.wailo.shared.RuleArchiveCodec
 import com.venbiasa.wailo.shared.RuleNode
 import com.venbiasa.wailo.shared.ResponseHeader
 import com.venbiasa.wailo.shared.SeedLayoutCodec
@@ -96,6 +97,7 @@ import java.awt.Taskbar
 import java.awt.image.BufferedImage
 import java.io.File
 import java.io.FilenameFilter
+import java.time.LocalDate
 import java.util.TimeZone
 import javax.imageio.ImageIO
 import kotlin.coroutines.resume
@@ -740,6 +742,43 @@ private fun runWailo(engine: DaemonClient) = application {
         Unit
     }
 
+    // Rule export/import. One file carries every authored tool, so what a user keeps is one thing rather
+    // than four that can drift apart. Both are host work end to end — the native dialog, the bytes, the
+    // bodies — and hand the panel back the single line it shows.
+    // Both take the owner frame rather than closing over it: `window` is the composition-local of the
+    // FrameWindowScope down at the WailoApp call, which is below where this state lives.
+    val onExportRules: suspend (Frame?) -> String = onExport@{ owner: Frame? ->
+        val target = chooseArchiveFile(owner, save = true) ?: return@onExport ""
+        // buildArchive reads every authored body off disk, so the whole thing goes to IO.
+        withContext(Dispatchers.IO) {
+            writeArchive(
+                target,
+                buildArchive(
+                    mapLocalNodes = mapLocalNodes,
+                    mapLocalEnabled = mapLocalEnabled,
+                    breakpointNodes = breakpointNodes,
+                    breakpointsEnabled = breakpointsEnabled,
+                    seedNodes = seedNodes,
+                    seedsEnabled = seedsEnabled,
+                    captureFilter = captureFilter,
+                ),
+            )
+        }
+    }
+    val onImportRules: suspend (Frame?) -> String = onImport@{ owner: Frame? ->
+        val source = chooseArchiveFile(owner, save = false) ?: return@onImport ""
+        val result = withContext(Dispatchers.IO) {
+            importArchive(source, mapLocalNodes, breakpointNodes, seedNodes, captureFilter)
+        }
+        // Adopted through each panel's own change handler, not by assigning the state directly, so prefs,
+        // the orphaned-body sweep, and the daemon push all run exactly as they do for a hand edit.
+        if (result.mapLocal != mapLocalNodes) onLayoutChange(result.mapLocal)
+        if (result.breakpoints != breakpointNodes) onBreakpointLayoutChange(result.breakpoints)
+        if (result.seeds != seedNodes) onSeedLayoutChange(result.seeds)
+        if (result.captureFilter != captureFilter) onCaptureFilterChange(result.captureFilter)
+        result.message
+    }
+
     // Exchanges currently held at a breakpoint. Bridged from the engine row to the viewer's model at
     // this boundary (like [entries] above), since `shared` must not depend on `engine`.
     val paused by engine.pausedExchanges.collectAsState()
@@ -977,6 +1016,8 @@ private fun runWailo(engine: DaemonClient) = application {
             mapLocalEnabled = mapLocalEnabled,
             onMapLocalEnabledChange = onMapLocalEnabledChange,
             onSeedFromMapLocalRule = onSeedFromMapLocalRule,
+            onExportRules = { onExportRules(window) },
+            onImportRules = { onImportRules(window) },
             breakpointNodes = breakpointNodes,
             onBreakpointLayoutChange = onBreakpointLayoutChange,
             breakpointsEnabled = breakpointsEnabled,
@@ -1406,9 +1447,36 @@ private val BodyFileExtensions = setOf(
  * preview) and what the mock serves. Returns null when the user cancels or the file can't be read.
  */
 private suspend fun chooseMapLocalFile(owner: Frame?): PickedFile? {
-    val file = awaitNativeFileDialog(owner) ?: return null
+    val file = awaitNativeFileDialog(
+        owner = owner,
+        title = "Choose body file",
+        // Honored by the native macOS/Linux pickers to gray out non-body files; Windows ignores it and
+        // shows everything, which is fine — any file can still be mapped.
+        filter = FilenameFilter { _, name -> name.substringAfterLast('.', "").lowercase() in BodyFileExtensions },
+    ) ?: return null
     return withContext(Dispatchers.IO) {
         runCatching { PickedFile(file.readBytes(), guessContentType(file.name)) }.getOrNull()
+    }
+}
+
+/**
+ * The rule archive's save/open dialog. A save seeds a dated name so successive backups sit beside each
+ * other instead of overwriting, and re-appends the extension if the user typed it away — the Open dialog
+ * filters on it, so a file saved without one would be invisible to the import that wants it back.
+ */
+private suspend fun chooseArchiveFile(owner: Frame?, save: Boolean): File? {
+    val extension = RuleArchiveCodec.FILE_EXTENSION
+    val file = awaitNativeFileDialog(
+        owner = owner,
+        title = if (save) "Export rules" else "Import rules",
+        mode = if (save) FileDialog.SAVE else FileDialog.LOAD,
+        defaultFileName = if (save) "wailo-backup-${LocalDate.now()}.$extension" else null,
+        filter = if (save) null else FilenameFilter { _, name -> name.endsWith(".$extension", ignoreCase = true) },
+    ) ?: return null
+    return if (save && !file.name.endsWith(".$extension", ignoreCase = true)) {
+        File(file.parentFile, "${file.name}.$extension")
+    } else {
+        file
     }
 }
 
@@ -1446,13 +1514,18 @@ private suspend fun exportCertificate(certificate: ProxyCertificate): String = w
  * Compose composition scope) re-enters Compose's coroutine dispatcher mid-flush and crashes it with a
  * ClassCastException / ConcurrentModificationException.
  */
-private suspend fun awaitNativeFileDialog(owner: Frame?): File? = suspendCancellableCoroutine { cont ->
+private suspend fun awaitNativeFileDialog(
+    owner: Frame?,
+    title: String,
+    mode: Int = FileDialog.LOAD,
+    defaultFileName: String? = null,
+    filter: FilenameFilter? = null,
+): File? = suspendCancellableCoroutine { cont ->
     EventQueue.invokeLater {
-        val dialog = FileDialog(owner, "Choose body file", FileDialog.LOAD).apply {
+        val dialog = FileDialog(owner, title, mode).apply {
             isMultipleMode = false
-            // Honored by the native macOS/Linux pickers to gray out non-body files; Windows ignores it and
-            // shows everything, which is fine — any file can still be mapped.
-            filenameFilter = FilenameFilter { _, name -> name.substringAfterLast('.', "").lowercase() in BodyFileExtensions }
+            defaultFileName?.let { file = it }
+            filter?.let { filenameFilter = it }
         }
         dialog.isVisible = true // blocks the EDT (nested modal loop) until the user chooses or cancels
         val name = dialog.file

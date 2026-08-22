@@ -29,6 +29,8 @@ internal fun RuleListPage(
     onSeedFromRule: (MapLocalRuleDef) -> Unit,
     collapsedGroupIds: SnapshotStateList<String>,
     onClose: () -> Unit,
+    notice: String = "",
+    archiveActions: List<ContextMenuAction> = emptyList(),
 ) {
     GroupedRuleListPage(
         title = "Map Local",
@@ -44,6 +46,8 @@ internal fun RuleListPage(
         onEditRule = onEditRule,
         onNodesChange = onNodesChange,
         onClose = onClose,
+        overflowActions = archiveActions,
+        notice = notice,
         rowActions = { rule -> listOf(ContextMenuAction("Seed\u2026") { onSeedFromRule(rule) }) },
     ) { rule -> MapLocalRuleContent(rule) }
 }

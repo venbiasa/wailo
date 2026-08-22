@@ -66,6 +66,9 @@ import com.venbiasa.wailo.shared.ui.WailoViewer
  * (ADR-0030): off, the host pushes no rules and the panel disables its switches, state kept.
  * [onSeedFromMapLocalRule] is a Map Local row's right-click "Seed…", which copies that rule into the Seed
  * list — the host's job, since it owns both layouts and the body files (ADR-0041).
+ * [onExportRules]/[onImportRules] write and read the portable rule archive from the Map Local panel's
+ * overflow menu; the host owns the file dialog, the bytes, and the merge, and returns the one line the
+ * panel shows (blank when the user cancels).
  * [breakpointNodes] are the host-owned, persisted breakpoints layout (groups +
  * rules, in priority order) the same tool panel renders (ADR-0026/0027); [onBreakpointLayoutChange] hands
  * back a new layout for any structural change, and [breakpointsEnabled]/[onBreakpointsEnabledChange] are
@@ -127,6 +130,8 @@ fun WailoApp(
     mapLocalEnabled: Boolean = true,
     onMapLocalEnabledChange: (Boolean) -> Unit = {},
     onSeedFromMapLocalRule: (MapLocalRuleDef) -> Unit = {},
+    onExportRules: suspend () -> String = { "" },
+    onImportRules: suspend () -> String = { "" },
     breakpointNodes: List<BreakpointNode> = emptyList(),
     onBreakpointLayoutChange: (List<BreakpointNode>) -> Unit = {},
     breakpointsEnabled: Boolean = true,
@@ -206,6 +211,8 @@ fun WailoApp(
                 mapLocalEnabled = mapLocalEnabled,
                 onMapLocalEnabledChange = onMapLocalEnabledChange,
                 onSeedFromMapLocalRule = onSeedFromMapLocalRule,
+                onExportRules = onExportRules,
+                onImportRules = onImportRules,
                 breakpointNodes = breakpointNodes,
                 onBreakpointLayoutChange = onBreakpointLayoutChange,
                 breakpointsEnabled = breakpointsEnabled,

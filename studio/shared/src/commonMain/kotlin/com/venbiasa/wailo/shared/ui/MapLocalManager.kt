@@ -5,10 +5,14 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.navigation3.runtime.NavEntry
 import androidx.navigation3.runtime.NavKey
@@ -23,10 +27,15 @@ import com.venbiasa.wailo.shared.findRule
 import com.venbiasa.wailo.shared.groupOf
 import com.venbiasa.wailo.shared.setRuleEnabled
 import com.venbiasa.wailo.shared.upsertRule
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.modules.SerializersModule
 import kotlinx.serialization.modules.polymorphic
 import kotlinx.serialization.modules.subclass
+
+// Long enough to read a sentence naming what landed, short enough that it never becomes panel furniture.
+private const val ArchiveNoticeMillis = 8_000L
 
 /**
  * The Map Local panel: an interleaved list of groups + loose rules (ADR-0026) that falls through to an
@@ -62,6 +71,8 @@ fun MapLocalManager(
     onSaveBody: suspend (MapLocalRuleDef, ByteArray) -> Unit = { _, _ -> },
     onPickFile: suspend () -> PickedFile? = { null },
     onSeedFromRule: (MapLocalRuleDef) -> Unit = {},
+    onExportRules: suspend () -> String = { "" },
+    onImportRules: suspend () -> String = { "" },
 ) {
     // Navigation 3 owns the panel's page stack (rule list -> mapping-rule editor): the back stack is
     // the single source of truth for which page shows and for Back. The keys are @Serializable and the
@@ -108,6 +119,17 @@ fun MapLocalManager(
     // survives navigating into the editor and back; not persisted (relaunch shows every group expanded).
     val collapsedGroups = remember { mutableStateListOf<String>() }
 
+    // Export/import report one line and nothing else, so the result stays here instead of crossing the
+    // host boundary as state: the host does the file work and returns what to say, blank if cancelled.
+    var archiveNotice by remember { mutableStateOf("") }
+    val archiveScope = rememberCoroutineScope()
+    LaunchedEffect(archiveNotice) {
+        if (archiveNotice.isNotBlank()) {
+            delay(ArchiveNoticeMillis)
+            archiveNotice = ""
+        }
+    }
+
     Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
         NavDisplay(
             backStack = backStack,
@@ -137,6 +159,17 @@ fun MapLocalManager(
                             onSeedFromRule = onSeedFromRule,
                             collapsedGroupIds = collapsedGroups,
                             onClose = onClose,
+                            notice = archiveNotice,
+                            archiveActions = listOf(
+                                // "all rules" because the file carries every authored tool, not just this
+                                // panel's — one backup rather than four to keep track of.
+                                ContextMenuAction("Export all rules\u2026") {
+                                    archiveScope.launch { archiveNotice = onExportRules() }
+                                },
+                                ContextMenuAction("Import rules\u2026") {
+                                    archiveScope.launch { archiveNotice = onImportRules() }
+                                },
+                            ),
                         )
                     }
                     is RuleEditorDestination -> NavEntry(destination) {

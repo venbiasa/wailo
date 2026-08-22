@@ -38,6 +38,9 @@ kotlin {
             // The body editor drives debounced validation off snapshotFlow and saves/loads on a
             // background dispatcher; depend on coroutines directly rather than via Compose transitively.
             implementation(libs.kotlinx.coroutines.core)
+            // The rule archive (export/import) is a named-key JSON document, not the positional codec
+            // the prefs use, so a file a user keeps survives a field being added — see RuleArchive.kt.
+            implementation(libs.kotlinx.serialization.json)
         }
         jvmTest.dependencies {
             implementation(kotlin("test"))
