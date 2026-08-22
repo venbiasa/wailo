@@ -376,7 +376,8 @@ internal suspend fun dispatch(host: DaemonClient, args: ParsedArgs): CommandResu
                 if (status.lan) {
                     "bind=lan address=${status.reachableAddress}\n" +
                         "Anything that can reach this machine can now use it as a proxy. " +
-                        "Use it on a network you trust, and turn it off when you are done."
+                        "Use it on a network you trust, and turn it off when you are done.\n" +
+                        "A device gets the certificate and its steps at http://${status.reachableAddress}"
                 } else {
                     "bind=loopback address=${status.reachableAddress}"
                 },
@@ -752,7 +753,8 @@ private fun printUsage() {
         separate acts. proxy_ca mints the local root and prints it — or writes it with --out — for you to
         trust in the OS; set_proxy_decrypt then names the hosts to unlock, and replaces the list each
         time, so --off relocks everything. remove_proxy_ca forgets the root here, but you still have to
-        untrust it yourself.
+        untrust it yourself. A phone cannot read a file here, so browsing to the proxy's own address
+        serves it that same root plus the steps for its platform — it never creates one.
 
         set_mcp_access gates whether AI tools reach this capture at all; set_mcp_redaction decides
         whether what they read has its credentials stripped. Both are also in Studio's Settings panel.

@@ -50,6 +50,7 @@ class ProxyServer private constructor(
     private val rules: ProxyRules,
     private val tls: ProxyTls,
     private val chain: ProxyChain,
+    private val setup: ProxySetup,
 ) : Closeable {
     private val executor: ExecutorService = Executors.newVirtualThreadPerTaskExecutor()
     private val closed = AtomicBoolean()
@@ -169,7 +170,14 @@ class ProxyServer private constructor(
         // which is the one thing that differs from a plain proxied request.
         val target = tunnel?.within(head.second) ?: absoluteTarget(head.second)
         if (target == null) {
-            respondDirectly(clientOut, 400, "Bad Request", DIRECT_REQUEST_HELP)
+            // Someone typed this address into a browser. Not recorded: a page Wailo serves about itself is
+            // not traffic the user came here to inspect.
+            val page = if (head.first.equals("GET", ignoreCase = true)) {
+                runCatching { setup.page(head.second) }.getOrNull()
+            } else {
+                null
+            }
+            if (page != null) writeResponse(clientOut, page) else respondDirectly(clientOut, 400, "Bad Request", DIRECT_REQUEST_HELP)
             return false
         }
         val startedAt = System.currentTimeMillis()
@@ -856,12 +864,13 @@ class ProxyServer private constructor(
             tls: ProxyTls = ProxyTls.Locked,
             lan: Boolean = false,
             chain: ProxyChain = ProxyChain.Direct,
+            setup: ProxySetup = ProxySetup.None,
         ): ProxyServer {
             val socket = ServerSocket()
             socket.reuseAddress = true
             val bindTo = if (lan) InetAddress.getByName("0.0.0.0") else InetAddress.getLoopbackAddress()
             socket.bind(InetSocketAddress(bindTo, port))
-            return ProxyServer(socket, sink, rules, tls, chain).also(ProxyServer::start)
+            return ProxyServer(socket, sink, rules, tls, chain, setup).also(ProxyServer::start)
         }
     }
 }

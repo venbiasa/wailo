@@ -149,6 +149,12 @@ is the SDK regardless of which transport carried it (LAN WebSocket, usbmux, or `
   than a call that fails open, and stopping the proxy releases every waiting hold first.
 - A held body is the one exception to streaming: it is read whole (capped at 32 MB) because an editor
   cannot offer half a payload. Past the cap the exchange is relayed unheld rather than failed.
+- **The port explains itself to a browser** (ADR-0076). A request that arrives in origin-form is not a
+  request to relay — something dialled this port expecting a web server — so instead of the old `400` it
+  gets a page with the local root and the install steps for the device asking. That is how a phone, which
+  cannot read a file on the desktop, gets the certificate. The page reads the root and never mints one, so
+  a device on the network cannot be what creates a signing key here; `:proxy` sees only a `ProxySetup`
+  seam that returns a response or nothing.
 - **Loopback unless the user widens it** (ADR-0074). The wider bind is its own switch, separate from
   starting the proxy, because it makes the listener an open relay for anything that can route here —
   which the capture socket answers with pairing and a proxy cannot, since the client is by definition

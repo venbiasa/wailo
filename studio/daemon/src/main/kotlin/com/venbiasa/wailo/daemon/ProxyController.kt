@@ -96,6 +96,10 @@ internal class ProxyController(
     private val rules = HostProxyRules(host)
     private val chain = ProxyChain(system::upstreamFor)
 
+    // Reads the root, never mints one: a device fetching this page must not be able to create a signing
+    // key on the user's machine (ADR-0073/0076).
+    private val setup = ProxySetupPage(root = ca::current, decryptHosts = { decryptHosts })
+
     @Volatile
     private var decryptHosts: List<String> = initialDecryptHosts
 
@@ -129,7 +133,7 @@ internal class ProxyController(
     fun start(port: Int = _status.value.port): Boolean {
         stopListener()
         return try {
-            val started = ProxyServer.start(port, EngineProxyCaptureSink(engine), rules, tls, lan, chain)
+            val started = ProxyServer.start(port, EngineProxyCaptureSink(engine), rules, tls, lan, chain, setup)
             server = started
             _status.value = describe(running = true, port = started.port)
             true

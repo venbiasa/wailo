@@ -83,3 +83,4 @@ reasoning in the ADR file, not here.
 | [0073](docs/decisions/ADR-0073-the-local-root-is-keychain-only-and-leaves-are-minted-per-host.md) | 2026-08-22 | accepted | The local root lives in the Keychain and never leaves it; leaves are minted per unlocked host (implements ADR-0071's deferred half) |
 | [0074](docs/decisions/ADR-0074-the-lan-bind-is-opt-in-because-it-is-an-open-relay.md) | 2026-08-22 | accepted | The proxy's LAN bind is opt-in, persisted, and named as an open relay (extends ADR-0070) |
 | [0075](docs/decisions/ADR-0075-the-system-proxy-takeover-snapshots-to-disk-and-chains-upstream.md) | 2026-08-22 | accepted | The system proxy takeover snapshots to disk and chains through whatever was already there (extends ADR-0070/0074) |
+| [0076](docs/decisions/ADR-0076-the-proxy-port-serves-its-own-setup-page.md) | 2026-08-22 | accepted | The proxy port answers a browser with its own setup page, and never mints a root to do it (completes ADR-0074's device half) |

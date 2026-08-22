@@ -23,6 +23,22 @@ fun interface ProxyChain {
 }
 
 /**
+ * What to answer a client that browsed *to* the proxy port instead of configuring it as a proxy.
+ *
+ * Such a request is origin-form, so there is no origin to relay it to and it can only be answered here.
+ * A phone has no other way to get the local root off this machine, which is what makes this worth a seam
+ * rather than a flat refusal — but the content is `daemon`'s, since this module has never heard of a
+ * certificate. Null keeps the refusal.
+ */
+fun interface ProxySetup {
+    fun page(target: String): HttpResponse?
+
+    companion object {
+        val None: ProxySetup = ProxySetup { null }
+    }
+}
+
+/**
  * What the daemon wants from an exchange before any of its bytes move.
  *
  * Asked from the URL and method alone, because the answer decides whether the bodies can be streamed.

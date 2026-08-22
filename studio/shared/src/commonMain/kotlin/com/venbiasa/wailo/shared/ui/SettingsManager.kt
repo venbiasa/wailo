@@ -182,9 +182,10 @@ internal fun SettingsManager(
                     label = "Let other devices on this network use it",
                     checked = proxy.lan,
                     onCheckedChange = { onProxySetupAction(ProxySetupAction.SetLan(it)) },
-                    help = "Point a phone's Wi-Fi proxy at ${proxy.address}. While this is on, anything " +
-                        "that can reach this machine can use it as a proxy — so use it on a network you " +
-                        "trust, and turn it off when you are done.",
+                    help = "Point a phone's Wi-Fi proxy at ${proxy.address}, then open " +
+                        "http://${proxy.address} on the phone for its certificate and setup steps. While " +
+                        "this is on, anything that can reach this machine can use it as a proxy — so use " +
+                        "it on a network you trust, and turn it off when you are done.",
                 )
                 RowDivider()
                 CertificateRow(proxy = proxy, onAction = onProxySetupAction)
@@ -306,9 +307,9 @@ private fun CertificateRow(proxy: ProxyState, onAction: (ProxySetupAction) -> Un
         }
         if (proxy.certificateNotice.isNotEmpty()) MutedText(proxy.certificateNotice)
         MutedText(
-            "Compare this fingerprint with the one your keychain shows. Replacing it invalidates " +
-                "everything the old one signed, so you have to trust the new one before decryption works " +
-                "again.",
+            "Compare this fingerprint with the one your keychain shows. A phone gets the same certificate " +
+                "by browsing to http://${proxy.address}. Replacing it invalidates everything the old one " +
+                "signed, so every machine that trusted it has to trust the new one.",
         )
     }
 }
