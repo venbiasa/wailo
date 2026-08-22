@@ -54,6 +54,7 @@ import com.venbiasa.wailo.shared.FlowEntry
 import com.venbiasa.wailo.shared.MapLocalNode
 import com.venbiasa.wailo.shared.MapLocalRuleDef
 import com.venbiasa.wailo.shared.PickedFile
+import com.venbiasa.wailo.shared.ProxySetupAction
 import com.venbiasa.wailo.shared.ProxyState
 import com.venbiasa.wailo.shared.ResponseHeader
 import com.venbiasa.wailo.shared.SeedNode
@@ -151,6 +152,7 @@ internal fun WailoViewer(
     proxy: ProxyState,
     onProxyEnabledChange: (Boolean) -> Unit,
     onApplyProxyPort: (Int) -> Unit,
+    onProxySetupAction: (ProxySetupAction) -> Unit,
     toolPanelWidthRatio: Float,
     onToolPanelWidthRatioChange: (Float) -> Unit,
 ) {
@@ -536,6 +538,7 @@ internal fun WailoViewer(
                                 proxy = proxy,
                                 onProxyEnabledChange = onProxyEnabledChange,
                                 onApplyProxyPort = onApplyProxyPort,
+                                onProxySetupAction = onProxySetupAction,
                                 maxRetained = maxRetained,
                                 // The whole capture, not the filtered view: the cap is about what the
                                 // engine is holding, which no display filter changes.

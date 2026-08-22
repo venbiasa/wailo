@@ -141,12 +141,13 @@ fun WailoApp(
     openSeedPanelSignal: Int = 0,
     /**
      * The bundled proxy's daemon-owned state (ADR-0070). Studio is a client of it like every other
-     * frontend — [onProxyEnabledChange] and [onApplyProxyPort] ask the daemon, and what comes back is
-     * what this shows, including a port it refused to bind.
+     * frontend — [onProxyEnabledChange], [onApplyProxyPort] and [onProxySetupAction] ask the daemon, and
+     * what comes back is what this shows, including a port it refused to bind.
      */
     proxy: ProxyState = ProxyState(),
     onProxyEnabledChange: (Boolean) -> Unit = {},
     onApplyProxyPort: (Int) -> Unit = {},
+    onProxySetupAction: (ProxySetupAction) -> Unit = {},
     toolPanelWidthRatio: Float = ToolPanelLayout.DefaultWidthRatio,
     onToolPanelWidthRatioChange: (Float) -> Unit = {},
     /**
@@ -220,6 +221,7 @@ fun WailoApp(
                 proxy = proxy,
                 onProxyEnabledChange = onProxyEnabledChange,
                 onApplyProxyPort = onApplyProxyPort,
+                onProxySetupAction = onProxySetupAction,
                 toolPanelWidthRatio = toolPanelWidthRatio,
                 onToolPanelWidthRatioChange = onToolPanelWidthRatioChange,
             )

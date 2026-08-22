@@ -111,7 +111,8 @@ is the SDK regardless of which transport carried it (LAN WebSocket, usbmux, or `
 - The **daemon owns the listener**, like every other master (ADR-0058/0066). A browser pointed at Wailo
   must not lose its network because a window closed, so a running proxy is itself a reason the daemon stays
   alive, and Studio, the CLI (`set_proxy`), and the menu bar all merely ask it to start or stop. In Studio
-  it is a switch and a port under Settings — two scalars, so it gets a section, not a panel — with the
+  it is a section under Settings rather than a panel — a switch, a port, the two reach switches (this
+  machine's own traffic, the LAN), the local root, and the unlocked hosts, all of them scalars — with the
   address shown in the main window's top bar beside the Socket listener's while it runs.
 - `proxy` depends on `protocol` and the JDK, nothing else. It hands over a protobuf plus body handles
   through `ProxyCaptureSink`; `daemon` is the only place that maps those onto engine rows. That is what
@@ -194,7 +195,7 @@ persisted width (ADR-0021). The panels are:
 | Breakpoints | Pause matching requests/responses for live editing (ADR-0027) | pushed to devices |
 | Seed | Canned responses that answer paused exchanges, in order (ADR-0041) | desktop only — never pushed |
 | Devices | Connected devices, USB/LAN, and Wi-Fi trust (ADR-0039/0040) | host |
-| Settings | Socket/USB/Proxy ports, the proxy switch, retention, AI tool access | host + daemon, persisted |
+| Settings | Socket/USB ports, the proxy and its setup (reach, root, unlocked hosts), retention, AI tool access | host + daemon, persisted |
 
 Held exchanges are edited in a second top-level window, not a modal, so traffic stays browsable beside
 it (ADR-0034). That window is user-owned: it opens from the Breakpoints panel or when a hold needs a

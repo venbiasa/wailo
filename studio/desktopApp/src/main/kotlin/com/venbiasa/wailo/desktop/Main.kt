@@ -31,6 +31,7 @@ import com.venbiasa.wailo.daemon.AdbDeviceInfo
 import com.venbiasa.wailo.daemon.CLIENT_KIND_STUDIO
 import com.venbiasa.wailo.daemon.DaemonClient
 import com.venbiasa.wailo.daemon.DaemonLauncher
+import com.venbiasa.wailo.daemon.ProxyCertificate
 import com.venbiasa.wailo.daemon.UsbConnectionStatus
 import com.venbiasa.wailo.daemon.UsbDeviceInfo
 import com.venbiasa.wailo.engine.BodyRef
@@ -64,6 +65,7 @@ import com.venbiasa.wailo.shared.PairingRefusal
 import com.venbiasa.wailo.shared.PairingState
 import com.venbiasa.wailo.shared.PausedFlow
 import com.venbiasa.wailo.shared.PickedFile
+import com.venbiasa.wailo.shared.ProxySetupAction
 import com.venbiasa.wailo.shared.ProxyState
 import com.venbiasa.wailo.shared.RuleNode
 import com.venbiasa.wailo.shared.ResponseHeader
@@ -85,6 +87,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import java.awt.Desktop
 import java.awt.Dimension
 import java.awt.EventQueue
 import java.awt.FileDialog
@@ -224,15 +227,44 @@ private fun runWailo(engine: DaemonClient) = application {
     // network because this window closed, so Studio only asks. The daemon answers with the state it
     // actually reached, which is how a refused port gets reported instead of a switch that lies.
     val daemonProxy by engine.proxy.collectAsState()
+    // Where the exported root landed, or why it didn't. Held here rather than in the daemon's status: the
+    // file is this machine's, and writing one is an event, not a state the daemon can keep answering with.
+    var certificateNotice by remember { mutableStateOf("") }
     val proxy = ProxyState(
         running = daemonProxy.running,
         port = daemonProxy.port,
         connections = daemonProxy.connections,
         exchanges = daemonProxy.exchanges,
         error = daemonProxy.error,
+        lan = daemonProxy.lan,
+        lanAddress = daemonProxy.lanAddress,
+        systemProxy = daemonProxy.systemProxy,
+        systemProxySupported = daemonProxy.systemProxySupported,
+        chainedTo = daemonProxy.chainedTo,
+        caInstalled = daemonProxy.caInstalled,
+        caFingerprint = daemonProxy.caFingerprint,
+        decryptHosts = daemonProxy.decryptHosts,
+        certificateNotice = certificateNotice,
     )
     val setProxyEnabled: (Boolean) -> Unit = { enabled -> scope.launch { engine.setProxyEnabled(enabled) } }
     val applyProxyPort: (Int) -> Unit = { port -> scope.launch { engine.setProxyPort(port) } }
+    val proxySetupAction: (ProxySetupAction) -> Unit = { action ->
+        scope.launch {
+            when (action) {
+                is ProxySetupAction.SetLan -> engine.setProxyLan(action.enabled)
+                is ProxySetupAction.SetSystemProxy -> engine.setSystemProxy(action.enabled)
+                is ProxySetupAction.SetDecryptHosts -> engine.setProxyDecryptHosts(action.hosts)
+                ProxySetupAction.InstallCertificate ->
+                    certificateNotice = exportCertificate(engine.proxyCertificate())
+                ProxySetupAction.RotateCertificate ->
+                    certificateNotice = exportCertificate(engine.rotateProxyCertificate())
+                ProxySetupAction.RemoveCertificate -> {
+                    engine.removeProxyCertificate()
+                    certificateNotice = ""
+                }
+            }
+        }
+    }
 
     // The address devices should dial. The server binds every interface; we surface the host's LAN
     // IPv4 (not the wildcard) so a physical device knows where to point, falling back to localhost. The
@@ -963,6 +995,7 @@ private fun runWailo(engine: DaemonClient) = application {
             proxy = proxy,
             onProxyEnabledChange = setProxyEnabled,
             onApplyProxyPort = applyProxyPort,
+            onProxySetupAction = proxySetupAction,
             toolPanelWidthRatio = toolPanelWidthRatio,
             onToolPanelWidthRatioChange = { toolPanelWidthRatio = it },
         )
@@ -1377,6 +1410,33 @@ private suspend fun chooseMapLocalFile(owner: Frame?): PickedFile? {
     return withContext(Dispatchers.IO) {
         runCatching { PickedFile(file.readBytes(), guessContentType(file.name)) }.getOrNull()
     }
+}
+
+/**
+ * Puts the local root somewhere the user can act on it and, where the OS knows how, hands it to the tool
+ * that installs certificates (Keychain Access on macOS).
+ *
+ * Studio writes the file rather than opening a save dialog because the next step is the user's — trusting
+ * a root is a decision the OS must ask about, and it cannot until the certificate exists somewhere real.
+ * Downloads, not a Wailo folder: it is where a browser would have put it, so it is where people look.
+ * Returns the sentence the panel shows, since a silent write is indistinguishable from nothing happening.
+ */
+private suspend fun exportCertificate(certificate: ProxyCertificate): String = withContext(Dispatchers.IO) {
+    certificate.error?.let { return@withContext "Could not create the certificate: $it" }
+    if (!certificate.installed || certificate.pem.isEmpty()) return@withContext "Could not create the certificate."
+    val home = File(System.getProperty("user.home"))
+    val directory = File(home, "Downloads").takeIf { it.isDirectory } ?: home
+    // One fixed name, so a rotation replaces the file it invalidated instead of leaving two roots in a
+    // folder with no way to tell which one the machine will actually accept.
+    val target = File(directory, "Wailo-Local-Root.pem")
+    val failure = runCatching { target.writeText(certificate.pem) }.exceptionOrNull()
+    if (failure != null) return@withContext "Could not save the certificate: ${failure.message}"
+    // Best-effort: on macOS this hands the file to Keychain Access, which is the whole point. Where the
+    // desktop can't open it, the path above is still the answer, so a failure here is not one worth saying.
+    runCatching {
+        if (Desktop.isDesktopSupported()) Desktop.getDesktop().takeIf { it.isSupported(Desktop.Action.OPEN) }?.open(target)
+    }
+    "Saved to ${target.path}."
 }
 
 /**

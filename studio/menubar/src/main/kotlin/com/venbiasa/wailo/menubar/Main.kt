@@ -100,6 +100,7 @@ private fun run(client: DaemonClient, images: TrayImages) {
             },
             setCapturing = { enabled -> scope.launch { runCatching { client.setCapturing(enabled) } } },
             setProxyEnabled = { enabled -> scope.launch { runCatching { client.setProxyEnabled(enabled) } } },
+            setSystemProxy = { enabled -> scope.launch { runCatching { client.setSystemProxy(enabled) } } },
             setMapLocalEnabled = { enabled ->
                 scope.launch { runCatching { client.setMapLocalEnabled(enabled) } }
             },
@@ -174,6 +175,8 @@ private fun run(client: DaemonClient, images: TrayImages) {
                     blocklistConfigured = filter.block_patterns.isNotEmpty(),
                     proxyRunning = client.proxy.value.running,
                     proxyPort = client.proxy.value.port,
+                    systemProxy = client.proxy.value.systemProxy,
+                    systemProxySupported = client.proxy.value.systemProxySupported,
                     studioAttached = client.studioAttached.value,
                 ),
             )

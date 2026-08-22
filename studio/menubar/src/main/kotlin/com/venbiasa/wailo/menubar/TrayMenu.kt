@@ -27,6 +27,10 @@ internal data class MenuState(
     val blocklistConfigured: Boolean,
     val proxyRunning: Boolean,
     val proxyPort: Int,
+    // The daemon has rewritten this machine's network settings while this is on (ADR-0075), which is
+    // exactly the kind of state that must be visible — and undoable — with no window open.
+    val systemProxy: Boolean,
+    val systemProxySupported: Boolean,
     val studioAttached: Boolean,
 ) {
     val address: String get() = "$lanAddress:$capturePort"
@@ -39,6 +43,7 @@ internal class MenuActions(
     val showStudio: () -> Unit,
     val setCapturing: (Boolean) -> Unit,
     val setProxyEnabled: (Boolean) -> Unit,
+    val setSystemProxy: (Boolean) -> Unit,
     val setMapLocalEnabled: (Boolean) -> Unit,
     val setBreakpointsEnabled: (Boolean) -> Unit,
     val setSeedsEnabled: (Boolean) -> Unit,
@@ -66,6 +71,9 @@ internal class TrayMenu(
     // A daemon-owned listener with no window behind it, so it qualifies for a row of its own (ADR-0066) —
     // and a headless session is the case where the menu bar is the only place it can be turned off.
     private val proxy = CheckboxMenuItem("Proxy")
+    // Its own row rather than a detail of the one above: it is the daemon reaching outside itself, and
+    // "everything on this Mac goes through Wailo" is not something to leave only in a window (ADR-0075).
+    private val systemProxy = CheckboxMenuItem("Send This Mac's Traffic Through Wailo")
     private val listenOn = Menu("Listen on").apply { isEnabled = false }
     // The parent row already spells the address out, so these say only what they do with it.
     private val copyAddress = MenuItem("Copy")
@@ -80,7 +88,8 @@ internal class TrayMenu(
     private val allowlist = CheckboxMenuItem("Capture Filter: Allowlist")
     private val blocklist = CheckboxMenuItem("Capture Filter: Blocklist")
     private val quit = MenuItem("Quit")
-    private val icon = AwtTrayIcon(images.idle, "Wailo", popup())
+    private val menu = popup()
+    private val icon = AwtTrayIcon(images.idle, "Wailo", menu)
 
     // Null until the first poll lands, which is also what makes the address rows unclickable until there
     // is an address to copy.
@@ -92,6 +101,7 @@ internal class TrayMenu(
         addSeparator()
         add(recordTraffic)
         add(proxy)
+        add(systemProxy)
         addSeparator()
         listenOn.add(copyAddress)
         listenOn.add(copyHost)
@@ -120,6 +130,7 @@ internal class TrayMenu(
         // now sees. A refused write is corrected by the next poll rather than fought here.
         recordTraffic.addItemListener { actions.setCapturing(recordTraffic.state) }
         proxy.addItemListener { actions.setProxyEnabled(proxy.state) }
+        systemProxy.addItemListener { actions.setSystemProxy(systemProxy.state) }
         mapLocal.addItemListener { actions.setMapLocalEnabled(mapLocal.state) }
         breakpoints.addItemListener { actions.setBreakpointsEnabled(breakpoints.state) }
         seeds.addItemListener { actions.setSeedsEnabled(seeds.state) }
@@ -149,6 +160,9 @@ internal class TrayMenu(
         // and there is nowhere else in this menu to read it.
         proxy.label = if (next.proxyRunning) "Proxy on ${next.proxyPort}" else "Proxy"
         proxy.state = next.proxyRunning
+        // Dropped rather than greyed where the platform has no such thing to take over: a permanent dead
+        // row is not information, unlike the temporarily-unusable ones below.
+        if (next.systemProxySupported) systemProxy.state = next.systemProxy else menu.remove(systemProxy)
         mapLocal.state = next.mapLocalEnabled
         breakpoints.state = next.breakpointsEnabled
         seeds.state = next.seedsEnabled

@@ -20,6 +20,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import com.venbiasa.wailo.shared.PairingAction
 import com.venbiasa.wailo.shared.PairingState
+import com.venbiasa.wailo.shared.ProxySetupAction
 import com.venbiasa.wailo.shared.ProxyState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -69,6 +70,7 @@ internal fun SettingsManager(
     proxy: ProxyState,
     onProxyEnabledChange: (Boolean) -> Unit,
     onApplyProxyPort: (Int) -> Unit,
+    onProxySetupAction: (ProxySetupAction) -> Unit,
     maxRetained: Int,
     retainedCount: Int,
     maxRetainedError: String?,
@@ -142,8 +144,8 @@ internal fun SettingsManager(
                     onCheckedChange = onProxyEnabledChange,
                     error = proxy.error,
                     help = "Point a browser, a CLI, or an emulator at ${proxy.address} and its traffic " +
-                        "joins the list, ticked in the Proxy column. HTTPS is tunnelled but not " +
-                        "decrypted — that needs a certificate Wailo does not have yet.",
+                        "joins the list, ticked in the Proxy column. HTTPS is tunnelled but not read " +
+                        "until you install the certificate below and unlock a host by name.",
                 )
                 RowDivider()
                 NumberField(
@@ -161,6 +163,37 @@ internal fun SettingsManager(
                     help = "Changing it while the proxy runs restarts the listener, so anything already " +
                         "pointed at the old port loses its network until you move it too.",
                 )
+                if (proxy.systemProxySupported) {
+                    RowDivider()
+                    ToggleRow(
+                        label = "Send this Mac's traffic through Wailo",
+                        checked = proxy.systemProxy,
+                        onCheckedChange = { onProxySetupAction(ProxySetupAction.SetSystemProxy(it)) },
+                        help = "Sets the system proxy for you, and puts your settings back when the proxy " +
+                            "stops — even if Wailo is killed" +
+                            proxy.chainedTo.takeIf { it.isNotEmpty() }
+                                ?.let { ". Traffic still goes on through $it, the proxy you already had" }
+                                .orEmpty() +
+                            ".",
+                    )
+                }
+                RowDivider()
+                ToggleRow(
+                    label = "Let other devices on this network use it",
+                    checked = proxy.lan,
+                    onCheckedChange = { onProxySetupAction(ProxySetupAction.SetLan(it)) },
+                    help = "Point a phone's Wi-Fi proxy at ${proxy.address}. While this is on, anything " +
+                        "that can reach this machine can use it as a proxy — so use it on a network you " +
+                        "trust, and turn it off when you are done.",
+                )
+                RowDivider()
+                CertificateRow(proxy = proxy, onAction = onProxySetupAction)
+                if (proxy.caInstalled) {
+                    RowDivider()
+                    DecryptHostsRow(hosts = proxy.decryptHosts) {
+                        onProxySetupAction(ProxySetupAction.SetDecryptHosts(it))
+                    }
+                }
 
                 SectionHeader("Capture")
                 NumberField(
@@ -172,9 +205,9 @@ internal fun SettingsManager(
                     canReapplyUnchanged = false,
                     onApply = onApplyMaxRetained,
                     status = "Holding $retainedCount of $maxRetained",
-                    help = "A bigger number keeps more history and costs more memory, since every kept " +
-                        "request holds its body. Lowering it drops the oldest right away — that traffic " +
-                        "is gone, not hidden.",
+                    help = "A bigger number keeps more history and costs more disk, since every kept " +
+                        "request's body is spooled beside it. Lowering it drops the oldest right away — " +
+                        "that traffic is gone, not hidden.",
                 )
 
                 SectionHeader("AI tool access")
@@ -213,6 +246,111 @@ internal fun SettingsManager(
                 }
             }
         }
+    }
+}
+
+/**
+ * The local root: whether one exists, its fingerprint, and the two irreversible things you can do to it
+ * (ADR-0073). Installing is deliberately one button that only *creates* the root — trusting it is the
+ * user's own act in the OS, which is where a decision of that size belongs.
+ */
+@Composable
+private fun CertificateRow(proxy: ProxyState, onAction: (ProxySetupAction) -> Unit) {
+    var confirmingRemove by remember { mutableStateOf(false) }
+
+    Column(
+        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Text(
+            "HTTPS certificate",
+            style = MaterialTheme.typography.labelLarge,
+            color = MaterialTheme.colorScheme.onSurface,
+        )
+        if (!proxy.caInstalled) {
+            Button(onClick = { onAction(ProxySetupAction.InstallCertificate) }) { Text("Create certificate") }
+            if (proxy.certificateNotice.isNotEmpty()) MutedText(proxy.certificateNotice)
+            MutedText(
+                "Creates a certificate for this machine and saves it to your Downloads folder. Open it, " +
+                    "add it to your login keychain, and mark it Always Trust — then unlock the hosts you " +
+                    "want to read. Until both are done, HTTPS is tunnelled without being read.",
+            )
+            return@Column
+        }
+        SelectionContainer(Modifier.fillMaxWidth()) {
+            Text(
+                proxy.caFingerprint,
+                style = monoSmall(),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        if (confirmingRemove) {
+            Text(
+                "Removing it stops all decryption until you create and trust a new one. It stays in your " +
+                    "keychain until you remove it there too.",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.error,
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = { confirmingRemove = false; onAction(ProxySetupAction.RemoveCertificate) }) {
+                    Text("Remove")
+                }
+                TextButton(onClick = { confirmingRemove = false }) { Text("Cancel") }
+            }
+        } else {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = { onAction(ProxySetupAction.InstallCertificate) }) { Text("Save again") }
+                TextButton(onClick = { onAction(ProxySetupAction.RotateCertificate) }) { Text("Replace") }
+                TextButton(onClick = { confirmingRemove = true }) { Text("Remove") }
+            }
+        }
+        if (proxy.certificateNotice.isNotEmpty()) MutedText(proxy.certificateNotice)
+        MutedText(
+            "Compare this fingerprint with the one your keychain shows. Replacing it invalidates " +
+                "everything the old one signed, so you have to trust the new one before decryption works " +
+                "again.",
+        )
+    }
+}
+
+/**
+ * The unlocked hosts. One per line rather than a chip editor: the list is short, it is edited rarely,
+ * and a plain text area makes "what can Wailo read" answerable at a glance — which is the whole point of
+ * an allowlist (ADR-0071). Applied explicitly, because a keystroke should not widen it.
+ */
+@Composable
+private fun DecryptHostsRow(hosts: List<String>, onApply: (List<String>) -> Unit) {
+    val committed = hosts.joinToString("\n")
+    var draft by remember(committed) { mutableStateOf(committed) }
+
+    Column(
+        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Text(
+            "Decrypt these hosts",
+            style = MaterialTheme.typography.labelLarge,
+            color = MaterialTheme.colorScheme.onSurface,
+        )
+        CompactOutlinedTextField(
+            value = draft,
+            onValueChange = { draft = it },
+            placeholder = "api.example.com",
+            singleLine = false,
+            modifier = Modifier.fillMaxWidth().height(84.dp),
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            Button(
+                enabled = draft != committed,
+                onClick = { onApply(draft.lines().map { it.trim() }.filter { it.isNotEmpty() }) },
+            ) { Text("Apply") }
+            if (hosts.isEmpty()) MutedText("Nothing is decrypted yet.")
+        }
+        MutedText(
+            "One host per line; `*` matches any run of characters. Everything not listed stays an " +
+                "encrypted tunnel and shows as a locked row. A pinned app will still refuse — that is " +
+                "the app working correctly, not Wailo failing.",
+        )
     }
 }
 
