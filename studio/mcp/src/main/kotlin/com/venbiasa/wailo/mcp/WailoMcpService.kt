@@ -373,9 +373,6 @@ internal class WailoMcpService(
         "status_code" to rule.statusCode,
         "headers" to rule.headers.map(::headerData),
         "body_bytes" to rule.bodySize,
-        // An enabled rule whose body never loaded silently declines to serve, so without this an
-        // agent asking "why did my fixture not fire" can only misread it as a pattern mismatch.
-        "body_available" to rule.bodyAvailable,
         // Blank for an ungrouped rule. A rule in a group that is switched off already reads enabled
         // false above, since the daemon folds the group's switch in before anyone sees the rule.
         "group_id" to backend.groupIdByRule(RULE_FAMILY_MAP_LOCAL)[rule.id].orEmpty(),
@@ -541,7 +538,6 @@ internal class WailoMcpService(
         "status_code" to seed.statusCode,
         "headers" to seed.headers.map(::headerData),
         "body_bytes" to seed.bodySize,
-        "body_available" to seed.bodyAvailable,
         // Being in the library is not being in play: a seed answers one hold and is then spent, so this
         // is the only field that says whether the next matching hold will actually get this response.
         "armed" to (seed.id in armed),

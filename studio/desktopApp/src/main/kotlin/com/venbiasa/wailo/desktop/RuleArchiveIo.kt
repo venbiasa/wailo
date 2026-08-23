@@ -1,6 +1,5 @@
 package com.venbiasa.wailo.desktop
 
-import com.venbiasa.wailo.shared.ArchivedMapLocalRule
 import com.venbiasa.wailo.shared.ArchivedSection
 import com.venbiasa.wailo.shared.BreakpointNode
 import com.venbiasa.wailo.shared.CaptureFilterState
@@ -9,7 +8,6 @@ import com.venbiasa.wailo.shared.MapLocalRuleDef
 import com.venbiasa.wailo.shared.RuleArchive
 import com.venbiasa.wailo.shared.SeedNode
 import com.venbiasa.wailo.shared.SeedRuleDef
-import com.venbiasa.wailo.shared.allRules
 import com.venbiasa.wailo.shared.mergeIn
 import com.venbiasa.wailo.shared.toArchived
 import com.venbiasa.wailo.shared.toArchivedNodes
@@ -19,8 +17,12 @@ import java.io.File
 import java.time.Instant
 
 /**
- * The host half of rule export/import: the body stores and the user-facing outcome. `shared` owns the
+ * The host half of rule export/import: the bodies and the user-facing outcome. `shared` owns the
  * archive schema, the layout conversions, and the merge; `RuleArchiveContainer` owns the zip.
+ *
+ * Bodies are passed in and handed back rather than read and written here, because the daemon holds the
+ * only copy of them (ADR-0085) — an archive is a conversion between its zip entries and the bytes that
+ * ride along with the layout Studio publishes.
  */
 
 /** A merge's result, ready to be adopted as the panel's state, plus the line shown to the user. */
@@ -29,13 +31,14 @@ data class ArchiveImport(
     val breakpoints: List<BreakpointNode>,
     val seeds: List<SeedNode>,
     val captureFilter: CaptureFilterState,
+    /** Bodies for the rules that landed, by rule id, to publish alongside the layouts above. */
+    val bodies: Map<String, ByteArray>,
     val message: String,
 )
 
 /**
- * Collects everything authored into one archive, reading each rule's body out of whichever store or
- * file currently serves it. Bodies come back as container entries rather than fields on the manifest,
- * so this returns both halves together.
+ * Collects everything authored into one archive. Bodies come back as container entries rather than
+ * fields on the manifest, so this returns both halves together.
  */
 fun buildArchive(
     mapLocalNodes: List<MapLocalNode>,
@@ -45,16 +48,16 @@ fun buildArchive(
     seedNodes: List<SeedNode>,
     seedsEnabled: Boolean,
     captureFilter: CaptureFilterState,
+    mapLocalBody: (String) -> ByteArray,
+    seedBody: (String) -> ByteArray,
 ): ArchiveContents {
     val bodies = mutableMapOf<String, ByteArray>()
 
-    // loadServedBody resolves through whichever source the rule uses, so a file-backed rule exports its
-    // actual bytes rather than an empty managed file that was never written.
     val mapLocal = mapLocalNodes.toArchivedNodes { rule ->
-        rule.toArchived(bodies.addBody("map-local", rule.id, rule.bodyExtension(), MapLocalStore.loadServedBody(rule)))
+        rule.toArchived(bodies.addBody("map-local", rule.id, rule.bodyExtension(), mapLocalBody(rule.id)))
     }
     val seeds = seedNodes.toArchivedNodes { seed ->
-        seed.toArchived(bodies.addBody("seeds", seed.id, seed.bodyExtension(), SeedStore.loadBody(seed)))
+        seed.toArchived(bodies.addBody("seeds", seed.id, seed.bodyExtension(), seedBody(seed.id)))
     }
 
     return ArchiveContents(
@@ -95,21 +98,18 @@ fun importArchive(
     val archive = contents.archive
 
     val added = mutableListOf<String>()
+    val bodies = mutableMapOf<String, ByteArray>()
 
     var mapLocal = mapLocalNodes
     archive.mapLocal?.let { section ->
-        // Resolve each archived path once, here: `toRuleDef` decides file-backed vs inline from whether
-        // the file is actually on *this* machine, which is a filesystem question `shared` cannot ask.
-        val incoming = section.nodes.toLayoutNodes { it.toRuleDef(filePathResolves = it.filePathResolves()) }
+        // Always the archive's own copy: a rule's bytes live on the daemon now, so an archived path
+        // that still resolves on this machine is a stale pointer rather than a live source (ADR-0085).
+        val incoming = section.nodes.toLayoutNodes { it.toRuleDef(filePathResolves = false) }
         val merge = mapLocal.mergeIn(incoming)
         mapLocal = merge.nodes
         val archivedById = section.nodes.flatMap { it.rules }.associateBy { it.id }
         merge.addedRuleIds.forEach { id ->
-            val rule = merge.nodes.allRules().firstOrNull { it.id == id } ?: return@forEach
-            // A rule that kept its own file reads from there; a managed copy beside it would be dead weight.
-            if (!rule.inline) return@forEach
-            val bytes = contents.bodies[archivedById[id]?.bodyEntry] ?: return@forEach
-            MapLocalStore.saveInlineBody(rule, bytes)
+            contents.bodies[archivedById[id]?.bodyEntry]?.let { bodies[id] = it }
         }
         if (merge.addedRuleIds.isNotEmpty()) added += "${merge.addedRuleIds.size} Map Local"
     }
@@ -127,9 +127,7 @@ fun importArchive(
         seeds = merge.nodes
         val archivedById = section.nodes.flatMap { it.rules }.associateBy { it.id }
         merge.addedRuleIds.forEach { id ->
-            val seed = merge.nodes.allRules().firstOrNull { it.id == id } ?: return@forEach
-            val bytes = contents.bodies[archivedById[id]?.bodyEntry] ?: return@forEach
-            SeedStore.saveBody(seed, bytes)
+            contents.bodies[archivedById[id]?.bodyEntry]?.let { bodies[id] = it }
         }
         if (merge.addedRuleIds.isNotEmpty()) added += "${merge.addedRuleIds.size} seed"
     }
@@ -143,7 +141,7 @@ fun importArchive(
         added.isEmpty() -> "Nothing new in ${source.name} — every rule in it is already here."
         else -> "Imported ${added.joinToString(", ")} from ${source.name}."
     }
-    return ArchiveImport(mapLocal, breakpoints, seeds, filter, message)
+    return ArchiveImport(mapLocal, breakpoints, seeds, filter, bodies, message)
 }
 
 /**
@@ -168,13 +166,10 @@ private fun SeedRuleDef.bodyExtension(): String = extensionForContentType(
     headers.firstOrNull { it.name.equals("Content-Type", ignoreCase = true) }?.value,
 )
 
-private fun ArchivedMapLocalRule.filePathResolves(): Boolean =
-    filePath.isNotBlank() && runCatching { File(filePath).isFile }.getOrDefault(false)
-
 private fun unchanged(
     mapLocal: List<MapLocalNode>,
     breakpoints: List<BreakpointNode>,
     seeds: List<SeedNode>,
     captureFilter: CaptureFilterState,
     message: String,
-) = ArchiveImport(mapLocal, breakpoints, seeds, captureFilter, message)
+) = ArchiveImport(mapLocal, breakpoints, seeds, captureFilter, emptyMap(), message)

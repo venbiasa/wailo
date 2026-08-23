@@ -174,7 +174,6 @@ class WailoMcpServiceTest {
             assertFalse(listed.containsKey("body"))
             assertEquals("Profile 500", listed["name"])
             assertEquals(11, listed["body_bytes"])
-            assertEquals(true, listed["body_available"])
 
             val full = service.call("get_map_local", mapOf("id" to "fixture")).body()
             assertEquals("utf8", full["encoding"])

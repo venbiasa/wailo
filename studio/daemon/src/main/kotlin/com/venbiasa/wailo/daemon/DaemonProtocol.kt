@@ -23,7 +23,7 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import okio.ByteString.Companion.toByteString
 
-internal const val DAEMON_CONTROL_PROTOCOL_VERSION = 12
+internal const val DAEMON_CONTROL_PROTOCOL_VERSION = 13
 
 /**
  * The one command whose socket is not answered and closed. The daemon holds it open and counts it as a
@@ -294,7 +294,6 @@ internal data class MapLocalRuleDto(
     val statusCode: Int,
     val headers: List<HeaderDto>,
     val bodyBase64: String,
-    val bodyAvailable: Boolean = true,
     // Defaulted so this stays an additive field: `DaemonJson` ignores unknown keys, so a daemon and a
     // frontend built either side of this change still talk without a control-protocol bump.
     val name: String = "",
@@ -311,7 +310,6 @@ internal data class MapLocalRuleDto(
         statusCode = statusCode,
         headers = headers.map(HeaderDto::toDomain),
         body = bodyBase64.decodeBase64(),
-        bodyAvailable = bodyAvailable,
     )
 }
 
@@ -348,7 +346,6 @@ internal data class SeedRuleDto(
     val statusCode: Int,
     val headers: List<HeaderDto>,
     val bodyBase64: String,
-    val bodyAvailable: Boolean = true,
 ) {
     fun toDomain(enabled: Boolean = this.enabled) = HostSeed(
         id = id,
@@ -358,7 +355,6 @@ internal data class SeedRuleDto(
         statusCode = statusCode,
         headers = headers.map(HeaderDto::toDomain),
         body = bodyBase64.decodeBase64(),
-        bodyAvailable = bodyAvailable,
     )
 }
 
@@ -614,7 +610,6 @@ internal fun HostMapLocalRule.toDto() = MapLocalRuleDto(
     statusCode = statusCode,
     headers = headers.map { HeaderDto(it.name, it.value_) },
     bodyBase64 = bodyCopy().encodeBase64(),
-    bodyAvailable = bodyAvailable,
     name = name,
 )
 
@@ -635,7 +630,6 @@ internal fun HostSeed.toDto() = SeedRuleDto(
     statusCode = statusCode,
     headers = headers.map { HeaderDto(it.name, it.value_) },
     bodyBase64 = bodyCopy().encodeBase64(),
-    bodyAvailable = bodyAvailable,
 )
 
 internal fun PairedDevice.toDto() = PairedDeviceDto(

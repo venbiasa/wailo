@@ -8,7 +8,6 @@ import com.venbiasa.wailo.protocol.HttpRequest
 import com.venbiasa.wailo.protocol.HttpResponse
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -21,14 +20,13 @@ class SeedSpendTest {
         url: String,
         method: String = "",
         status: Int = 200,
-        bodyAvailable: Boolean = true,
+        body: ByteArray = """{"ok":true}""".toByteArray(),
     ) = HostSeed(
         id = id,
         urlPattern = url,
         method = method,
         statusCode = status,
-        body = """{"ok":true}""".toByteArray(),
-        bodyAvailable = bodyAvailable,
+        body = body,
     )
 
     private fun hold(
@@ -70,16 +68,20 @@ class SeedSpendTest {
         assertNull(result)
     }
 
+    /**
+     * An empty body is a body. The daemon holds a seed's bytes (ADR-0085), so "nothing authored" is a
+     * choice it can serve rather than a file that failed to load and has to be left for a human.
+     */
     @Test
-    fun missingBodyLeavesQueueAndHoldUntouched() = runBlocking {
-        var resumed = false
-        val queue = listOf(seed("a", "https://x/poll", bodyAvailable = false))
-        val result = spendSeedOn(queue, hold()) { _, _ ->
-            resumed = true
+    fun anEmptyBodyStillAnswersTheHold() = runBlocking {
+        var served: HttpResponse? = null
+        val queue = listOf(seed("a", "https://x/poll", body = ByteArray(0)))
+        val result = spendSeedOn(queue, hold()) { _, response ->
+            served = response
             true
         }
-        assertNull(result)
-        assertFalse(resumed)
+        assertEquals(emptyList(), result)
+        assertEquals(0, assertNotNull(served).body.size)
     }
 
     @Test

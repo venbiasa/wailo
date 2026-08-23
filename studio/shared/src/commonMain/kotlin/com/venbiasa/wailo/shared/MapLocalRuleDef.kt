@@ -3,24 +3,22 @@ package com.venbiasa.wailo.shared
 import kotlin.random.Random
 
 /**
- * A Map Local rule as the desktop authors it: match a request, answer it with the contents of a
- * local file. This is the UI/host-facing definition — it holds the file *path*, not its bytes. The
- * host reads the file and compiles this into the protocol `MapLocalRule` (bytes inlined) before
- * pushing it to devices, so `shared` never touches the filesystem or the wire types.
+ * A Map Local rule as the desktop authors it: match a request, answer it with a canned response. This
+ * is the UI-facing definition and holds no bytes — the body travels beside it, because the daemon is
+ * where it lives (ADR-0085), so `shared` never touches the filesystem or the wire types.
  *
  * [name] is a human label for the rule (what the list shows and how the author identifies it); it
  * defaults to "Untitled" for a fresh rule and must be non-blank to save. It is not part of matching.
  * [urlPattern] is a wildcard match against the full request URL (`*` matches any run of characters).
  * [method] restricts the rule to that single HTTP method; blank means any. [statusCode] and [headers]
  * shape the synthesized response; [headers] carries Content-Type (there is no separate field for it) —
- * if none is set the host infers Content-Type from the file extension, and it always sets Content-Length
- * from the served bytes, so a hand-entered length is ignored.
+ * if none is set the daemon infers Content-Type from the body, and it always sets Content-Length from
+ * the served bytes, so a hand-entered length is ignored.
  *
- * A rule serves its body one of two ways ([inline]): when false, from the user's own file at
- * [filePath] (read fresh per request, so external edits are picked up); when true, from a body
- * authored in the desktop's editor, which the host persists to an app-managed file keyed by [id].
- * Either way the served bytes come from a file on disk at request time (ADR-0019 unchanged); the flag
- * only tells the UI which surface to show and the host where the bytes live.
+ * [inline] and [filePath] are what remains of the original design, where a rule could serve the user's
+ * own file re-read per request. Serving moved to the daemon, which made every rule a snapshot, so an
+ * authored rule is always inline now; the pair survives only so an archive exported before that still
+ * round-trips (see `RuleArchive`).
  */
 data class MapLocalRuleDef(
     override val id: String,

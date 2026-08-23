@@ -211,8 +211,7 @@ internal object WailoMcpTools {
         readTool(
             "list_map_local",
             "List all in-memory Map Local fixtures and the global enabled state, without body data. Call " +
-                "get_map_local for one fixture's body. A fixture with body_available false never serves " +
-                "even while enabled is true.",
+                "get_map_local for one fixture's body.",
             objectSchema(),
         ),
         readTool(

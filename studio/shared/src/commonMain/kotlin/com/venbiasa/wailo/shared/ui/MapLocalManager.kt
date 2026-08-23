@@ -51,12 +51,12 @@ private const val ArchiveNoticeMillis = 8_000L
  * [initialDraft] seeds the editor: non-null opens straight into the form (used when launched from a
  * traffic row so the URL/method are pre-filled), null shows the list. [initialBodySeed] pre-fills the
  * body for that draft with the captured response's raw bytes (decoded as JSON text, or previewed as an
- * image, depending on its Content-Type). [onLoadBody]/[onSaveBody] read and persist a rule's authored
- * body as bytes — the host owns all file IO (the body is an app-managed file), so `shared` still never
- * touches the filesystem. [onPickFile] asks the host to open a file picker for a body file (JSON/text or
- * image) and hand back its bytes. [onSeedFromRule] copies a rule (right-click "Seed…") into the Seed
- * list, which is the host's job since it owns both layouts and the body files (ADR-0041). [onClose]
- * dismisses the whole panel (the tool-panel close affordance).
+ * image, depending on its Content-Type). [onLoadBody]/[onSaveBody] read and commit a rule's authored
+ * body as bytes; where they live is the host's business (the daemon's, in practice — ADR-0085), so
+ * `shared` still never touches the filesystem. [onPickFile] asks the host to open a file picker for a
+ * body file (JSON/text or image) and hand back its bytes. [onSeedFromRule] copies a rule (right-click
+ * "Seed…") into the Seed list, which is the host's job since it spans both layouts (ADR-0041).
+ * [onClose] dismisses the whole panel (the tool-panel close affordance).
  */
 @Composable
 fun MapLocalManager(

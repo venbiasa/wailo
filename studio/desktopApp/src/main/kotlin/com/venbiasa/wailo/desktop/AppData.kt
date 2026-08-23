@@ -1,13 +1,11 @@
 package com.venbiasa.wailo.desktop
 
-import com.venbiasa.wailo.protocol.Header
-import com.venbiasa.wailo.shared.ResponseHeader
 import java.io.File
 
 /**
  * Where the host keeps files it manages on the user's behalf: the OS's per-user app-data directory.
- * Authored response bodies (Map Local's and Seed's) live here rather than in prefs, which is for small
- * values — so a matched request reads its body fresh from disk (ADR-0019) and prefs never holds bytes.
+ * Authored bodies used to live here; they are the daemon's now (ADR-0085), so what remains is the
+ * directory itself and the launch sweep that clears what it left behind.
  */
 internal fun appDataDir(): File {
     val os = System.getProperty("os.name").orEmpty().lowercase()
@@ -62,32 +60,3 @@ internal fun guessContentType(path: String): String = when (path.substringAfterL
     else -> "application/octet-stream"
 }
 
-/**
- * Every managed body file for a rule id under [dir] (there should be at most one). A prefix scan rather
- * than a fixed name so it finds the body whatever its extension, sweeps a stale file left by an
- * interrupted type switch, and still finds the legacy fixed-name ".json" body written before bodies were
- * typed. The trailing dot makes "$id." delimit the id, so sibling ids that share a prefix never match.
- */
-internal fun managedBodyFiles(dir: File, id: String): List<File> =
-    dir.listFiles { file -> file.name.startsWith("$id.") }?.toList() ?: emptyList()
-
-/**
- * The response headers to serve alongside [bytes] read from [file]: the rule's [authored] headers pass
- * through as-is, except Content-Length (the host owns it, recomputed from the bytes so it can't drift and
- * truncate or hang the response); Content-Type falls back to an extension guess when the rule set none.
- */
-internal fun servedHeaders(authored: List<ResponseHeader>, file: File, bytes: ByteArray): List<Header> {
-    val named = authored.filter { it.name.isNotBlank() }
-    return buildList {
-        named.forEach { header ->
-            if (!header.name.equals("Content-Length", ignoreCase = true)) {
-                add(Header(name = header.name, value_ = header.value))
-            }
-        }
-        if (named.none { it.name.equals("Content-Type", ignoreCase = true) }) {
-            val guessed = guessContentType(file.name)
-            if (guessed.isNotBlank()) add(Header(name = "Content-Type", value_ = guessed))
-        }
-        add(Header(name = "Content-Length", value_ = bytes.size.toString()))
-    }
-}

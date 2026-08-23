@@ -21,7 +21,6 @@ class HostMapLocalRule(
     val statusCode: Int = 200,
     headers: List<Header> = emptyList(),
     body: ByteArray = ByteArray(0),
-    val bodyAvailable: Boolean = true,
 ) {
     val methods: List<String> = methods.toList()
     val headers: List<Header> = headers.toList()
@@ -40,7 +39,7 @@ class HostMapLocalRule(
     )
 
     internal fun serve(url: String, method: String): ServedBody? {
-        if (!enabled || !bodyAvailable || !urlPatternMatches(urlPattern, url)) return null
+        if (!enabled || !urlPatternMatches(urlPattern, url)) return null
         if (methods.isNotEmpty() && methods.none { it.equals(method, ignoreCase = true) }) return null
         return ServedBody(
             code = statusCode,

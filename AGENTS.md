@@ -17,8 +17,12 @@ persistent local daemon shared by the Kotlin Multiplatform desktop app, CLI, and
  What AI tools may reach and see is daemon state, not Studio state (ADR-0059): the MCP access gate and
  secret redaction must keep working with no UI open, so never move either into `desktopApp` — and never
    redact in `engine`, which exists to show real values. The same test governs interception: an exchange is
-   held, mapped, or answered by a seed on the daemon, so a frontend never resolves a hold on its own
-   (ADR-0067). Studio may author and display; it may not be the only place a feature works. Nor may one
+held, mapped, or answered by a seed on the daemon, so a frontend never resolves a hold on its own
+ (ADR-0067). It also holds the *only* copy of what was authored — rules, their grouping, their bodies, the
+ feature masters, bookmarks: a frontend reads them back and writes changes straight through, and never
+ keeps a local mirror to reconcile on launch, because the reconciliation cannot tell a list a user cleared
+ from one nothing has written yet (ADR-0085). Studio may author and display; it may not be the only place
+ a feature works. Nor may one
    capture path: a rule acts on SDK and proxy traffic alike, through one hold queue whose decisions route to
    a device session or to the relay thread waiting on it (ADR-0072).
 3. The interceptor SDK (`sdk-android`, `sdk-ios`) ships inside third-party apps. Keep it small and
