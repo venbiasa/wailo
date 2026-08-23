@@ -1,6 +1,9 @@
 package com.venbiasa.wailo.shared.ui
 
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.draggable
 import androidx.compose.foundation.gestures.rememberDraggableState
@@ -15,9 +18,12 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.selection.toggleable
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -26,11 +32,10 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.LocalMinimumInteractiveComponentSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextFieldDefaults
-import androidx.compose.material3.Switch
-import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
@@ -39,16 +44,21 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshots.SnapshotStateMap
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.lerp as lerpColor
 import androidx.compose.ui.layout.layout
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.lerp
 import com.venbiasa.wailo.shared.resources.Res
 import com.venbiasa.wailo.shared.resources.ic_close
 import com.venbiasa.wailo.shared.resources.ic_more_vert
@@ -415,10 +425,26 @@ internal fun CompactFieldDecoration(
 }
 
 // Material reserves a 48.dp interactive target around a 52×32.dp switch track — bulky in a dense,
-// pointer-driven desktop panel. This drops that reservation (desktop doesn't need the touch slop) and
-// scales the track down, keeping the stock ripple, hover, and thumb animation.
+// pointer-driven desktop panel. The track is authored at Material's own dimensions and scaled down, so
+// the proportions stay stock while the control takes only the room a tight row can spare.
 private const val CompactSwitchScale = 0.65f
+private val SwitchTrackWidth = 52.dp
+private val SwitchTrackHeight = 32.dp
+private val SwitchTrackBorder = 2.dp
+private val SwitchThumbOff = 16.dp
+private val SwitchThumbOn = 24.dp
+private val SwitchThumbInset = 4.dp
+private const val SwitchAnimationMillis = 100
 
+/**
+ * A switch scaled for these dense panels, holding its thumb position in composition state.
+ *
+ * That last part is why this is not Material3's `Switch`: as of 1.9.0 that one parks the thumb's
+ * `Animatable` on a `ThumbNode` that never overrides `onReset`, so a recycled `LazyColumn` slot arrives
+ * still holding the previous row's offset and animates across to this one's — an already-enabled rule
+ * visibly switches itself on as it scrolls back into view. `remember` *is* reset when a slot is reused,
+ * so owning the animation here means a recycled row always starts settled and only a real toggle moves.
+ */
 @Composable
 internal fun CompactSwitch(
     checked: Boolean,
@@ -426,23 +452,47 @@ internal fun CompactSwitch(
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
 ) {
-    CompositionLocalProvider(LocalMinimumInteractiveComponentSize provides 0.dp) {
-        Switch(
-            checked = checked,
-            onCheckedChange = onCheckedChange,
+    val target = if (checked) 1f else 0f
+    val travel = remember { Animatable(target) }
+    LaunchedEffect(target) { travel.animateTo(target, tween(SwitchAnimationMillis)) }
+    val moved = travel.value
+
+    val scheme = MaterialTheme.colorScheme
+    // Material's unchecked switch paints its thumb in `outline` — a near-disabled gray in this monochrome
+    // theme, so "off" was indistinguishable from "disabled". The off state runs on the secondary content
+    // color over a defined track instead, so it reads as an intentional off, not a greyed-out control.
+    val track = lerpColor(scheme.surfaceVariant, scheme.primary, moved)
+    val thumb = lerpColor(scheme.onSurfaceVariant, scheme.onPrimary, moved)
+
+    Box(
+        modifier
             // scale() is draw-only, so pair it with a layout that reports the scaled size — otherwise the
             // full 52×32.dp box lingers and leaves dead space around the shrunken thumb in these tight rows.
-            modifier = modifier.compactSwitchScale(CompactSwitchScale),
-            enabled = enabled,
-            // The stock unchecked switch paints its thumb in `outline` — a near-disabled gray in this
-            // monochrome theme, so "off" was indistinguishable from "disabled". Drive the off-state from
-            // the secondary content color (a solid, clearly-active thumb) over a defined track so it reads
-            // as an intentional off, not a greyed-out control.
-            colors = SwitchDefaults.colors(
-                uncheckedThumbColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                uncheckedTrackColor = MaterialTheme.colorScheme.surfaceVariant,
-                uncheckedBorderColor = MaterialTheme.colorScheme.outline,
+            .compactSwitchScale(CompactSwitchScale)
+            // Ahead of the painting below, so a disabled switch fades whole rather than just its thumb.
+            .alpha(if (enabled) 1f else DisabledFeatureAlpha)
+            .size(SwitchTrackWidth, SwitchTrackHeight)
+            .clip(CircleShape)
+            .background(track)
+            // Material outlines the off track and drops the outline once the track itself carries color.
+            .border(SwitchTrackBorder, scheme.outline.copy(alpha = 1f - moved), CircleShape)
+            .toggleable(
+                value = checked,
+                enabled = enabled,
+                role = Role.Switch,
+                onValueChange = onCheckedChange,
             ),
+        contentAlignment = Alignment.CenterStart,
+    ) {
+        // Material's travel: the small off-thumb sits centered in the track's end cap, and the larger
+        // on-thumb stops one inset short of the far edge.
+        val off = (SwitchTrackHeight - SwitchThumbOff) / 2
+        val on = SwitchTrackWidth - SwitchThumbInset - SwitchThumbOn
+        Box(
+            Modifier
+                .offset(x = lerp(off, on, moved))
+                .size(lerp(SwitchThumbOff, SwitchThumbOn, moved))
+                .background(thumb, CircleShape),
         )
     }
 }

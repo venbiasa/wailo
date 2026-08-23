@@ -747,18 +747,16 @@ private fun DragHandleDots(handle: Modifier) {
 private sealed interface Disp<T : LayoutRule<T>> {
     val key: String
 
-    // What a pooled LazyColumn slot must match before its composition may be reused for this row.
-    // Material3 parks the switch's thumb Animatable on a modifier node and (as of 1.9.0) never overrides
-    // onReset, so a recycled node arrives still holding the *previous* row's thumb offset and slides
-    // across to this one's — an already-enabled rule visibly switches itself on as it scrolls back into
-    // view. Folding the switch state in keeps reuse but confines it to rows whose thumb already sits
-    // where this one needs it.
+    // What a pooled LazyColumn slot must match before its composition may be reused for this row. The
+    // three row shapes differ enough that swapping one for another rebuilds most of the subtree anyway;
+    // nothing here folds in row *state*, because a slot arriving with the wrong state is the widget's
+    // problem to survive (see [CompactSwitch]) rather than something to dodge by fragmenting the pool.
     val contentType: Any
 }
 
 private data class HeaderDisp<T : LayoutRule<T>>(val group: RuleGroup, val topIndex: Int) : Disp<T> {
     override val key: String get() = "h:${group.id}"
-    override val contentType: Any get() = "h:${group.enabled}"
+    override val contentType: Any get() = "h"
 }
 
 private data class RuleDisp<T : LayoutRule<T>>(
@@ -769,7 +767,7 @@ private data class RuleDisp<T : LayoutRule<T>>(
     val childIndex: Int,
 ) : Disp<T> {
     override val key: String get() = rule.id
-    override val contentType: Any get() = "r:${rule.enabled}"
+    override val contentType: Any get() = "r"
 }
 
 private data class FooterDisp<T : LayoutRule<T>>(val group: RuleGroup, val topIndex: Int) : Disp<T> {
