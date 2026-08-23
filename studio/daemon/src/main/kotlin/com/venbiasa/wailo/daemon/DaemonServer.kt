@@ -67,7 +67,7 @@ internal class DaemonRuntime(
     // are tests, and a test has no business opening a port to the network it happens to be run on.
     proxyLan: Boolean = false,
     certificateAuthority: WailoCertificateAuthority = WailoCertificateAuthority(EphemeralCertificateAuthorityStore()),
-    systemProxy: SystemProxyController = SystemProxyController(),
+    systemProxy: SystemProxyController = SystemProxyController.forThisMachine(),
     private val fixtures: DaemonFixturesStore = DaemonFixturesStore(),
 ) : AutoCloseable {
     /**

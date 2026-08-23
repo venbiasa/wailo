@@ -20,7 +20,7 @@ fun main() {
     val config = settings.load()
     // Before anything binds or dials: if the last daemon was killed while it owned the system proxy,
     // this machine is currently pointed at a listener that no longer exists (ADR-0075).
-    val systemProxy = SystemProxyController()
+    val systemProxy = SystemProxyController.forThisMachine()
     if (systemProxy.recover()) {
         System.err.println("wailo-daemon: restored the system proxy settings a previous run left behind")
     } else if (systemProxy.releaseStranded(config.proxyPort)) {

@@ -28,7 +28,7 @@ class SystemProxyTakeoverTest {
         // controller that never applied it. Restoring can only replay a snapshot, so before this the
         // machine kept routing through a listener that had just closed.
         val machine = FakeMachine("Wi-Fi", "Thunderbolt Bridge").pointedAtWailo(9090)
-        val controller = SystemProxyController(statePath, machine, listens = { false })
+        val controller = SystemProxyController.over(machine, statePath, listens = { false })
 
         assertFalse(controller.active, "nothing in this process knows about the takeover")
         assertTrue(controller.releaseStranded(9090))
@@ -42,16 +42,29 @@ class SystemProxyTakeoverTest {
         // Two daemons can share a Mac. Something is answering, so the settings are doing their job and
         // are not this process's to undo.
         val machine = FakeMachine("Wi-Fi").pointedAtWailo(9090)
-        val controller = SystemProxyController(statePath, machine, listens = { true })
+        val controller = SystemProxyController.over(machine, statePath, listens = { true })
 
         assertFalse(controller.releaseStranded(9090))
         assertTrue(machine.web("Wi-Fi").enabled)
     }
 
     @Test
+    fun ourOwnListenerIsNotEvidenceThatTheTakeoverIsLive() {
+        // The state that used to perpetuate itself: the machine is pointed at a port only this daemon
+        // serves, so it has no route out until the proxy starts — and the proxy starting is then what
+        // makes the sweep stand down. Ours is the one listener whose presence proves nothing.
+        val machine = FakeMachine("Wi-Fi").pointedAtWailo(9090)
+        val controller = SystemProxyController.over(machine, statePath, listens = { true })
+
+        assertFalse(controller.releaseStranded(9090), "another daemon's takeover is not ours to undo")
+        assertTrue(controller.releaseStranded(9090, listenerIsOurs = true))
+        assertFalse(machine.web("Wi-Fi").enabled)
+    }
+
+    @Test
     fun someoneElsesLocalProxyIsNotSweptUp() {
         val machine = FakeMachine("Wi-Fi").pointedAt("Wi-Fi", "127.0.0.1", 8888)
-        val controller = SystemProxyController(statePath, machine, listens = { false })
+        val controller = SystemProxyController.over(machine, statePath, listens = { false })
 
         assertFalse(controller.releaseStranded(9090), "only our own port is ours to turn off")
         assertEquals(8888, machine.web("Wi-Fi").port)
@@ -62,7 +75,7 @@ class SystemProxyTakeoverTest {
         // The way the breakage used to become permanent: re-reading the machine here captured Wailo's
         // own address as the thing to restore, so every later restore faithfully put it back.
         val machine = FakeMachine("Wi-Fi").pointedAtWailo(9090)
-        val controller = SystemProxyController(statePath, machine, listens = { false })
+        val controller = SystemProxyController.over(machine, statePath, listens = { false })
 
         val applied = controller.apply(9090)
         assertTrue(applied.active)
@@ -84,7 +97,7 @@ class SystemProxyTakeoverTest {
                 """"secure":{"enabled":true,"server":"proxy.internal","port":8080}}]""",
         )
         val machine = FakeMachine("Wi-Fi").pointedAtWailo(9090)
-        val controller = SystemProxyController(statePath, machine, listens = { false })
+        val controller = SystemProxyController.over(machine, statePath, listens = { false })
 
         val applied = controller.apply(9090)
         assertEquals("proxy.internal", applied.chainedTo?.host)
@@ -98,7 +111,7 @@ class SystemProxyTakeoverTest {
     @Test
     fun aMachineAlreadyBehindAProxyIsChainedThroughItAndGetsItBack() {
         val machine = FakeMachine("Wi-Fi").pointedAt("Wi-Fi", "proxy.internal", 8080)
-        val controller = SystemProxyController(statePath, machine, listens = { false })
+        val controller = SystemProxyController.over(machine, statePath, listens = { false })
 
         val applied = controller.apply(9090)
 
@@ -115,10 +128,10 @@ class SystemProxyTakeoverTest {
     @Test
     fun theRecordSurvivesTheProcessThatWroteIt() {
         val machine = FakeMachine("Wi-Fi").pointedAt("Wi-Fi", "proxy.internal", 8080)
-        SystemProxyController(statePath, machine, listens = { false }).apply(9090)
+        SystemProxyController.over(machine, statePath, listens = { false }).apply(9090)
 
         // A different daemon, with no memory of the takeover, reading the same machine-scoped record.
-        val successor = SystemProxyController(statePath, machine, listens = { false })
+        val successor = SystemProxyController.over(machine, statePath, listens = { false })
         assertTrue(successor.recover())
 
         assertEquals("proxy.internal", machine.web("Wi-Fi").server)
@@ -130,7 +143,7 @@ class SystemProxyTakeoverTest {
  * A Mac's proxy settings as `networksetup` presents them: enough of the command surface to answer the
  * reads and record the writes.
  */
-private class FakeMachine(private vararg val services: String) : NetworkSetup {
+internal class FakeMachine(private vararg val services: String) : NetworkSetup {
     private val settings = mutableMapOf<Pair<String, String>, ProxySetting>()
 
     fun web(service: String) = get(service, SystemProxyController.WEB)

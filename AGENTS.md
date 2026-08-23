@@ -181,7 +181,11 @@ firewall exception to do it.
 `WAILO_HOME` does not isolate `set_system_proxy`, and cannot: `networksetup` changes the one Mac. The
 undo record is deliberately written to the real `~/.wailo/system-proxy.json` so that whichever daemon
 runs next can put the machine back (ADR-0078) — so a scratch run that takes the system proxy over is
-changing the user's actual network settings, and should turn it off again rather than being killed.
+changing the user's actual network settings, and should turn it off again rather than being killed. The
+same goes for a test: a scratch state directory buys nothing here, which is why `SystemProxyController`
+can only reach the real `networksetup` through `forThisMachine()` and a test has to pass its own machine
+(ADR-0083). Never restore that default — a suite that takes the Mac over strands it with no route out and
+no record to recover from.
 
 Starting a daemon now also puts a menu bar item on screen (ADR-0065), which a scripted or CI run does not
 want: set `WAILO_NO_MENUBAR=1` alongside `WAILO_HOME` to suppress it.

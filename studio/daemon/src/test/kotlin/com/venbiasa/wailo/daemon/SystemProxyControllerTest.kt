@@ -5,13 +5,14 @@ import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 /**
  * The takeover has to be undoable by a process that did not perform it, because the failure that
- * matters is the one the daemon does not survive (ADR-0075). These exercise the record rather than
- * `networksetup` itself: a test that reconfigured the machine running it would be the exact accident
- * the persistence exists to clean up.
+ * matters is the one the daemon does not survive (ADR-0075). Every case here drives a stand-in for
+ * `networksetup`, so the outcome is the same on any host and the suite never reconfigures the machine
+ * running it — that accident is the one the persistence exists to clean up.
  */
 class SystemProxyControllerTest {
     private val directory = Files.createTempDirectory("wailo-system-proxy")
@@ -23,54 +24,49 @@ class SystemProxyControllerTest {
     }
 
     @Test
-    fun applyingOnAMachineWithoutNetworksetupChangesNothingAndSaysWhy() {
-        val controller = SystemProxyController(statePath)
+    fun applyingWithNoMachineToDriveChangesNothingAndSaysWhy() {
+        val controller = SystemProxyController.over(machine = null, statePath = statePath)
 
         val applied = controller.apply(9090)
 
-        assertEquals(SystemProxyController.isSupported, applied.supported)
-        if (!applied.supported) {
-            assertFalse(applied.active)
-            assertTrue(applied.error != null)
-            assertFalse(Files.exists(statePath), "nothing changed, so there is nothing to undo")
-        }
+        assertFalse(applied.supported)
+        assertFalse(applied.active)
+        assertNotNull(applied.error, "a refusal has to say what is missing")
+        assertFalse(Files.exists(statePath), "nothing changed, so there is nothing to undo")
     }
 
     @Test
     fun aStrandedSnapshotIsActedOnAndKeptUntilItFullyLands() {
-        // A service no machine has, so this never reconfigures the network of whatever is running the
-        // suite — which would be the very accident the persistence exists to clean up.
         Files.writeString(
             statePath,
-            """[{"service":"$ABSENT_SERVICE","web":{"enabled":true,"server":"proxy.invalid","port":3128},""" +
+            """[{"service":"Ethernet","web":{"enabled":true,"server":"proxy.internal","port":3128},""" +
                 """"secure":{"enabled":false,"server":"","port":0}}]""",
         )
+        // The machine that came back is not the one the record describes, so the restore cannot land.
+        val machine = FakeMachine("Wi-Fi")
 
-        val recovered = SystemProxyController(statePath).recover()
+        val recovered = SystemProxyController.over(machine, statePath).recover()
 
         assertTrue(recovered, "a record left behind must be acted on, not ignored")
-        // The restore cannot succeed against a service that does not exist, and the record survives so
-        // the next start tries again. Losing it would strand the machine for good.
+        // It survives so the next start tries again; losing it would strand the machine for good.
         assertTrue(Files.exists(statePath), "an incomplete restore must stay recorded")
     }
 
     @Test
     fun recoveryIsAQuietNoOpWhenNothingWasStranded() {
-        assertFalse(SystemProxyController(statePath).recover())
-        assertFalse(SystemProxyController(directory.resolve("nope.json")).recover())
+        val machine = FakeMachine("Wi-Fi")
+
+        assertFalse(SystemProxyController.over(machine, statePath).recover())
+        assertFalse(SystemProxyController.over(machine, directory.resolve("nope.json")).recover())
     }
 
     @Test
     fun restoringWithoutApplyingIsSafe() {
-        val controller = SystemProxyController(statePath)
+        val controller = SystemProxyController.over(FakeMachine("Wi-Fi"), statePath)
 
         val state = controller.restore()
 
         assertFalse(state.active)
         assertEquals(null, state.error)
-    }
-
-    private companion object {
-        const val ABSENT_SERVICE = "Wailo Test Service That Does Not Exist"
     }
 }

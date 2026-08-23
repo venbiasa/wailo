@@ -90,7 +90,7 @@ internal class ProxyController(
     private val ca: WailoCertificateAuthority = WailoCertificateAuthority(EphemeralCertificateAuthorityStore()),
     /** Trust used when dialling an origin, for reaching one behind a private root. Default is the JDK's. */
     private val upstream: SSLContext? = null,
-    private val system: SystemProxyController = SystemProxyController(),
+    private val system: SystemProxyController = SystemProxyController.forThisMachine(),
 ) : Closeable {
     private val engine: WailoEngine get() = host.engine
     private val rules = HostProxyRules(host)
@@ -135,6 +135,11 @@ internal class ProxyController(
         return try {
             val started = ProxyServer.start(port, EngineProxyCaptureSink(engine), rules, tls, lan, chain, setup)
             server = started
+            // A machine pointed at this port that nobody here took over is a takeover an earlier daemon
+            // did not live to undo, and whose record is gone — start-up's recover() would have replayed
+            // it otherwise. Sweeping only once the listener is up is the point: the sweep stands down for
+            // a port that answers, and from here on the thing answering is us (ADR-0083).
+            system.releaseStranded(started.port, listenerIsOurs = true)
             _status.value = describe(running = true, port = started.port)
             true
         } catch (failure: Exception) {

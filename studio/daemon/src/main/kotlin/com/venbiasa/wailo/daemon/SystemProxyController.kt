@@ -67,16 +67,12 @@ internal fun interface NetworkSetup {
     fun run(arguments: List<String>): String?
 }
 
-internal class SystemProxyController(
-    private val statePath: Path = wailoMachineStateDir().resolve("system-proxy.json"),
-    /**
-     * Null where there is no `networksetup` to drive, which is also the seam the tests use: this class
-     * reconfigures the machine it runs on, so exercising its decisions for real would be the very
-     * accident it exists to clean up.
-     */
-    private val networksetup: NetworkSetup? = systemNetworkSetup(),
+internal class SystemProxyController private constructor(
+    private val statePath: Path,
+    /** Null where there is no `networksetup` to drive, which is also what a stand-in machine looks like. */
+    private val networksetup: NetworkSetup?,
     /** Whether something answers on a loopback port — how a live takeover is told from an abandoned one. */
-    private val listens: (Int) -> Boolean = ::loopbackAnswers,
+    private val listens: (Int) -> Boolean,
 ) {
     @Volatile
     private var snapshot: List<NetworkServiceProxies>? = null
@@ -194,11 +190,17 @@ internal class SystemProxyController(
      * it. So the test is the machine's current state, not a memory of having changed it. Turning the
      * proxy off rather than reinstating a previous setting is deliberate — without a record there is
      * nothing to reinstate, and a direct connection is the state every machine can reach.
+     *
+     * [listenerIsOurs] is for the one case that "does the port answer" reads backwards: this process
+     * holds the listener and did not take the machine over, so the thing keeping the sweep away is us.
+     * Left alone it is self-perpetuating — the machine loses its network whenever the proxy is down, and
+     * starting the proxy to get back online is what disarms the only cleanup there is (ADR-0083).
      */
     @Synchronized
-    fun releaseStranded(port: Int): Boolean {
-        // A live listener means the takeover is working, and may belong to another daemon: leave it be.
-        if (!supported || active || listens(port)) return false
+    fun releaseStranded(port: Int, listenerIsOurs: Boolean = false): Boolean {
+        // A live listener we cannot account for means the takeover is working, and may belong to another
+        // daemon: leave it be.
+        if (!supported || active || (listens(port) && !listenerIsOurs)) return false
         val released = activeServices().filter { service ->
             val web = read(service, WEB).ours(port)
             val secure = read(service, SECURE).ours(port)
@@ -276,6 +278,32 @@ internal class SystemProxyController(
         internal const val SECURE = "securewebproxy"
 
         val isSupported: Boolean get() = systemNetworkSetup() != null
+
+        /**
+         * The only construction that can reconfigure the Mac this process runs on, and it takes the
+         * machine's own record path with it.
+         *
+         * The two used to be independent arguments with defaults, so a caller could redirect the record
+         * to a throwaway path and still drive the real `networksetup` — which is a takeover that outlives
+         * the process with nothing left anywhere to undo it, the one state ADR-0075 has no answer for. A
+         * test did exactly that and silently took over the machine running the suite (ADR-0083).
+         */
+        fun forThisMachine(): SystemProxyController = SystemProxyController(
+            wailoMachineStateDir().resolve("system-proxy.json"),
+            systemNetworkSetup(),
+            ::loopbackAnswers,
+        )
+
+        /**
+         * A controller over a stand-in machine, with its record beside it. There is no way to pair this
+         * with the real `networksetup`: [systemNetworkSetup] is file-private, so [forThisMachine] is the
+         * only door to it.
+         */
+        fun over(
+            machine: NetworkSetup?,
+            statePath: Path,
+            listens: (Int) -> Boolean = { false },
+        ): SystemProxyController = SystemProxyController(statePath, machine, listens)
     }
 }
 
