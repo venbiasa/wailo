@@ -85,6 +85,8 @@ internal fun TrafficList(
     entries: List<FlowEntry>,
     selectedId: String?,
     onSelect: (String) -> Unit,
+    compareIds: Pair<String, String>?,
+    onToggleCompare: (String) -> Unit,
     zoneOffsetMillis: Int,
     bookmarks: List<String>,
     onAddBookmark: (String) -> Unit,
@@ -176,6 +178,12 @@ internal fun TrafficList(
                             widths = widths,
                             hScroll = hScroll,
                             selected = entry.id == selectedId,
+                            comparing = entry.id == compareIds?.second,
+                            inComparison = entry.id == compareIds?.first || entry.id == compareIds?.second,
+                            // A row can only be compared against something: with nothing selected there is
+                            // no other side, and a row can't be compared with itself.
+                            comparable = selectedId != null && selectedId != entry.id,
+                            onToggleCompare = { onToggleCompare(entry.id) },
                             onClick = {
                                 onSelect(entry.id)
                                 // Clicking a row hands keyboard focus to the list so Up/Down can take over.
@@ -285,6 +293,10 @@ private fun TrafficRow(
     widths: SnapshotStateMap<TrafficColumn, Dp>,
     hScroll: ScrollState,
     selected: Boolean,
+    comparing: Boolean,
+    inComparison: Boolean,
+    comparable: Boolean,
+    onToggleCompare: () -> Unit,
     onClick: () -> Unit,
     zoneOffsetMillis: Int,
     bookmarks: List<String>,
@@ -336,6 +348,11 @@ private fun TrafficRow(
                     }
                 },
             )
+        }
+        // The selected row is the left ("A") side of a comparison, so this row only offers to become the
+        // right one. Checked while it already is, which is also how the comparison is called off.
+        if (comparable) {
+            add(ContextMenuAction("Compare with selection", checked = comparing, onSelect = onToggleCompare))
         }
         if (host.isNotEmpty()) {
             add(
@@ -391,6 +408,19 @@ private fun TrafficRow(
                 .background(if (selected) MaterialTheme.colorScheme.surfaceVariant else Color.Transparent)
                 .clickable(onClick = onClick),
         ) {
+            // A comparison outlives the selection that started it (ADR-0079), so its two rows carry a mark
+            // of their own rather than borrowing the selected row's background — which would otherwise
+            // light up three rows and say nothing about which two are being diffed. Outside the
+            // horizontally scrolling Row, so it stays pinned to the row's edge rather than sliding away
+            // with the columns.
+            if (inComparison) {
+                Box(
+                    Modifier.align(Alignment.CenterStart)
+                        .width(3.dp)
+                        .fillMaxHeight()
+                        .background(MaterialTheme.colorScheme.primary),
+                )
+            }
             Row(Modifier.horizontalScroll(hScroll)) {
                 Cell(TrafficColumn.Method, widths) {
                     CellText(method.uppercase(), monoSmall(), MaterialTheme.colorScheme.onSurface)
@@ -470,7 +500,7 @@ private fun CellText(text: String, style: TextStyle, color: Color) {
     Text(text, style = style, color = color, maxLines = 1, overflow = TextOverflow.Ellipsis)
 }
 
-private fun durationText(durationMs: Long): String = if (durationMs > 0) "$durationMs ms" else "—"
+internal fun durationText(durationMs: Long): String = if (durationMs > 0) "$durationMs ms" else "—"
 
 // Uses the FAB's default colors (primaryContainer/onPrimaryContainer), which tokens.json themes to the
 // accent — so the button tracks the brand knob without a per-call-site override. Only the elevation is

@@ -14,6 +14,7 @@ import com.venbiasa.wailo.protocol.HttpResponse
 import com.venbiasa.wailo.shared.theme.TextScale
 import com.venbiasa.wailo.shared.theme.WailoTheme
 import com.venbiasa.wailo.shared.ui.BreakpointInspector
+import com.venbiasa.wailo.shared.ui.ComparePanel
 import com.venbiasa.wailo.shared.ui.ToolPanelLayout
 import com.venbiasa.wailo.shared.ui.WailoViewer
 
@@ -84,6 +85,10 @@ import com.venbiasa.wailo.shared.ui.WailoViewer
  * [toolPanelWidthRatio] is the host-owned, persisted width of that docked panel expressed as a
  * fraction of the window (so it scales with the window rather than pinning to a fixed dp);
  * [onToolPanelWidthRatioChange] hands back a new fraction as the user drags the panel's resize handle.
+ * [compareIds] is the (A, B) pair currently being diffed in the host's compare window
+ * ([WailoCompareWindowContent], ADR-0079), which the traffic list marks; [onCompareChange] asks the host
+ * to start a comparison or (with null) to end one. It lives with the host for the same reason the
+ * breakpoint window's open state does: only the host can own an OS window.
  */
 @Composable
 fun WailoApp(
@@ -155,6 +160,8 @@ fun WailoApp(
     onProxySetupAction: (ProxySetupAction) -> Unit = {},
     toolPanelWidthRatio: Float = ToolPanelLayout.DefaultWidthRatio,
     onToolPanelWidthRatioChange: (Float) -> Unit = {},
+    compareIds: Pair<String, String>? = null,
+    onCompareChange: (Pair<String, String>?) -> Unit = {},
     /**
      * How a body view gets its bytes. Rows arrive without them (ADR-0069), so this is what turns a
      * [FlowEntry]'s handle into something to render. Defaults to reading nothing, which is what a
@@ -231,6 +238,8 @@ fun WailoApp(
                 onProxySetupAction = onProxySetupAction,
                 toolPanelWidthRatio = toolPanelWidthRatio,
                 onToolPanelWidthRatioChange = onToolPanelWidthRatioChange,
+                compareIds = compareIds,
+                onCompareChange = onCompareChange,
             )
         }
     }
@@ -286,6 +295,48 @@ fun WailoBreakpointWindowContent(
                     onBringToFront = onBringToFront,
                     onResume = onResumeBreakpoint,
                     onAbort = onAbortBreakpoint,
+                )
+            }
+        }
+    }
+}
+
+/**
+ * The contents of the standalone compare window (ADR-0079): a side-by-side diff of [left] against [right]
+ * on its own top-level window. Two panes of monospace under the traffic list were legible only as a
+ * gesture — a diff needs the window's full width for both columns and its full height for context around
+ * the change — so this is a window rather than a mode of the detail panel.
+ *
+ * The pair is pinned: the host holds the two ids the window opened with, so clicking through the list
+ * behind it leaves the comparison alone. [onSwap] trades the sides; closing is the window's own title bar,
+ * since a second close control inside the panel duplicates it.
+ *
+ * Like [WailoBreakpointWindowContent] it carries its own theme, since Compose provides no CompositionLocal
+ * across windows: [darkTheme] mirrors the host's choice and [textScale] rides on `fontScale` so Cmd +/-
+ * resizes this window too. [bodyLoader] has to be provided as well — rows carry body *references*
+ * (ADR-0069), so without it both panes would render empty.
+ */
+@Composable
+fun WailoCompareWindowContent(
+    left: FlowEntry,
+    right: FlowEntry,
+    onSwap: () -> Unit = {},
+    darkTheme: Boolean = isSystemInDarkTheme(),
+    textScale: Float = TextScale.Default,
+    bodyLoader: BodyLoader = BodyLoader { _, _, _ -> ByteArray(0) },
+) {
+    WailoTheme(darkTheme = darkTheme) {
+        val density = LocalDensity.current
+        CompositionLocalProvider(
+            LocalDensity provides Density(density.density, density.fontScale * textScale),
+            LocalBodyLoader provides bodyLoader,
+        ) {
+            Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+                ComparePanel(
+                    left = left,
+                    right = right,
+                    modifier = Modifier.fillMaxSize(),
+                    onSwap = onSwap,
                 )
             }
         }

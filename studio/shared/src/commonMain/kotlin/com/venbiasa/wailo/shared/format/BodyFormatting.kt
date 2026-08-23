@@ -265,6 +265,86 @@ internal fun parseJson(text: String): JsonNode? {
 }
 
 /**
+ * Re-serializes a [JsonNode] tree with two-space indentation, optionally sorting each object's keys.
+ *
+ * Sorting is what makes two JSON bodies comparable line by line: a server is free to emit its keys in any
+ * order, and a serializer that changes that order between two captures would otherwise show up as a diff
+ * across the whole payload. Ordering is by the raw key string so it is stable regardless of locale.
+ */
+internal fun canonicalJson(node: JsonNode, sortKeys: Boolean, indentUnit: String = "  "): String {
+    val out = StringBuilder()
+    writeJson(node, sortKeys, indentUnit, 0, out)
+    return out.toString()
+}
+
+private fun writeJson(node: JsonNode, sortKeys: Boolean, indentUnit: String, depth: Int, out: StringBuilder) {
+    fun newline(level: Int) {
+        out.append('\n')
+        repeat(level) { out.append(indentUnit) }
+    }
+    when (node) {
+        is JsonNode.Obj -> {
+            if (node.entries.isEmpty()) {
+                out.append("{}")
+                return
+            }
+            out.append('{')
+            val entries = if (sortKeys) node.entries.sortedBy { it.key } else node.entries
+            entries.forEachIndexed { index, entry ->
+                if (index > 0) out.append(',')
+                newline(depth + 1)
+                writeJsonString(entry.key, out)
+                out.append(": ")
+                writeJson(entry.value, sortKeys, indentUnit, depth + 1, out)
+            }
+            newline(depth)
+            out.append('}')
+        }
+        is JsonNode.Arr -> {
+            if (node.items.isEmpty()) {
+                out.append("[]")
+                return
+            }
+            out.append('[')
+            node.items.forEachIndexed { index, item ->
+                if (index > 0) out.append(',')
+                newline(depth + 1)
+                writeJson(item, sortKeys, indentUnit, depth + 1, out)
+            }
+            newline(depth)
+            out.append(']')
+        }
+        is JsonNode.Str -> writeJsonString(node.value, out)
+        is JsonNode.Num -> out.append(node.text)
+        is JsonNode.Bool -> out.append(if (node.value) "true" else "false")
+        JsonNode.Null -> out.append("null")
+    }
+}
+
+// Re-escapes a decoded string literal. Control characters below 0x20 without a short escape take the \\uXXXX
+// form, which is the only representation JSON allows for them.
+private fun writeJsonString(value: String, out: StringBuilder) {
+    out.append('"')
+    for (ch in value) {
+        when (ch) {
+            '"' -> out.append("\\\"")
+            '\\' -> out.append("\\\\")
+            '\n' -> out.append("\\n")
+            '\r' -> out.append("\\r")
+            '\t' -> out.append("\\t")
+            '\b' -> out.append("\\b")
+            '\u000C' -> out.append("\\f")
+            else -> if (ch < ' ') {
+                out.append("\\u").append(ch.code.toString(16).padStart(4, '0'))
+            } else {
+                out.append(ch)
+            }
+        }
+    }
+    out.append('"')
+}
+
+/**
  * Validates [text] as JSON for the body editor: null when it's well-formed (or blank — an empty body
  * is allowed), otherwise a short message with the 1-based line/column of the failure. Reuses the same
  * hand-rolled parser as [parseJson] so the editor's verdict matches how a body is actually parsed.

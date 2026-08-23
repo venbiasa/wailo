@@ -53,5 +53,8 @@ class WindowStateStore(keyPrefix: String) {
 
         /** The breakpoint inspector window (ADR-0034): persisted like the main window, under its own keys. */
         val Breakpoint = WindowStateStore("breakpointWindow")
+
+        /** The compare window (ADR-0079): same treatment, and the one users resize most — a diff wants width. */
+        val Compare = WindowStateStore("compareWindow")
     }
 }

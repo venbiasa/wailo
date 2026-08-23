@@ -176,7 +176,7 @@ private fun Pill(text: String, container: Color, content: Color, textStyle: Text
  * (amber) rides on the rarest part (fragment).
  */
 @Composable
-private fun urlAnnotated(url: String): AnnotatedString {
+internal fun urlAnnotated(url: String): AnnotatedString {
     val wailo = LocalWailoColors.current
     return buildAnnotatedString {
         urlSegments(url).forEach { segment ->

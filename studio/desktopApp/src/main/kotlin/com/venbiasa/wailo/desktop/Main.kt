@@ -75,6 +75,7 @@ import com.venbiasa.wailo.shared.SeedNode
 import com.venbiasa.wailo.shared.SeedRuleDef
 import com.venbiasa.wailo.shared.WailoApp
 import com.venbiasa.wailo.shared.WailoBreakpointWindowContent
+import com.venbiasa.wailo.shared.WailoCompareWindowContent
 import com.venbiasa.wailo.shared.allRules
 import com.venbiasa.wailo.shared.isRuleActive
 import com.venbiasa.wailo.shared.theme.TextScale
@@ -140,6 +141,12 @@ private val DefaultWindowSize = DpSize(800.dp, 600.dp)
 // usable when the user shrinks it.
 private val DefaultBreakpointWindowSize = DpSize(920.dp, 680.dp)
 private val MinBreakpointWindowSize = DpSize(560.dp, 420.dp)
+
+// The compare window (ADR-0079) opens wider still: it is two monospace columns side by side, and a body
+// line that has to wrap or scroll horizontally defeats the point of reading a diff. The floor is the
+// narrowest at which both panes still show a useful span of each line.
+private val DefaultCompareWindowSize = DpSize(1120.dp, 720.dp)
+private val MinCompareWindowSize = DpSize(640.dp, 400.dp)
 
 // debounce (used below to coalesce window resize/move writes) is still a coroutines preview API.
 @OptIn(FlowPreview::class)
@@ -815,6 +822,18 @@ private fun runWailo(engine: DaemonClient) = application {
         if (pausedFlows.any { it.correlationId in triagedHolds }) breakpointWindowOpen = true
     }
 
+    // The two rows being diffed in the compare window (ADR-0079), as (A, B) ids. Held here rather than in
+    // the viewer because only the host can own an OS window — and pinning the pair is what lets the list
+    // behind it stay fully usable: clicking through rows while the diff is open changes the selection, not
+    // the comparison. Resolved against the live list, so clearing the capture closes the window.
+    var comparePair by remember { mutableStateOf<Pair<String, String>?>(null) }
+    var raiseCompareWindow by remember { mutableStateOf(0) }
+    val compareLeft = remember(entries, comparePair) { entries.firstOrNull { it.id == comparePair?.first } }
+    val compareRight = remember(entries, comparePair) { entries.firstOrNull { it.id == comparePair?.second } }
+    LaunchedEffect(compareLeft, compareRight) {
+        if (compareLeft == null || compareRight == null) comparePair = null
+    }
+
     // Fill arms the daemon's enabled library in order and spends it against whatever is already waiting.
     // Arming late is the normal case: you notice a hold sitting there and only then load the seeds for
     // it, and a queue that arrives a moment too late to be useful is a queue you'd have to re-trigger the
@@ -1039,6 +1058,13 @@ private fun runWailo(engine: DaemonClient) = application {
             onProxySetupAction = proxySetupAction,
             toolPanelWidthRatio = toolPanelWidthRatio,
             onToolPanelWidthRatioChange = { toolPanelWidthRatio = it },
+            compareIds = comparePair,
+            onCompareChange = { pair ->
+                comparePair = pair
+                // Comparing the same two rows again is a no-op on the pair above, so a window already open
+                // (and quite possibly buried behind this one) would look like a menu item that does nothing.
+                if (pair != null) raiseCompareWindow += 1
+            },
         )
     }
 
@@ -1111,6 +1137,56 @@ private fun runWailo(engine: DaemonClient) = application {
                 onAbortBreakpoint = { correlationId ->
                     scope.launch { engine.abortHold(correlationId) }
                 },
+            )
+        }
+    }
+
+    // The diff is its own OS window (ADR-0079) rather than a mode of the detail panel: two monospace
+    // columns under the traffic list had room to prove the feature worked and none to actually read it.
+    // Detached, it also stops competing with the list for the same vertical space — the point of comparing
+    // two rows is usually to keep hunting through the rest of them.
+    if (compareLeft != null && compareRight != null) {
+        val compareWindowState = rememberWindowState(
+            size = WindowStateStore.Compare.loadSize(DefaultCompareWindowSize),
+            position = WindowStateStore.Compare.loadPosition(),
+        )
+        LaunchedEffect(compareWindowState) {
+            snapshotFlow { Triple(compareWindowState.size, compareWindowState.position, compareWindowState.placement) }
+                .filter { (_, _, placement) -> placement == WindowPlacement.Floating }
+                .debounce(300.milliseconds)
+                .collect { (size, position, _) -> WindowStateStore.Compare.save(size, position) }
+        }
+        DisposableEffect(Unit) {
+            onDispose {
+                if (compareWindowState.placement == WindowPlacement.Floating) {
+                    WindowStateStore.Compare.save(compareWindowState.size, compareWindowState.position)
+                }
+            }
+        }
+        Window(
+            onCloseRequest = { comparePair = null },
+            state = compareWindowState,
+            title = "Compare",
+            icon = appIconPainter,
+            onPreviewKeyEvent = onScaleKeyEvent,
+        ) {
+            LaunchedEffect(Unit) {
+                window.minimumSize = Dimension(
+                    MinCompareWindowSize.width.value.toInt(),
+                    MinCompareWindowSize.height.value.toInt(),
+                )
+            }
+            LaunchedEffect(raiseCompareWindow) {
+                window.toFront()
+                window.requestFocus()
+            }
+            WailoCompareWindowContent(
+                left = compareLeft,
+                right = compareRight,
+                onSwap = { comparePair = comparePair?.let { (a, b) -> b to a } },
+                darkTheme = darkTheme,
+                textScale = textScale,
+                bodyLoader = bodyLoader,
             )
         }
     }

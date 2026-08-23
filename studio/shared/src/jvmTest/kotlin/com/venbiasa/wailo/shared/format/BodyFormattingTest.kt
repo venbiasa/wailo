@@ -256,4 +256,38 @@ class BodyFormattingTest {
         // Extra content after a complete value is flagged rather than silently accepted.
         assertTrue(jsonErrorMessage("""{"a":1} garbage""") != null)
     }
+
+    @Test
+    fun canonicalJsonSortsKeysSoKeyOrderIsNotADifference() {
+        val one = parseJson("""{"b":1,"a":{"z":true,"y":null}}""")!!
+        val other = parseJson("""{"a":{"y":null,"z":true},"b":1}""")!!
+        assertEquals(canonicalJson(one, sortKeys = true), canonicalJson(other, sortKeys = true))
+    }
+
+    @Test
+    fun canonicalJsonPreservesSourceOrderWhenSortingIsOff() {
+        val node = parseJson("""{"b":1,"a":2}""")!!
+        assertEquals("{\n  \"b\": 1,\n  \"a\": 2\n}", canonicalJson(node, sortKeys = false))
+    }
+
+    @Test
+    fun canonicalJsonKeepsArrayOrderAndEmptyContainersInline() {
+        // Array position is meaning, not formatting, so sorting keys must never reach inside one.
+        val node = parseJson("""{"items":[3,1,2],"none":{},"empty":[]}""")!!
+        assertEquals(
+            "{\n  \"empty\": [],\n  \"items\": [\n    3,\n    1,\n    2\n  ],\n  \"none\": {}\n}",
+            canonicalJson(node, sortKeys = true),
+        )
+    }
+
+    @Test
+    fun canonicalJsonRoundTripsThroughTheParser() {
+        val source = """{"s":"a \"quoted\" \n line","n":-1.5e3,"t":true,"z":null}"""
+        val once = canonicalJson(parseJson(source)!!, sortKeys = true)
+        // Re-parsing the output has to yield the same text, or a diff of two canonical bodies would be
+        // comparing something that is no longer valid JSON.
+        assertEquals(once, canonicalJson(parseJson(once)!!, sortKeys = true))
+        // The number keeps its source spelling rather than being reformatted through a Double.
+        assertTrue(once.contains("-1.5e3"))
+    }
 }

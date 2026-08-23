@@ -113,12 +113,63 @@ private const val DOTS_CELLS = 3
 private const val MAX_CONTENT_WIDTH_PX = 200_000f
 
 /**
+ * What one pane of a side-by-side diff needs the editor to do differently — and nothing else, so a plain
+ * editor passes null and behaves exactly as it always has.
+ *
+ * The diff is *this* editor, not a lookalike: an earlier compare view hand-rolled its own two-column
+ * renderer and had to reimplement wrapping, selection, folding and find, none of which matched. Everything
+ * here is instead a value the two panes agree on, so the pair stays in step while each half remains an
+ * ordinary editor over its own document.
+ *
+ * [listState] and [hScroll] are shared with the other pane, which is what locks the two columns together —
+ * one scroll position, so they cannot drift. [wrap] is shared for the same reason, and its toggle moves to
+ * the diff's own toolbar rather than floating in each pane.
+ *
+ * Alignment is carried by *filler* lines: the row grid is the diff's, so a row may exist on one side only.
+ * [lineNumber] therefore supplies the gutter number — a padded document's row index is not its source line
+ * number — and returns null on a filler, whose gutter stays blank. [minRows] is the height the opposite
+ * pane's line at the same row: the editor wraps it with its own column count — both panes are the same width,
+ * so the count matches — and takes the taller of the two, which is what lets a diff wrap at all. Without it a
+ * line that reflows to three rows on one side and one on the other pushes everything below it out of step.
+ * [otherMaxLength] serves the same purpose off wrap, where the shared [hScroll] has one travel for both: the
+ * panes size their content to the *pair's* longest line, so the wider side can still be scrolled to its end.
+ *
+ * Folding is split in two because the two halves genuinely differ. [foldSpans] is the pair's merged answer
+ * to *what a collapse hides*, running to whichever side closes later — hiding a different number of rows in
+ * each pane would slide the columns apart, which is the one thing the row grid exists to prevent. [foldArrows]
+ * is this side's own openers (mapped to its closing bracket), so the gutter offers a control only where this
+ * document really opens a block and the `⋯ }` chip is only drawn over a real bracket. [foldedRows] is shared,
+ * since one arrow folds both columns.
+ */
+internal class CodeEditorDecor(
+    val listState: LazyListState,
+    val hScroll: ScrollState,
+    val wrap: Boolean,
+    val lineNumber: (Int) -> Int?,
+    val otherLength: (Int) -> Int,
+    val otherMaxLength: Int,
+    val rowTint: (Int) -> Color?,
+    val spanRange: (Int) -> IntRange?,
+    val spanTint: Color,
+    // Both panes scroll as one, so only the outer one draws the thumb — a second would land mid-window, on
+    // the seam between the columns, reporting a position its neighbour already shows.
+    val verticalScrollbar: Boolean,
+    val foldSpans: Map<Int, Fold>,
+    val foldArrows: Map<Int, Char>,
+    val foldedRows: Set<Int>,
+    val onToggleFold: (Int) -> Unit,
+)
+
+/**
  * The code editor (ADR-0023): a [LazyColumn] of highlighted lines over the state's [EditorBuffer], so only
  * the visible lines are laid out and a keystroke costs one line + the viewport, not the whole document.
  * Monospace makes caret/selection/hit-test math a constant char width. Highlighted for [language] and
  * editable unless [readOnly]; it fills the slot it's given (its own scroll), reads all colors from the theme
  * (light/dark), and rides the app text scale via the density's font scale. Pure `commonMain` (no platform
  * types in the signature) since the Swing editor was sunset (ADR-0024).
+ *
+ * [decor] is null for every ordinary use; a side-by-side diff passes one to share scroll, wrap and folding
+ * with its other pane and to tint the rows that differ. See [CodeEditorDecor].
  */
 @Composable
 internal fun CodeEditor(
@@ -126,6 +177,7 @@ internal fun CodeEditor(
     language: CodeLanguage,
     readOnly: Boolean,
     modifier: Modifier,
+    decor: CodeEditorDecor? = null,
 ) {
     val scheme = MaterialTheme.colorScheme
     val wailo = LocalWailoColors.current
@@ -165,8 +217,10 @@ internal fun CodeEditor(
         )
     }
 
-    val listState = rememberLazyListState()
-    val hScroll = rememberScrollState()
+    val ownListState = rememberLazyListState()
+    val ownHScroll = rememberScrollState()
+    val listState = decor?.listState ?: ownListState
+    val hScroll = decor?.hScroll ?: ownHScroll
     val focusRequester = remember { FocusRequester() }
 
     var findOpen by remember { mutableStateOf(false) }
@@ -183,8 +237,10 @@ internal fun CodeEditor(
     var findFocusRequests by remember { mutableStateOf(0) }
     var viewportWidthPx by remember { mutableStateOf(0) }
     // Soft wrap on by default: long lines reflow onto extra visual rows at the viewport edge instead of
-    // scrolling sideways. Held per editor instance (not persisted) and flipped by the corner toggle.
-    var wrap by remember { mutableStateOf(true) }
+    // scrolling sideways. Held per editor instance (not persisted) and flipped by the corner toggle — except
+    // in a diff, where both panes must wrap identically or the columns drift, so the pair decides.
+    var ownWrap by remember { mutableStateOf(true) }
+    val wrap = decor?.wrap ?: ownWrap
 
     // Read as snapshot dependencies so the whole editor recomposes on edits (the LazyColumn still only
     // measures visible rows). The gutter sizes to the widest line number; content width to the longest line.
@@ -192,7 +248,8 @@ internal fun CodeEditor(
     val caret = state.caret
     val gutterDigits = maxOf(2, lineCount.toString().length)
     val gutterWidthDp = charWidthDp * gutterDigits + 20.dp
-    val contentWidthDp = (charWidthDp * (state.maxLineLength + 1) + 8.dp)
+    val widestLine = maxOf(state.maxLineLength, decor?.otherMaxLength ?: 0)
+    val contentWidthDp = (charWidthDp * (widestLine + 1) + 8.dp)
         .coerceAtMost(with(density) { MAX_CONTENT_WIDTH_PX.toDp() })
 
     // The cell count that fits after the gutter + fold column (leaving room for the overlay scrollbar) is
@@ -214,9 +271,16 @@ internal fun CodeEditor(
     // through rows, the breakpoint editor switching paused traffic — hand over a fresh instance sitting back
     // at version 0, so keying on the version alone would keep the previous body's arrows (and its line
     // indices) over the new text until something finally bumped it.
-    val foldRegions = remember(state, state.version) { computeFoldRegions(state) }
+    val ownFoldRegions = remember(state, state.version, decor != null) {
+        if (decor == null) computeFoldRegions(state) else emptyMap()
+    }
+    val foldRegions = decor?.foldSpans ?: ownFoldRegions
     val foldedStarts = remember(state) { mutableStateListOf<Int>() }
-    val activeFolds = foldedStarts.filter { foldRegions.containsKey(it) }
+    // In a diff the collapsed set belongs to the pair — one arrow folds both columns — so this editor's own
+    // list stays empty and the panel's answer stands in for it. Either way the hidden rows are *derived* from
+    // the spans rather than passed in, so there is one definition of what a fold covers.
+    val activeFolds = (decor?.foldedRows ?: foldedStarts).filter { foldRegions.containsKey(it) }
+    val collapsed = activeFolds.toSet()
     val hidden = remember(foldRegions, activeFolds) {
         if (activeFolds.isEmpty()) emptySet() else buildSet {
             for (start in activeFolds) {
@@ -246,7 +310,10 @@ internal fun CodeEditor(
 
     // Keep the caret line composed (so its row and this frame's edits stay live) and on-screen both ways.
     // With folds active the list index is the caret's position in `visibleLines`, not its raw line number.
-    LaunchedEffect(caret, viewportWidthPx, visibleLines, wrapCols) {
+    // A diff's panes share one scroll position, so only the focused pane may chase its caret: the idle one's
+    // caret sits at the top of its document and would otherwise drag the pair back there on every fold.
+    LaunchedEffect(caret, viewportWidthPx, visibleLines, wrapCols, focused) {
+        if (decor != null && !focused) return@LaunchedEffect
         val targetIndex = if (visibleLines == null) {
             caret.line
         } else {
@@ -278,7 +345,7 @@ internal fun CodeEditor(
         val sel = state.selectionRange() ?: return null
         var end = sel.second
         val fold = foldRegions[end.line]
-        if (fold != null && end.line in foldedStarts && end.col == state.buffer.lineLength(end.line)) {
+        if (fold != null && end.line in collapsed && end.col == state.buffer.lineLength(end.line)) {
             end = TextPos(fold.endLine, state.buffer.lineLength(fold.endLine))
         }
         return sel.first to end
@@ -345,7 +412,10 @@ internal fun CodeEditor(
         val match = state.find(findQuery, from, forward, ignoreCase = !matchCase) ?: return
         // Unfold any collapsed region hiding the hit, so the selection isn't stranded off-screen.
         if (match.first.line in hidden) {
-            foldedStarts.removeAll { s -> foldRegions[s]?.let { match.first.line in (s + 1)..it.endLine } == true }
+            val covering = activeFolds.filter { s ->
+                foldRegions[s]?.let { match.first.line in (s + 1)..it.endLine } == true
+            }
+            if (decor == null) foldedStarts.removeAll(covering.toSet()) else covering.forEach(decor.onToggleFold)
         }
         state.setSelection(match.first, match.second)
     }
@@ -588,6 +658,14 @@ internal fun CodeEditor(
                 val rowCount = visibleLines?.size ?: lineCount
                 items(count = rowCount, key = { visibleLines?.get(it) ?: it }) { row ->
                     val index = visibleLines?.get(row) ?: row
+                    // The arrow and the `⋯ }` chip follow *this* document's brackets, while what a collapse
+                    // hides follows the pair's merged span — so a row whose other half is a blank filler no
+                    // longer offers a control over nothing.
+                    val opensHere = if (decor != null) {
+                        decor.foldArrows.containsKey(index)
+                    } else {
+                        foldRegions.containsKey(index)
+                    }
                     EditorLineRow(
                         state = state,
                         index = index,
@@ -605,12 +683,17 @@ internal fun CodeEditor(
                         resolveDrag = ::resolveDrag,
                         caretOn = caretOn && focused,
                         focused = focused,
-                        foldable = foldRegions.containsKey(index),
-                        folded = index in foldedStarts && foldRegions.containsKey(index),
-                        foldCloseChar = foldRegions[index]?.closeChar,
+                        foldable = opensHere,
+                        folded = opensHere && index in collapsed,
+                        foldCloseChar = if (decor != null) decor.foldArrows[index] else foldRegions[index]?.closeChar,
+                        lineNumber = if (decor != null) decor.lineNumber(index) else index + 1,
+                        minRows = decor?.let { visualRowCount(it.otherLength(index), wrapCols) } ?: 1,
+                        rowTint = decor?.rowTint?.invoke(index),
+                        spanRange = decor?.spanRange?.invoke(index),
+                        spanTint = decor?.spanTint ?: Color.Transparent,
                         onToggleFold = {
                             focusRequester.requestFocus()
-                            toggleFold(index)
+                            if (decor != null) decor.onToggleFold(index) else toggleFold(index)
                         },
                         onPlaceCaret = { pos ->
                             focusRequester.requestFocus()
@@ -629,24 +712,30 @@ internal fun CodeEditor(
             }
             // Self-hiding desktop scrollbars: they paint a thumb only while the body overflows. The
             // horizontal one exists only off wrap — wrapped lines never overflow sideways.
-            VerticalListScrollbar(
-                listState = listState,
-                modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight(),
-            )
+            if (decor == null || decor.verticalScrollbar) {
+                VerticalListScrollbar(
+                    listState = listState,
+                    modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight(),
+                )
+            }
             if (wrapCols == null) {
                 HorizontalScrollbar(
                     scrollState = hScroll,
                     modifier = Modifier.align(Alignment.BottomStart).fillMaxWidth(),
                 )
             }
-            WrapToggle(
-                enabled = wrap,
-                onToggle = {
-                    wrap = !wrap
-                    focusRequester.requestFocus()
-                },
-                modifier = Modifier.align(Alignment.TopEnd).padding(top = 4.dp, end = 14.dp),
-            )
+            // A diff's two panes must wrap together, so the toggle lives once in its toolbar instead of
+            // twice in the corners, where the two could disagree and pull the columns apart.
+            if (decor == null) {
+                WrapToggle(
+                    enabled = wrap,
+                    onToggle = {
+                        ownWrap = !ownWrap
+                        focusRequester.requestFocus()
+                    },
+                    modifier = Modifier.align(Alignment.TopEnd).padding(top = 4.dp, end = 14.dp),
+                )
+            }
         }
     }
 }
@@ -702,6 +791,11 @@ private fun EditorLineRow(
     foldable: Boolean,
     folded: Boolean,
     foldCloseChar: Char?,
+    lineNumber: Int?,
+    minRows: Int,
+    rowTint: Color?,
+    spanRange: IntRange?,
+    spanTint: Color,
     onToggleFold: () -> Unit,
     onPlaceCaret: (TextPos) -> Unit,
     onExtendSelect: (TextPos) -> Unit,
@@ -712,15 +806,32 @@ private fun EditorLineRow(
     val len = lineText.length
     // Under wrap a physical line spans [rows] visual rows; off wrap it's always one. The row's fixed height
     // scales with it, and the caret/selection/fold overlays below place themselves on the (row, colInRow)
-    // grid via [caretVisualPos] so they land on the right wrapped row.
-    val rows = visualRowCount(len, wrapCols)
+    // grid via [caretVisualPos] so they land on the right wrapped row. In a diff it also cannot go below what
+    // the opposite pane needs for this row, which is what lets the two columns wrap and still stay level.
+    val rows = maxOf(visualRowCount(len, wrapCols), minRows)
     val caret = state.caret
     val selection = state.selectionRange()
     val isCaretLine = index == caret.line
     // The current-line affordances (brighter gutter number + faint row tint) belong to a focused editor;
     // an unfocused viewer has no active caret, so its caret row must not be singled out.
     val activeCaretLine = isCaretLine && focused
-    val annotated = remember(lineText, language, highlight) { annotateLine(lineText, language, highlight) }
+    // The diff span sits on top of the syntax color and resets the text under it to plain onSurface: a JSON
+    // string value is already green, and green-on-tint was the one combination that read as unhighlighted.
+    val annotated = remember(lineText, language, highlight, spanRange, spanTint) {
+        val base = annotateLine(lineText, language, highlight)
+        if (spanRange == null) {
+            base
+        } else {
+            buildAnnotatedString {
+                append(base)
+                val from = spanRange.first.coerceIn(0, lineText.length)
+                val to = (spanRange.last + 1).coerceIn(from, lineText.length)
+                if (to > from) {
+                    addStyle(SpanStyle(background = spanTint, color = highlight.key), from, to)
+                }
+            }
+        }
+    }
     // A collapsed block reads as selected once the selection reaches the opener's fold point (its line end,
     // where `{`/`[` sits): the `⋯ }` chip then highlights and Ctrl+C copies the whole hidden body (the copy
     // side of this is `effectiveSelection`). Selecting only part of the opener, short of that point, doesn't.
@@ -739,8 +850,10 @@ private fun EditorLineRow(
             contentAlignment = Alignment.TopEnd,
         ) {
             Box(Modifier.height(lineHeightDp), contentAlignment = Alignment.CenterEnd) {
+                // Blank on a filler row, which belongs to the diff's grid rather than to this document and
+                // so has no line of its own to number.
                 Text(
-                    (index + 1).toString(),
+                    lineNumber?.toString().orEmpty(),
                     // Inactive numbers use onSurfaceVariant (as the JSON preview does) rather than the faint
                     // `outline`, which was too low-contrast to read; the focused caret's line brightens to onSurface.
                     style = textStyle.copy(color = if (activeCaretLine) scheme.onSurface else scheme.onSurfaceVariant),
@@ -769,7 +882,14 @@ private fun EditorLineRow(
         }
         Box(
             Modifier.weight(1f).fillMaxHeight()
-                .background(if (activeCaretLine && selection == null) scheme.onSurface.copy(alpha = 0.05f) else Color.Transparent)
+                .background(
+                    rowTint
+                        ?: if (activeCaretLine && selection == null) {
+                            scheme.onSurface.copy(alpha = 0.05f)
+                        } else {
+                            Color.Transparent
+                        },
+                )
                 .clipToBounds()
                 // Wrapped content fills the viewport and reflows; only the plain grid scrolls sideways.
                 .let { if (wrapCols == null) it.horizontalScroll(hScroll) else it },
@@ -1128,7 +1248,7 @@ private fun visibleRowCount(listState: LazyListState): Int =
     listState.layoutInfo.visibleItemsInfo.size.coerceAtLeast(1)
 
 /** A foldable region: the line its matching close sits on, and that closing bracket (`}` or `]`). */
-private data class Fold(val endLine: Int, val closeChar: Char)
+internal data class Fold(val endLine: Int, val closeChar: Char)
 
 /**
  * Maps each opener line to its [Fold] for every *multi-line* `{}`/`[]` pair — the foldable regions, keyed by
@@ -1137,7 +1257,7 @@ private data class Fold(val endLine: Int, val closeChar: Char)
  * (largest close line) wins, so that line's arrow folds the whole span. Bails out empty above [FOLD_MAX_CHARS]
  * since it scans the whole document.
  */
-private fun computeFoldRegions(state: CodeEditorState): Map<Int, Fold> {
+internal fun computeFoldRegions(state: CodeEditorState): Map<Int, Fold> {
     val lineCount = state.lineCount()
     val stack = ArrayList<Int>() // opener line indices, innermost last
     val regions = HashMap<Int, Fold>()
