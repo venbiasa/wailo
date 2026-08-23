@@ -5,6 +5,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -38,6 +39,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshots.SnapshotStateList
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -54,6 +56,9 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.LocalPinnableContainer
+import androidx.compose.ui.layout.PinnableContainer
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
@@ -92,6 +97,12 @@ import org.jetbrains.compose.resources.vectorResource
 // header bar above the rows, is the *only* cue that a rule belongs to a group — no rail/connector and no
 // fill difference.
 private val GroupChildIndent = 28.dp
+
+// How close to a viewport edge a drag's pointer must come before the list starts scrolling under it, and
+// the top speed it reaches at the edge itself. The band is about one and a half rows: any narrower and the
+// only way to enter it is to overshoot the panel entirely.
+private val AutoScrollBand = 64.dp
+private const val AutoScrollMaxPxPerSecond = 1500f
 
 /**
  * A grouped, drag-orderable rule panel: an interleaved list of groups and loose rules (ADR-0026),
@@ -286,7 +297,24 @@ private class ReorderState {
     var dy by mutableStateOf(0f)
     val pointerY: Float get() = startCenterY + dy
 
+    // The gesture lives on the dragged row's own handle, so a LazyColumn disposing that row mid-drag
+    // cancels the reorder. Autoscrolling makes that the normal case rather than a corner: the row carried
+    // off the far edge is usually the dragged one, since it stays in its old slot until the drop commits.
+    // Pinning keeps the item composed — and its pointer input alive — until then.
+    private var pin: PinnableContainer.PinnedHandle? = null
+
+    fun start(id: String, isGroup: Boolean, centerY: Float, pinnable: PinnableContainer?) {
+        pin?.release()
+        pin = pinnable?.pin()
+        draggingId = id
+        this.isGroup = isGroup
+        startCenterY = centerY
+        dy = 0f
+    }
+
     fun clear() {
+        pin?.release()
+        pin = null
         draggingId = null
         isGroup = false
         startCenterY = 0f
@@ -320,6 +348,32 @@ private fun <T : LayoutRule<T>> DraggableNodeList(
 
     val rows = remember(nodes, collapsedGroupIds.toList()) { nodes.toDispRows(collapsedGroupIds.toSet()) }
 
+    // Scroll the list under a drag that reaches a viewport edge, so reordering across a list taller than
+    // the panel is one gesture instead of drop, scroll, grab again. Frame-paced rather than animated,
+    // because the speed has to track how deep into the band the pointer is *right now* and the pointer can
+    // hold that position for seconds. The pointer is tracked in viewport coordinates, so scrolling the
+    // content beneath a still finger leaves it — and every drop resolution below — correct as-is.
+    val autoScrollBandPx = with(LocalDensity.current) { AutoScrollBand.toPx() }
+    LaunchedEffect(reorder.draggingId) {
+        if (reorder.draggingId == null) return@LaunchedEffect
+        var previousFrame = 0L
+        while (true) {
+            val frame = withFrameNanos { it }
+            // A frame the app spent elsewhere must not cash out as one long jump.
+            val elapsed = if (previousFrame == 0L) 0f else ((frame - previousFrame) / 1e9f).coerceAtMost(0.05f)
+            previousFrame = frame
+            val info = listState.layoutInfo
+            val speed = dragAutoScrollSpeed(
+                pointerY = reorder.pointerY,
+                viewportStart = info.viewportStartOffset.toFloat(),
+                viewportEnd = info.viewportEndOffset.toFloat(),
+                bandPx = autoScrollBandPx,
+                maxPxPerSecond = AutoScrollMaxPxPerSecond,
+            )
+            if (speed != 0f && elapsed > 0f) listState.scrollBy(speed * elapsed)
+        }
+    }
+
     // Commit a finished drag: resolve the pointer against the layout minus the dragged item, then move.
     fun commitDrop() {
         val id = reorder.draggingId ?: return
@@ -328,7 +382,8 @@ private fun <T : LayoutRule<T>> DraggableNodeList(
             info.visibleItemsInfo.firstOrNull { it.key == key }?.let { it.offset + it.size / 2f }
         }
         val next = if (reorder.isGroup) {
-            currentNodes.moveGroup(id, resolveGroupDropIndex(currentNodes.filterNot { it.id == id }, centerOf, reorder.pointerY))
+            val spans = currentNodes.filterNot { it.id == id }.topLevelSpans(collapsedGroupIds.toSet())
+            currentNodes.moveGroup(id, resolveGroupDropIndex(spans, centerOf, reorder.pointerY))
         } else {
             val target = resolveRuleDropTarget(currentNodes.removeRule(id), centerOf, reorder.pointerY, collapsedGroupIds.toSet())
             // Dropping a rule into a collapsed group expands it, so the rule can't silently vanish.
@@ -348,7 +403,12 @@ private fun <T : LayoutRule<T>> DraggableNodeList(
             // A little breathing room past the last row (and drop room below the final group's footer).
             contentPadding = PaddingValues(bottom = 16.dp),
         ) {
-            itemsIndexed(rows, key = { _, row -> row.key }) { _, row ->
+            itemsIndexed(
+                rows,
+                key = { _, row -> row.key },
+                contentType = { _, row -> row.contentType },
+            ) { _, row ->
+                val pinnable = LocalPinnableContainer.current
                 when (row) {
                     is HeaderDisp -> GroupHeaderRow(
                         group = row.group,
@@ -365,7 +425,7 @@ private fun <T : LayoutRule<T>> DraggableNodeList(
                         onRename = { onRenameGroup(row.group.id, it) },
                         onDelete = { onDeleteGroup(row.group) },
                         handleModifier = if (reorderable) {
-                            dragHandle(reorder, listState, row.key, isGroup = true, onDrop = ::commitDrop)
+                            dragHandle(reorder, listState, row.key, isGroup = true, pinnable = pinnable, onDrop = ::commitDrop)
                         } else {
                             null
                         },
@@ -380,7 +440,7 @@ private fun <T : LayoutRule<T>> DraggableNodeList(
                         onToggle = { onToggleRule(row.rule.id) },
                         onDelete = { onDeleteRule(row.rule.id) },
                         handleModifier = if (reorderable) {
-                            dragHandle(reorder, listState, row.key, isGroup = false, onDrop = ::commitDrop)
+                            dragHandle(reorder, listState, row.key, isGroup = false, pinnable = pinnable, onDrop = ::commitDrop)
                         } else {
                             null
                         },
@@ -398,21 +458,25 @@ private fun <T : LayoutRule<T>> DraggableNodeList(
 // Builds the Modifier for a row's drag handle: starts a drag (recording the row's on-screen center so
 // the pointer position can be tracked from the accumulated delta), accumulates vertical movement, and
 // commits on release. Horizontal movement is ignored — nesting is decided purely by vertical position
-// against the group containers (ADR-0026).
+// against the group containers (ADR-0026). [pinnable] is the row's own lazy-item pin, held for the drag so
+// autoscrolling the row out of view cannot dispose the gesture that is driving it.
 private fun dragHandle(
     reorder: ReorderState,
     listState: LazyListState,
     key: String,
     isGroup: Boolean,
+    pinnable: PinnableContainer?,
     onDrop: () -> Unit,
 ): Modifier = Modifier.pointerInput(key) {
     detectDragGestures(
         onDragStart = {
             val info = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.key == key }
-            reorder.draggingId = key.removePrefix("h:")
-            reorder.isGroup = isGroup
-            reorder.startCenterY = info?.let { it.offset + it.size / 2f } ?: 0f
-            reorder.dy = 0f
+            reorder.start(
+                id = key.removePrefix("h:"),
+                isGroup = isGroup,
+                centerY = info?.let { it.offset + it.size / 2f } ?: 0f,
+                pinnable = pinnable,
+            )
         },
         onDrag = { change, dragAmount ->
             change.consume()
@@ -440,15 +504,16 @@ private fun <T : LayoutRule<T>> DropIndicator(
     val centerOf: (String) -> Float? = { key -> info.visibleItemsInfo.firstOrNull { it.key == key }?.let { it.offset + it.size / 2f } }
 
     val spec: Pair<Float, Dp>? = if (reorder.isGroup) {
-        val reduced = nodes.filterNot { it.id == id }
-        val idx = resolveGroupDropIndex(reduced, centerOf, reorder.pointerY)
-        topLevelGapY(reduced, idx, topOf, bottomOf)?.let { it to 0.dp }
+        val spans = nodes.filterNot { it.id == id }.topLevelSpans(collapsedGroupIds)
+        val idx = resolveGroupDropIndex(spans, centerOf, reorder.pointerY)
+        topLevelGapY(spans, idx, topOf, bottomOf)?.let { it to 0.dp }
     } else {
-        val reduced = nodes.removeRule(id)
-        val rows = reduced.toDispRows(collapsedGroupIds)
-        val gap = rows.count { (centerOf(it.key) ?: Float.NEGATIVE_INFINITY) < reorder.pointerY }.coerceIn(0, rows.size)
+        val rows = nodes.removeRule(id).toDispRows(collapsedGroupIds)
+        val gap = countRowsAbove(rows.size, { centerOf(rows[it].key) }, reorder.pointerY)
         val target = targetForGap(rows, gap)
-        val y = if (gap < rows.size) topOf(rows[gap].key) else rows.lastOrNull()?.let { bottomOf(it.key) }
+        // The line sits on the boundary between the rows either side of the gap; whichever of the two is on
+        // screen fixes it — at the list's ends, and mid-autoscroll, only one of them is.
+        val y = rows.getOrNull(gap)?.let { topOf(it.key) } ?: rows.getOrNull(gap - 1)?.let { bottomOf(it.key) }
         y?.let { it to (if (target is InGroupAt) GroupChildIndent else 0.dp) }
     }
     spec?.let { (y, indent) ->
@@ -681,10 +746,19 @@ private fun DragHandleDots(handle: Modifier) {
 
 private sealed interface Disp<T : LayoutRule<T>> {
     val key: String
+
+    // What a pooled LazyColumn slot must match before its composition may be reused for this row.
+    // Material3 parks the switch's thumb Animatable on a modifier node and (as of 1.9.0) never overrides
+    // onReset, so a recycled node arrives still holding the *previous* row's thumb offset and slides
+    // across to this one's — an already-enabled rule visibly switches itself on as it scrolls back into
+    // view. Folding the switch state in keeps reuse but confines it to rows whose thumb already sits
+    // where this one needs it.
+    val contentType: Any
 }
 
 private data class HeaderDisp<T : LayoutRule<T>>(val group: RuleGroup, val topIndex: Int) : Disp<T> {
     override val key: String get() = "h:${group.id}"
+    override val contentType: Any get() = "h:${group.enabled}"
 }
 
 private data class RuleDisp<T : LayoutRule<T>>(
@@ -695,10 +769,12 @@ private data class RuleDisp<T : LayoutRule<T>>(
     val childIndex: Int,
 ) : Disp<T> {
     override val key: String get() = rule.id
+    override val contentType: Any get() = "r:${rule.enabled}"
 }
 
 private data class FooterDisp<T : LayoutRule<T>>(val group: RuleGroup, val topIndex: Int) : Disp<T> {
     override val key: String get() = "f:${group.id}"
+    override val contentType: Any get() = "f"
 }
 
 // Flattens the layout into the rows the list renders, one row per LazyColumn item (so item index ==
@@ -746,43 +822,91 @@ private fun <T : LayoutRule<T>> resolveRuleDropTarget(
     collapsedGroupIds: Set<String>,
 ): LayoutDropTarget {
     val rows = reducedNodes.toDispRows(collapsedGroupIds)
-    val gap = rows.count { (centerOf(it.key) ?: Float.NEGATIVE_INFINITY) < pointerY }.coerceIn(0, rows.size)
-    return targetForGap(rows, gap)
+    return targetForGap(rows, countRowsAbove(rows.size, { centerOf(rows[it].key) }, pointerY))
+}
+
+/**
+ * How many of [size] top-to-bottom entries sit above [pointerY], from only the positions the list has on
+ * screen — [centerAt] is null for anything the LazyColumn has scrolled away and therefore not measured.
+ *
+ * A list taller than its panel is measured with entries missing on *both* sides, so a missing position has
+ * to be read from where it falls: before the visible window it is above the pointer, and the first one after
+ * that window ends the walk, since centers only increase downward. Treating every missing entry as above
+ * (a plain `?: -Infinity`) counted the whole unmeasured tail, sending any drop in a scrollable list to the
+ * very end — which autoscrolling would otherwise make the common case rather than a corner.
+ */
+internal fun countRowsAbove(size: Int, centerAt: (Int) -> Float?, pointerY: Float): Int {
+    var above = 0
+    var sawMeasured = false
+    for (i in 0 until size) {
+        val center = centerAt(i)
+        if (center == null) {
+            if (sawMeasured) break
+            above = i + 1
+        } else {
+            sawMeasured = true
+            if (center >= pointerY) break
+            above = i + 1
+        }
+    }
+    return above
+}
+
+// The display-row keys bounding each top-level node: the span a group drag is hit-tested against and the
+// drop indicator drawn from. A collapsed group contributes neither rules nor footer, so its span is the
+// header alone — asking for its footer would find nothing and read as "scrolled away".
+private fun <T : LayoutRule<T>> List<LayoutNode<T>>.topLevelSpans(
+    collapsedGroupIds: Set<String>,
+): List<Pair<String, String>> = map { node ->
+    when (node) {
+        is RuleNode -> node.rule.id to node.rule.id
+        is GroupNode -> {
+            val header = "h:${node.group.id}"
+            header to if (node.group.id in collapsedGroupIds) header else "f:${node.group.id}"
+        }
+    }
 }
 
 // For a group drag: the top-level index to drop at = how many top-level nodes sit entirely above the
-// pointer (measured by each node's last row — a loose rule's row, or a group's footer).
-private fun <T : LayoutRule<T>> resolveGroupDropIndex(
-    reducedNodes: List<LayoutNode<T>>,
+// pointer, measured by each node's last row (a loose rule's row, or a group's footer).
+private fun resolveGroupDropIndex(
+    spans: List<Pair<String, String>>,
     centerOf: (String) -> Float?,
     pointerY: Float,
-): Int {
-    var idx = 0
-    reducedNodes.forEachIndexed { i, node ->
-        val lastKey = when (node) {
-            is RuleNode -> node.rule.id
-            is GroupNode -> "f:${node.group.id}"
-        }
-        if ((centerOf(lastKey) ?: Float.NEGATIVE_INFINITY) < pointerY) idx = i + 1
-    }
-    return idx
-}
+): Int = countRowsAbove(spans.size, { centerOf(spans[it].second) }, pointerY)
 
-// The Y (viewport px) of the drop indicator for a top-level insertion at [idx]: the top of the idx-th
-// node's first row, or the bottom of the last row when appending at the end.
-private fun <T : LayoutRule<T>> topLevelGapY(
-    reducedNodes: List<LayoutNode<T>>,
+// The Y (viewport px) of the drop indicator for a top-level insertion at [idx]: the top of the idx-th node,
+// or the bottom of the one before it — whichever is on screen.
+private fun topLevelGapY(
+    spans: List<Pair<String, String>>,
     idx: Int,
     topOf: (String) -> Float?,
     bottomOf: (String) -> Float?,
-): Float? {
-    fun firstKey(node: LayoutNode<T>) = when (node) {
-        is RuleNode -> node.rule.id
-        is GroupNode -> "h:${node.group.id}"
+): Float? = spans.getOrNull(idx)?.let { topOf(it.first) } ?: spans.getOrNull(idx - 1)?.let { bottomOf(it.second) }
+
+/**
+ * Pixels per second the list should scroll under a drag whose pointer sits at [pointerY], given the
+ * viewport's [viewportStart]/[viewportEnd] in the same coordinate space as the lazy items' offsets.
+ * Negative scrolls toward the start of the list; zero outside the [bandPx] edge bands.
+ *
+ * The ramp is quadratic in how deep the pointer is into a band so the shallow end stays precise: a linear
+ * one is already crossing several rows a second the instant the band is entered, which makes dropping a rule
+ * *near* an edge a matter of luck. Past the viewport edge the speed just holds at [maxPxPerSecond]. The
+ * nearer edge wins, so a panel shorter than two bands can still scroll both ways.
+ */
+internal fun dragAutoScrollSpeed(
+    pointerY: Float,
+    viewportStart: Float,
+    viewportEnd: Float,
+    bandPx: Float,
+    maxPxPerSecond: Float,
+): Float {
+    if (bandPx <= 0f) return 0f
+    fun ramp(depth: Float): Float = (depth / bandPx).coerceIn(0f, 1f).let { it * it } * maxPxPerSecond
+    val fromStart = pointerY - viewportStart
+    val fromEnd = viewportEnd - pointerY
+    return when {
+        fromStart <= fromEnd -> if (fromStart < bandPx) -ramp(bandPx - fromStart) else 0f
+        else -> if (fromEnd < bandPx) ramp(bandPx - fromEnd) else 0f
     }
-    fun lastKey(node: LayoutNode<T>) = when (node) {
-        is RuleNode -> node.rule.id
-        is GroupNode -> "f:${node.group.id}"
-    }
-    return if (idx < reducedNodes.size) topOf(firstKey(reducedNodes[idx])) else reducedNodes.lastOrNull()?.let { bottomOf(lastKey(it)) }
 }
