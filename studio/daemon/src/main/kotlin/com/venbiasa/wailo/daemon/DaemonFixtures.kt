@@ -9,22 +9,32 @@ import kotlinx.serialization.encodeToString
 
 /**
  * Daemon-owned configuration that must survive a stop, crash, or replace (ADR-0061). Traffic and
- * holds stay in memory. [layout] is Studio's grouped-rule codec, carried as an opaque blob because
- * `daemon` must not depend on `shared`. A full replace without [layout] drops it; upsert/remove keep it.
+ * holds stay in memory. [nodes] carries the grouping too, since the daemon owns it now (ADR-0081).
+ *
+ * [rules] is the pre-groups file: a flat list that sat beside an opaque Studio blob the daemon could not
+ * read. It is still parsed so an upgrade does not read as an empty configuration and wipe the rules on
+ * the next write. They come back as loose rules; their grouping returns when Studio next attaches, since
+ * its own prefs still hold the layout that blob was encoded from.
  */
 @Serializable
 internal data class PersistedMapLocal(
     val enabled: Boolean = true,
-    val layout: String = "",
+    val nodes: List<DaemonRuleNode<MapLocalRuleDto>> = emptyList(),
     val rules: List<MapLocalRuleDto> = emptyList(),
-)
+) {
+    fun resolvedNodes(): List<DaemonRuleNode<MapLocalRuleDto>> =
+        nodes.ifEmpty { rules.map { DaemonRuleNode(rules = listOf(it)) } }
+}
 
 @Serializable
 internal data class PersistedBreakpoints(
     val enabled: Boolean = true,
-    val layout: String = "",
+    val nodes: List<DaemonRuleNode<BreakpointRuleDto>> = emptyList(),
     val rules: List<BreakpointRuleDto> = emptyList(),
-)
+) {
+    fun resolvedNodes(): List<DaemonRuleNode<BreakpointRuleDto>> =
+        nodes.ifEmpty { rules.map { DaemonRuleNode(rules = listOf(it)) } }
+}
 
 /**
  * Seeds are configuration like the two above — authored fixtures that must outlive the window that
@@ -34,12 +44,23 @@ internal data class PersistedBreakpoints(
 @Serializable
 internal data class PersistedSeeds(
     val enabled: Boolean = true,
-    val layout: String = "",
+    val nodes: List<DaemonRuleNode<SeedRuleDto>> = emptyList(),
     val rules: List<SeedRuleDto> = emptyList(),
-)
+) {
+    fun resolvedNodes(): List<DaemonRuleNode<SeedRuleDto>> =
+        nodes.ifEmpty { rules.map { DaemonRuleNode(rules = listOf(it)) } }
+}
 
+/**
+ * The filter as authored, so the feature master and each list's armed state survive a restart separately.
+ * Storing only the folded per-list flags could not tell "master off, list armed" from "master on, list not
+ * armed", and a frontend had to guess the master back from them — which lost it on every launch (ADR-0082).
+ */
 @Serializable
 internal data class PersistedCaptureFilter(
+    // On by default so a file written before the master was daemon state reads back the way it behaved:
+    // live, governed by the two list switches alone.
+    val masterEnabled: Boolean = true,
     val allowlistEnabled: Boolean = false,
     val allowPatterns: List<String> = emptyList(),
     val blocklistEnabled: Boolean = false,

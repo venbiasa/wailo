@@ -4,10 +4,10 @@ import com.venbiasa.wailo.shared.CaptureFilterState
 import com.venbiasa.wailo.shared.settings.createKeyValueStore
 
 /**
- * Persists the capture filter — the allow/block host lists and each list's on/off switch — across
- * launches, mirroring [BookmarkStore]. Host-owned because the filter lives at the desktop window and the
- * engine pushes it to devices, which decide per request whether to capture the whole exchange (ADR-0029);
- * `shared` only renders it and hands back a new [CaptureFilterState], staying stateless over its inputs.
+ * A local copy of the capture filter — the allow/block host lists, each list's on/off switch, and the
+ * feature master. The daemon owns the live filter (ADR-0082); this exists for one job, mirroring
+ * [MapLocalStore]: re-seeding a daemon that starts with nothing, so a filter authored here is not lost
+ * to a daemon restart. Whatever the daemon reports wins over it.
  *
  * [createKeyValueStore] is primitive-only, so each list rides as a single newline-delimited string (a
  * host pattern can never contain a newline, so it round-trips unambiguously and insertion order is

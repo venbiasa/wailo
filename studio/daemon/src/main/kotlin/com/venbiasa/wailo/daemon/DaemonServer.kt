@@ -29,6 +29,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.KSerializer
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
@@ -97,18 +99,29 @@ internal class DaemonRuntime(
     private val _showStudioRequests = MutableStateFlow(0)
     private val _quitRequests = MutableStateFlow(0)
 
-    // Studio's grouped layout codec, opaque to this module. Loaded with the compiled rules so a restart
-    // can restore groups/names, not just the flattened match-set the engine pushes (ADR-0061).
-    @Volatile
-    var mapLocalLayout: String = ""
-        private set
+    // The authored configuration, grouping included, in the shape every frontend reads it back in
+    // (ADR-0081). The host below holds only what this compiles to — the flattened match set with each
+    // group's switch already folded in — so a rule's own remembered state survives its group being off.
+    //
+    // Every edit is a read-modify-write of the whole list, and several frontends write at once, so each
+    // family takes its lock for the whole edit-and-push. The host used to serialize this for us; now that
+    // the authored copy lives up here, an unguarded write would drop one of two simultaneous rules.
+    private val mapLocalMutex = Mutex()
 
     @Volatile
-    var breakpointLayout: String = ""
+    var mapLocalNodes: List<DaemonRuleNode<MapLocalRuleDto>> = emptyList()
         private set
 
+    private val breakpointMutex = Mutex()
+
     @Volatile
-    var seedLayout: String = ""
+    var breakpointNodes: List<DaemonRuleNode<BreakpointRuleDto>> = emptyList()
+        private set
+
+    private val seedMutex = Mutex()
+
+    @Volatile
+    var seedNodes: List<DaemonRuleNode<SeedRuleDto>> = emptyList()
         private set
 
     init {
@@ -134,12 +147,12 @@ internal class DaemonRuntime(
 
         val holds = host.listHolds()
         val holdsHash = hash(holds.map { it.toDto() })
-        val mapRules = host.mapLocalRules.value
-        val mapHash = hash(listOf(mapLocalLayout, mapRules.map { it.toDto() }))
-        val breakpointRules = host.breakpointRules.value
-        val breakpointHash = hash(listOf(breakpointLayout, breakpointRules.map { it.toDto() }))
-        val seeds = host.seeds.value
-        val seedHash = hash(listOf(seedLayout, seeds.map { it.toDto() }))
+        val mapNodes = mapLocalNodes
+        val mapHash = hash(mapNodes)
+        val breakpointNodes = this.breakpointNodes
+        val breakpointHash = hash(breakpointNodes)
+        val seedNodes = this.seedNodes
+        val seedHash = hash(seedNodes)
         val engine = host.engine
         val identity = engine.pairings.identity.value
         val offer = engine.pairings.offer.value
@@ -156,23 +169,21 @@ internal class DaemonRuntime(
             capturing = engine.capturing.value,
             maxRetained = engine.maxRetained.value,
             connectedDevices = engine.connectedDevices.value.map { it.toDto() },
-            captureFilterBase64 = engine.captureFilter.value.encodeBase64(),
+            // The authored filter, not the one the engine pushes to devices: a frontend has to see the
+            // armed state the master is currently suppressing, or it cannot restore it (ADR-0082).
+            captureFilterBase64 = host.captureFilter.value.encodeBase64(),
+            captureFilterEnabled = host.isCaptureFilterEnabled(),
             holdsHash = holdsHash,
             holds = holds.takeUnless { request.holdsHash == holdsHash }?.map { it.toDto() },
             mapLocalEnabled = host.isMapLocalEnabled(),
             mapLocalHash = mapHash,
-            mapLocalRules = mapRules.takeUnless { request.mapLocalHash == mapHash }?.map { it.toDto() },
-            mapLocalLayout = this.mapLocalLayout.takeUnless { request.mapLocalHash == mapHash },
+            mapLocalNodes = mapNodes.takeUnless { request.mapLocalHash == mapHash },
             breakpointsEnabled = host.areBreakpointsEnabled(),
             breakpointHash = breakpointHash,
-            breakpointRules = breakpointRules
-                .takeUnless { request.breakpointHash == breakpointHash }
-                ?.map { it.toDto() },
-            breakpointLayout = this.breakpointLayout.takeUnless { request.breakpointHash == breakpointHash },
+            breakpointNodes = breakpointNodes.takeUnless { request.breakpointHash == breakpointHash },
             seedsEnabled = host.areSeedsEnabled(),
             seedHash = seedHash,
-            seeds = seeds.takeUnless { request.seedHash == seedHash }?.map { it.toDto() },
-            seedLayout = this.seedLayout.takeUnless { request.seedHash == seedHash },
+            seedNodes = seedNodes.takeUnless { request.seedHash == seedHash },
             armedSeedIds = host.seedQueue.value.map { it.id },
             triagedHoldIds = host.triagedHolds.value.toList(),
             pairing = PairingDto(
@@ -303,78 +314,134 @@ internal class DaemonRuntime(
         _quitRequests.value += 1
     }
 
-    suspend fun replaceMapLocal(
-        rules: List<HostMapLocalRule>,
-        enabled: Boolean,
-        layout: String?,
-    ) {
-        host.replaceMapLocalRules(rules, enabled)
-        // A full snapshot: omit means the compiled list is the authority, so drop a stale Studio blob.
-        mapLocalLayout = layout.orEmpty()
+    suspend fun replaceMapLocal(nodes: List<DaemonRuleNode<MapLocalRuleDto>>, enabled: Boolean) =
+        mapLocalMutex.withLock {
+            mapLocalNodes = nodes
+            pushMapLocal(enabled)
+        }
+
+    /**
+     * Returns false when [groupId] names a group that does not exist — groups are addressed by id, so a
+     * misspelling is reported rather than quietly creating a second group under a guessed name.
+     */
+    suspend fun upsertMapLocal(rule: MapLocalRuleDto, groupId: String?): Boolean = mapLocalMutex.withLock {
+        mapLocalNodes = mapLocalNodes.upsertRule(rule, groupId) { it.id } ?: return@withLock false
+        pushMapLocal(host.isMapLocalEnabled())
+        true
+    }
+
+    suspend fun removeMapLocal(id: String): Boolean = mapLocalMutex.withLock {
+        if (mapLocalNodes.findRule(id) { it.id } == null) return@withLock false
+        mapLocalNodes = mapLocalNodes.removeRule(id) { it.id }
+        pushMapLocal(host.isMapLocalEnabled())
+        true
+    }
+
+    suspend fun setMapLocalEnabled(enabled: Boolean) = mapLocalMutex.withLock { pushMapLocal(enabled) }
+
+    suspend fun replaceBreakpoints(nodes: List<DaemonRuleNode<BreakpointRuleDto>>, enabled: Boolean) =
+        breakpointMutex.withLock {
+            breakpointNodes = nodes
+            pushBreakpoints(enabled)
+        }
+
+    suspend fun upsertBreakpoint(rule: BreakpointRuleDto, groupId: String?): Boolean = breakpointMutex.withLock {
+        breakpointNodes = breakpointNodes.upsertRule(rule, groupId) { it.id } ?: return@withLock false
+        pushBreakpoints(host.areBreakpointsEnabled())
+        true
+    }
+
+    suspend fun removeBreakpoint(id: String): Boolean = breakpointMutex.withLock {
+        if (breakpointNodes.findRule(id) { it.id } == null) return@withLock false
+        breakpointNodes = breakpointNodes.removeRule(id) { it.id }
+        pushBreakpoints(host.areBreakpointsEnabled())
+        true
+    }
+
+    suspend fun setBreakpointsEnabled(enabled: Boolean) = breakpointMutex.withLock { pushBreakpoints(enabled) }
+
+    suspend fun replaceSeeds(nodes: List<DaemonRuleNode<SeedRuleDto>>, enabled: Boolean) = seedMutex.withLock {
+        seedNodes = nodes
+        pushSeeds(enabled)
+    }
+
+    suspend fun upsertSeed(seed: SeedRuleDto, groupId: String?): Boolean = seedMutex.withLock {
+        seedNodes = seedNodes.upsertRule(seed, groupId) { it.id } ?: return@withLock false
+        pushSeeds(host.areSeedsEnabled())
+        true
+    }
+
+    suspend fun removeSeed(id: String): Boolean = seedMutex.withLock {
+        if (seedNodes.findRule(id) { it.id } == null) return@withLock false
+        seedNodes = seedNodes.removeRule(id) { it.id }
+        pushSeeds(host.areSeedsEnabled())
+        true
+    }
+
+    suspend fun setSeedsEnabled(enabled: Boolean) = seedMutex.withLock { pushSeeds(enabled) }
+
+    /** Creates or edits a group in [family]. Unknown families are rejected by the caller. */
+    suspend fun setRuleGroup(family: String, group: DaemonRuleGroup) {
+        when (family) {
+            RULE_FAMILY_MAP_LOCAL -> mapLocalMutex.withLock {
+                mapLocalNodes = mapLocalNodes.upsertGroup(group)
+                pushMapLocal(host.isMapLocalEnabled())
+            }
+            RULE_FAMILY_BREAKPOINTS -> breakpointMutex.withLock {
+                breakpointNodes = breakpointNodes.upsertGroup(group)
+                pushBreakpoints(host.areBreakpointsEnabled())
+            }
+            RULE_FAMILY_SEEDS -> seedMutex.withLock {
+                seedNodes = seedNodes.upsertGroup(group)
+                pushSeeds(host.areSeedsEnabled())
+            }
+        }
+    }
+
+    suspend fun removeRuleGroup(family: String, id: String, withRules: Boolean): Boolean = when (family) {
+        RULE_FAMILY_MAP_LOCAL -> mapLocalMutex.withLock {
+            mapLocalNodes.removeGroup(id, withRules)?.let {
+                mapLocalNodes = it
+                pushMapLocal(host.isMapLocalEnabled())
+                true
+            } ?: false
+        }
+        RULE_FAMILY_BREAKPOINTS -> breakpointMutex.withLock {
+            breakpointNodes.removeGroup(id, withRules)?.let {
+                breakpointNodes = it
+                pushBreakpoints(host.areBreakpointsEnabled())
+                true
+            } ?: false
+        }
+        RULE_FAMILY_SEEDS -> seedMutex.withLock {
+            seedNodes.removeGroup(id, withRules)?.let {
+                seedNodes = it
+                pushSeeds(host.areSeedsEnabled())
+                true
+            } ?: false
+        }
+        else -> false
+    }
+
+    fun listRuleGroups(family: String): List<DaemonRuleGroup> = when (family) {
+        RULE_FAMILY_MAP_LOCAL -> mapLocalNodes.groups()
+        RULE_FAMILY_BREAKPOINTS -> breakpointNodes.groups()
+        RULE_FAMILY_SEEDS -> seedNodes.groups()
+        else -> emptyList()
+    }
+
+    private suspend fun pushMapLocal(enabled: Boolean) {
+        host.replaceMapLocalRules(mapLocalNodes.toHostRules(), enabled)
         persistMapLocal()
     }
 
-    suspend fun upsertMapLocal(rule: HostMapLocalRule) {
-        host.upsertMapLocalRule(rule)
-        persistMapLocal()
-    }
-
-    suspend fun removeMapLocal(id: String): Boolean {
-        val removed = host.removeMapLocalRule(id)
-        if (removed) persistMapLocal()
-        return removed
-    }
-
-    suspend fun setMapLocalEnabled(enabled: Boolean) {
-        host.setMapLocalEnabled(enabled)
-        persistMapLocal()
-    }
-
-    suspend fun replaceBreakpoints(
-        rules: List<HostBreakpointRule>,
-        enabled: Boolean,
-        layout: String?,
-    ) {
-        host.replaceBreakpointRules(rules, enabled)
-        breakpointLayout = layout.orEmpty()
+    private suspend fun pushBreakpoints(enabled: Boolean) {
+        host.replaceBreakpointRules(breakpointNodes.toHostBreakpointRules(), enabled)
         persistBreakpoints()
     }
 
-    suspend fun upsertBreakpoint(rule: HostBreakpointRule) {
-        host.upsertBreakpointRule(rule)
-        persistBreakpoints()
-    }
-
-    suspend fun removeBreakpoint(id: String): Boolean {
-        val removed = host.removeBreakpointRule(id)
-        if (removed) persistBreakpoints()
-        return removed
-    }
-
-    suspend fun setBreakpointsEnabled(enabled: Boolean) {
-        host.setBreakpointsEnabled(enabled)
-        persistBreakpoints()
-    }
-
-    suspend fun replaceSeeds(seeds: List<HostSeed>, enabled: Boolean, layout: String?) {
-        host.replaceSeeds(seeds, enabled)
-        seedLayout = layout.orEmpty()
-        persistSeeds()
-    }
-
-    suspend fun upsertSeed(seed: HostSeed) {
-        host.upsertSeed(seed)
-        persistSeeds()
-    }
-
-    suspend fun removeSeed(id: String): Boolean {
-        val removed = host.removeSeed(id)
-        if (removed) persistSeeds()
-        return removed
-    }
-
-    suspend fun setSeedsEnabled(enabled: Boolean) {
-        host.setSeedsEnabled(enabled)
+    private suspend fun pushSeeds(enabled: Boolean) {
+        host.replaceSeeds(seedNodes.toHostSeeds(), enabled)
         persistSeeds()
     }
 
@@ -383,16 +450,21 @@ internal class DaemonRuntime(
         allowPatterns: List<String>,
         blocklistEnabled: Boolean,
         blockPatterns: List<String>,
+        masterEnabled: Boolean? = null,
     ) {
-        host.updateCaptureFilter(allowlistEnabled, allowPatterns, blocklistEnabled, blockPatterns)
-        fixtures.saveCaptureFilter(
-            PersistedCaptureFilter(
-                allowlistEnabled = allowlistEnabled,
-                allowPatterns = allowPatterns,
-                blocklistEnabled = blocklistEnabled,
-                blockPatterns = blockPatterns,
-            ),
+        host.updateCaptureFilter(
+            allowlistEnabled,
+            allowPatterns,
+            blocklistEnabled,
+            blockPatterns,
+            masterEnabled,
         )
+        persistCaptureFilter()
+    }
+
+    fun setCaptureFilterEnabled(enabled: Boolean) {
+        host.setCaptureFilterEnabled(enabled)
+        persistCaptureFilter()
     }
 
     override fun close() {
@@ -405,16 +477,16 @@ internal class DaemonRuntime(
     private fun restoreFixtures() {
         runBlocking {
             fixtures.loadMapLocalIfPresent()?.let { mapLocal ->
-                mapLocalLayout = mapLocal.layout
-                host.replaceMapLocalRules(mapLocal.rules.map { it.toDomain() }, mapLocal.enabled)
+                mapLocalNodes = mapLocal.resolvedNodes()
+                host.replaceMapLocalRules(mapLocalNodes.toHostRules(), mapLocal.enabled)
             }
             fixtures.loadBreakpointsIfPresent()?.let { breakpoints ->
-                breakpointLayout = breakpoints.layout
-                host.replaceBreakpointRules(breakpoints.rules.map { it.toDomain() }, breakpoints.enabled)
+                breakpointNodes = breakpoints.resolvedNodes()
+                host.replaceBreakpointRules(breakpointNodes.toHostBreakpointRules(), breakpoints.enabled)
             }
             fixtures.loadSeedsIfPresent()?.let { seeds ->
-                seedLayout = seeds.layout
-                host.replaceSeeds(seeds.rules.map { it.toDomain() }, seeds.enabled)
+                seedNodes = seeds.resolvedNodes()
+                host.replaceSeeds(seedNodes.toHostSeeds(), seeds.enabled)
             }
             fixtures.loadCaptureFilterIfPresent()?.let { filter ->
                 host.updateCaptureFilter(
@@ -422,39 +494,39 @@ internal class DaemonRuntime(
                     filter.allowPatterns,
                     filter.blocklistEnabled,
                     filter.blockPatterns,
+                    filter.masterEnabled,
                 )
             }
         }
     }
 
+    private fun persistCaptureFilter() {
+        val authored = host.captureFilter.value
+        fixtures.saveCaptureFilter(
+            PersistedCaptureFilter(
+                masterEnabled = host.isCaptureFilterEnabled(),
+                allowlistEnabled = authored.allowlist_enabled,
+                allowPatterns = authored.allow_patterns,
+                blocklistEnabled = authored.blocklist_enabled,
+                blockPatterns = authored.block_patterns,
+            ),
+        )
+    }
+
     private fun persistMapLocal() {
         fixtures.saveMapLocal(
-            PersistedMapLocal(
-                enabled = host.isMapLocalEnabled(),
-                layout = mapLocalLayout,
-                rules = host.mapLocalRules.value.map { it.toDto() },
-            ),
+            PersistedMapLocal(enabled = host.isMapLocalEnabled(), nodes = mapLocalNodes),
         )
     }
 
     private fun persistBreakpoints() {
         fixtures.saveBreakpoints(
-            PersistedBreakpoints(
-                enabled = host.areBreakpointsEnabled(),
-                layout = breakpointLayout,
-                rules = host.breakpointRules.value.map { it.toDto() },
-            ),
+            PersistedBreakpoints(enabled = host.areBreakpointsEnabled(), nodes = breakpointNodes),
         )
     }
 
     private fun persistSeeds() {
-        fixtures.saveSeeds(
-            PersistedSeeds(
-                enabled = host.areSeedsEnabled(),
-                layout = seedLayout,
-                rules = host.seeds.value.map { it.toDto() },
-            ),
-        )
+        fixtures.saveSeeds(PersistedSeeds(enabled = host.areSeedsEnabled(), nodes = seedNodes))
     }
 
     private fun hash(value: Any): String {
@@ -605,6 +677,12 @@ internal class DaemonServer(
 
     private suspend fun dispatch(request: RpcRequest): RpcResponse {
         fun success(payload: JsonElement = JsonNull) = RpcResponse(ok = true, payload = payload)
+        // Named rather than silently created: a group is addressed by id, so a caller that guessed one
+        // wrong should hear about it instead of watching a duplicate group appear in the panel.
+        fun unknownGroup(id: String?) =
+            RpcResponse(ok = false, error = "No such group: ${id.orEmpty()}. Create it with set_rule_group.")
+        fun unknownFamily(family: String) =
+            RpcResponse(ok = false, error = "Unknown rule family: $family. Expected one of ${RULE_FAMILIES.joinToString()}.")
         return when (request.command) {
             "ping" -> success(
                 DaemonJson.encodeToJsonElement(IntValue(DAEMON_CONTROL_PROTOCOL_VERSION)),
@@ -706,17 +784,26 @@ internal class DaemonServer(
                     value.allowPatterns,
                     value.blocklistEnabled,
                     value.blockPatterns,
+                    value.enabled,
                 )
+                success()
+            }
+            "set_capture_filter_enabled" -> {
+                runtime.setCaptureFilterEnabled(request.decode(BooleanValue.serializer()).value)
                 success()
             }
             "replace_map_local" -> {
                 val value = request.decode(ReplaceMapLocalRequest.serializer())
-                runtime.replaceMapLocal(value.rules.map(MapLocalRuleDto::toDomain), value.enabled, value.layout)
+                runtime.replaceMapLocal(value.nodes, value.enabled)
                 success()
             }
             "upsert_map_local" -> {
-                runtime.upsertMapLocal(request.decode(MapLocalRuleDto.serializer()).toDomain())
-                success()
+                val value = request.decode(UpsertMapLocalRequest.serializer())
+                if (runtime.upsertMapLocal(value.rule, value.groupId)) {
+                    success()
+                } else {
+                    unknownGroup(value.groupId)
+                }
             }
             "remove_map_local" -> success(
                 DaemonJson.encodeToJsonElement(
@@ -729,16 +816,16 @@ internal class DaemonServer(
             }
             "replace_breakpoints" -> {
                 val value = request.decode(ReplaceBreakpointsRequest.serializer())
-                runtime.replaceBreakpoints(
-                    value.rules.map(BreakpointRuleDto::toDomain),
-                    value.enabled,
-                    value.layout,
-                )
+                runtime.replaceBreakpoints(value.nodes, value.enabled)
                 success()
             }
             "upsert_breakpoint" -> {
-                runtime.upsertBreakpoint(request.decode(BreakpointRuleDto.serializer()).toDomain())
-                success()
+                val value = request.decode(UpsertBreakpointRequest.serializer())
+                if (runtime.upsertBreakpoint(value.rule, value.groupId)) {
+                    success()
+                } else {
+                    unknownGroup(value.groupId)
+                }
             }
             "remove_breakpoint" -> success(
                 DaemonJson.encodeToJsonElement(
@@ -751,12 +838,49 @@ internal class DaemonServer(
             }
             "replace_seeds" -> {
                 val value = request.decode(ReplaceSeedsRequest.serializer())
-                runtime.replaceSeeds(value.rules.map(SeedRuleDto::toDomain), value.enabled, value.layout)
+                runtime.replaceSeeds(value.nodes, value.enabled)
                 success()
             }
             "upsert_seed" -> {
-                runtime.upsertSeed(request.decode(SeedRuleDto.serializer()).toDomain())
-                success()
+                val value = request.decode(UpsertSeedRequest.serializer())
+                if (runtime.upsertSeed(value.seed, value.groupId)) {
+                    success()
+                } else {
+                    unknownGroup(value.groupId)
+                }
+            }
+            "set_rule_group" -> {
+                val value = request.decode(SetRuleGroupRequest.serializer())
+                if (value.family !in RULE_FAMILIES) {
+                    unknownFamily(value.family)
+                } else {
+                    runtime.setRuleGroup(value.family, value.group)
+                    success()
+                }
+            }
+            "remove_rule_group" -> {
+                val value = request.decode(RemoveRuleGroupRequest.serializer())
+                if (value.family !in RULE_FAMILIES) {
+                    unknownFamily(value.family)
+                } else {
+                    success(
+                        DaemonJson.encodeToJsonElement(
+                            BooleanValue(runtime.removeRuleGroup(value.family, value.id, value.withRules)),
+                        ),
+                    )
+                }
+            }
+            "list_rule_groups" -> {
+                val value = request.decode(ListRuleGroupsRequest.serializer())
+                if (value.family !in RULE_FAMILIES) {
+                    unknownFamily(value.family)
+                } else {
+                    success(
+                        DaemonJson.encodeToJsonElement(
+                            RuleGroupListDto(runtime.listRuleGroups(value.family)),
+                        ),
+                    )
+                }
             }
             "remove_seed" -> success(
                 DaemonJson.encodeToJsonElement(

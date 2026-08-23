@@ -1,6 +1,9 @@
 package com.venbiasa.wailo.mcp
 
 import com.venbiasa.wailo.daemon.DaemonClient
+import com.venbiasa.wailo.daemon.DaemonRuleGroup
+import com.venbiasa.wailo.daemon.groupIdByRule
+import com.venbiasa.wailo.daemon.groups
 import com.venbiasa.wailo.engine.BodyRef
 import com.venbiasa.wailo.engine.CapturedExchange
 import com.venbiasa.wailo.engine.ConnectedDevice
@@ -47,7 +50,9 @@ internal interface McpBackend {
 
     /** What is still armed and unspent, which is what decides how the next hold is answered. */
     val seedQueue: List<HostSeed>
+    /** The filter as authored; [captureFilterEnabled] is the master gating what devices actually apply. */
     val captureFilter: CaptureFilter
+    val captureFilterEnabled: Boolean
 
     fun searchTraffic(
         urlContains: String?,
@@ -71,7 +76,19 @@ internal interface McpBackend {
     suspend fun clear()
     suspend fun setCapturing(enabled: Boolean)
     suspend fun setMaxRetained(value: Int)
-    suspend fun upsertMapLocalRule(rule: HostMapLocalRule)
+    /**
+     * The groups a panel is organised into, and which group each rule sits in (ADR-0081). Both are empty
+     * for a backend with no daemon behind it, since grouping is daemon-owned state.
+     */
+    fun ruleGroups(family: String): List<DaemonRuleGroup>
+
+    fun groupIdByRule(family: String): Map<String, String>
+
+    suspend fun setRuleGroup(family: String, group: DaemonRuleGroup)
+
+    suspend fun removeRuleGroup(family: String, id: String, withRules: Boolean): Boolean
+
+    suspend fun upsertMapLocalRule(rule: HostMapLocalRule, groupId: String?)
     suspend fun removeMapLocalRule(id: String): Boolean
     suspend fun setMapLocalEnabled(enabled: Boolean)
     suspend fun updateCaptureFilter(
@@ -80,10 +97,11 @@ internal interface McpBackend {
         blocklistEnabled: Boolean,
         blockPatterns: List<String>,
     )
-    suspend fun upsertBreakpointRule(rule: HostBreakpointRule)
+    suspend fun setCaptureFilterEnabled(enabled: Boolean)
+    suspend fun upsertBreakpointRule(rule: HostBreakpointRule, groupId: String?)
     suspend fun removeBreakpointRule(id: String): Boolean
     suspend fun setBreakpointsEnabled(enabled: Boolean)
-    suspend fun upsertSeed(seed: HostSeed)
+    suspend fun upsertSeed(seed: HostSeed, groupId: String?)
     suspend fun removeSeed(id: String): Boolean
     suspend fun setSeedsEnabled(enabled: Boolean)
 
@@ -118,6 +136,7 @@ internal class DaemonMcpBackend(
     override val seeds get() = daemon.seeds.value
     override val seedQueue get() = daemon.seedQueue.value
     override val captureFilter get() = daemon.captureFilter.value
+    override val captureFilterEnabled get() = daemon.captureFilterEnabled.value
 
     override fun searchTraffic(
         urlContains: String?,
@@ -137,7 +156,18 @@ internal class DaemonMcpBackend(
     override suspend fun clear() = daemon.clear()
     override suspend fun setCapturing(enabled: Boolean) = daemon.setCapturing(enabled)
     override suspend fun setMaxRetained(value: Int) = daemon.setMaxRetained(value)
-    override suspend fun upsertMapLocalRule(rule: HostMapLocalRule) = daemon.upsertMapLocalRule(rule)
+    override fun ruleGroups(family: String) = daemon.nodesFor(family).groups()
+
+    override fun groupIdByRule(family: String) = daemon.nodesFor(family).groupIdByRule { it }
+
+    override suspend fun setRuleGroup(family: String, group: DaemonRuleGroup) =
+        daemon.setRuleGroup(family, group)
+
+    override suspend fun removeRuleGroup(family: String, id: String, withRules: Boolean) =
+        daemon.removeRuleGroup(family, id, withRules)
+
+    override suspend fun upsertMapLocalRule(rule: HostMapLocalRule, groupId: String?) =
+        daemon.upsertMapLocalRule(rule, groupId)
     override suspend fun removeMapLocalRule(id: String) = daemon.removeMapLocalRule(id)
     override suspend fun setMapLocalEnabled(enabled: Boolean) = daemon.setMapLocalEnabled(enabled)
     override suspend fun updateCaptureFilter(
@@ -146,10 +176,12 @@ internal class DaemonMcpBackend(
         blocklistEnabled: Boolean,
         blockPatterns: List<String>,
     ) = daemon.updateCaptureFilter(allowlistEnabled, allowPatterns, blocklistEnabled, blockPatterns)
-    override suspend fun upsertBreakpointRule(rule: HostBreakpointRule) = daemon.upsertBreakpointRule(rule)
+    override suspend fun setCaptureFilterEnabled(enabled: Boolean) = daemon.setCaptureFilterEnabled(enabled)
+    override suspend fun upsertBreakpointRule(rule: HostBreakpointRule, groupId: String?) =
+        daemon.upsertBreakpointRule(rule, groupId)
     override suspend fun removeBreakpointRule(id: String) = daemon.removeBreakpointRule(id)
     override suspend fun setBreakpointsEnabled(enabled: Boolean) = daemon.setBreakpointsEnabled(enabled)
-    override suspend fun upsertSeed(seed: HostSeed) = daemon.upsertSeed(seed)
+    override suspend fun upsertSeed(seed: HostSeed, groupId: String?) = daemon.upsertSeed(seed, groupId)
     override suspend fun removeSeed(id: String) = daemon.removeSeed(id)
     override suspend fun setSeedsEnabled(enabled: Boolean) = daemon.setSeedsEnabled(enabled)
     override suspend fun fillSeeds() = daemon.fillSeeds()
@@ -182,7 +214,8 @@ internal class LocalMcpBackend(
     override val seedsEnabled get() = host.areSeedsEnabled()
     override val seeds get() = host.seeds.value
     override val seedQueue get() = host.seedQueue.value
-    override val captureFilter get() = host.engine.captureFilter.value
+    override val captureFilter get() = host.captureFilter.value
+    override val captureFilterEnabled get() = host.isCaptureFilterEnabled()
 
     override fun searchTraffic(
         urlContains: String?,
@@ -202,7 +235,29 @@ internal class LocalMcpBackend(
     override suspend fun clear() = host.clear()
     override suspend fun setCapturing(enabled: Boolean) = host.setCapturing(enabled)
     override suspend fun setMaxRetained(value: Int) = host.setMaxRetained(value)
-    override suspend fun upsertMapLocalRule(rule: HostMapLocalRule) = host.upsertMapLocalRule(rule)
+    // Grouping is daemon-owned, and this backend is the daemon-less one, so it reports a flat panel and
+    // refuses to author groups rather than keeping a second copy of the model that nothing would read.
+    // A refused placement is refused out loud: a rule that quietly landed outside the group it named
+    // would read back as filed correctly on the next list.
+    override fun ruleGroups(family: String) = emptyList<DaemonRuleGroup>()
+
+    override fun groupIdByRule(family: String) = emptyMap<String, String>()
+
+    override suspend fun setRuleGroup(family: String, group: DaemonRuleGroup) = refuseGroups()
+
+    override suspend fun removeRuleGroup(family: String, id: String, withRules: Boolean): Boolean = refuseGroups()
+
+    private fun refuseGroups(): Nothing =
+        throw UnsupportedOperationException("Rule groups need a running Wailo daemon")
+
+    private fun rejectGroup(groupId: String?) {
+        if (!groupId.isNullOrEmpty()) refuseGroups()
+    }
+
+    override suspend fun upsertMapLocalRule(rule: HostMapLocalRule, groupId: String?) {
+        rejectGroup(groupId)
+        host.upsertMapLocalRule(rule)
+    }
     override suspend fun removeMapLocalRule(id: String) = host.removeMapLocalRule(id)
     override suspend fun setMapLocalEnabled(enabled: Boolean) = host.setMapLocalEnabled(enabled)
     override suspend fun updateCaptureFilter(
@@ -211,10 +266,17 @@ internal class LocalMcpBackend(
         blocklistEnabled: Boolean,
         blockPatterns: List<String>,
     ) = host.updateCaptureFilter(allowlistEnabled, allowPatterns, blocklistEnabled, blockPatterns)
-    override suspend fun upsertBreakpointRule(rule: HostBreakpointRule) = host.upsertBreakpointRule(rule)
+    override suspend fun setCaptureFilterEnabled(enabled: Boolean) = host.setCaptureFilterEnabled(enabled)
+    override suspend fun upsertBreakpointRule(rule: HostBreakpointRule, groupId: String?) {
+        rejectGroup(groupId)
+        host.upsertBreakpointRule(rule)
+    }
     override suspend fun removeBreakpointRule(id: String) = host.removeBreakpointRule(id)
     override suspend fun setBreakpointsEnabled(enabled: Boolean) = host.setBreakpointsEnabled(enabled)
-    override suspend fun upsertSeed(seed: HostSeed) = host.upsertSeed(seed)
+    override suspend fun upsertSeed(seed: HostSeed, groupId: String?) {
+        rejectGroup(groupId)
+        host.upsertSeed(seed)
+    }
     override suspend fun removeSeed(id: String) = host.removeSeed(id)
     override suspend fun setSeedsEnabled(enabled: Boolean) = host.setSeedsEnabled(enabled)
     override suspend fun fillSeeds() = host.fillSeeds()

@@ -8,7 +8,7 @@ import kotlin.test.assertTrue
 
 class DaemonFixturesStoreTest {
     @Test
-    fun mapLocalRoundTripsRulesLayoutAndBody() {
+    fun mapLocalRoundTripsGroupsRulesAndBody() {
         val directory = Files.createTempDirectory("wailo-fixtures")
         try {
             val store = DaemonFixturesStore(directory)
@@ -20,17 +20,44 @@ class DaemonFixturesStoreTest {
             store.saveMapLocal(
                 PersistedMapLocal(
                     enabled = false,
-                    layout = "R|login|1|pattern",
-                    rules = listOf(rule.toDto()),
+                    nodes = listOf(
+                        DaemonRuleNode(DaemonRuleGroup("g1", "Checkout", enabled = false), listOf(rule.toDto())),
+                    ),
                 ),
             )
 
             val loaded = DaemonFixturesStore(directory).loadMapLocal()
             assertTrue(Files.isRegularFile(directory.resolve("map-local.json")))
             assertEquals(false, loaded.enabled)
-            assertEquals("R|login|1|pattern", loaded.layout)
-            assertEquals("login", loaded.rules.single().id)
-            assertEquals("""{"ok":true}""", loaded.rules.single().toDomain().bodyCopy().decodeToString())
+            val node = loaded.resolvedNodes().single()
+            assertEquals(DaemonRuleGroup("g1", "Checkout", enabled = false), node.group)
+            assertEquals("login", node.rules.single().id)
+            assertEquals("""{"ok":true}""", node.rules.single().toDomain().bodyCopy().decodeToString())
+        } finally {
+            directory.toFile().deleteRecursively()
+        }
+    }
+
+    /**
+     * The upgrade path off ADR-0061's flat-list-plus-blob file. Reading it as an empty configuration
+     * would look like "no rules" and be persisted as such on the next write, so the rules have to
+     * survive even though the grouping in the blob cannot.
+     */
+    @Test
+    fun aPreGroupsFileStillLoadsItsRules() {
+        val directory = Files.createTempDirectory("wailo-fixtures-legacy")
+        try {
+            val rule = HostMapLocalRule(id = "login", urlPattern = "https://example.com/login")
+            val legacy = PersistedMapLocal(enabled = true, rules = listOf(rule.toDto()))
+            Files.writeString(
+                directory.resolve("map-local.json"),
+                DaemonJson.encodeToString(PersistedMapLocal.serializer(), legacy),
+            )
+
+            val loaded = DaemonFixturesStore(directory).loadMapLocal()
+            val node = loaded.resolvedNodes().single()
+            assertEquals(null, node.group)
+            assertEquals("login", node.rules.single().id)
         } finally {
             directory.toFile().deleteRecursively()
         }
@@ -42,6 +69,7 @@ class DaemonFixturesStoreTest {
         try {
             DaemonFixturesStore(directory).saveCaptureFilter(
                 PersistedCaptureFilter(
+                    masterEnabled = false,
                     allowlistEnabled = true,
                     allowPatterns = listOf("*.example.com"),
                     blocklistEnabled = false,
@@ -49,6 +77,9 @@ class DaemonFixturesStoreTest {
                 ),
             )
             val loaded = DaemonFixturesStore(directory).loadCaptureFilter()
+            // The master and the list's armed state are stored apart, so an off master reads back as a
+            // paused filter rather than an empty one (ADR-0082).
+            assertEquals(false, loaded.masterEnabled)
             assertEquals(true, loaded.allowlistEnabled)
             assertEquals(listOf("*.example.com"), loaded.allowPatterns)
             val empty = Files.createTempDirectory("wailo-fixtures-missing")

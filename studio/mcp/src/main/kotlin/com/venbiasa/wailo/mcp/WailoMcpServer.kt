@@ -1,6 +1,9 @@
 package com.venbiasa.wailo.mcp
 
 import com.venbiasa.wailo.daemon.DaemonClient
+import com.venbiasa.wailo.daemon.RULE_FAMILY_BREAKPOINTS
+import com.venbiasa.wailo.daemon.RULE_FAMILY_MAP_LOCAL
+import com.venbiasa.wailo.daemon.RULE_FAMILY_SEEDS
 import com.venbiasa.wailo.host.HeadlessHost
 import io.modelcontextprotocol.json.McpJsonDefaults
 import io.modelcontextprotocol.server.McpServer
@@ -56,7 +59,7 @@ internal object WailoMcpServer {
                         service.call(definition.name, request.arguments() as Map<String, Any?>)
                     }
                     CallToolResult.builder()
-                        .addTextContent(response.text)
+                        .addTextContent(mcpTextContent(response))
                         .structuredContent(response.data)
                         .isError(response.isError)
                         .build()
@@ -196,6 +199,7 @@ internal object WailoMcpTools {
                 "headers" to headers(),
                 "body_text" to string("UTF-8 response body"),
                 "body_base64" to string("Base64 response body; mutually exclusive with body_text"),
+                "group_id" to groupId("Map Local"),
                 required = listOf("id", "url_pattern"),
             ),
         ),
@@ -234,7 +238,12 @@ internal object WailoMcpTools {
                 "block_patterns" to stringArray("Host wildcard patterns to block"),
             ),
         ),
-        readTool("list_capture_filter", "Read the Capture Filter currently pushed to devices.", objectSchema()),
+        McpToolDefinition(
+            "set_capture_filter_enabled",
+            "Enable or disable the whole Capture Filter without clearing either list. While off every host is captured, and each list keeps the state it comes back with.",
+            objectSchema("enabled" to boolean("Global Capture Filter state"), required = listOf("enabled")),
+        ),
+        readTool("list_capture_filter", "Read the authored Capture Filter and whether it is enabled.", objectSchema()),
         McpToolDefinition(
             "set_breakpoint",
             "Create or replace a breakpoint rule. Matching calls pause until resume_hold or abort_hold decides them.",
@@ -245,6 +254,7 @@ internal object WailoMcpTools {
                 "enabled" to boolean("Whether this rule is active"),
                 "on_request" to boolean("Pause before the request is sent; defaults false"),
                 "on_response" to boolean("Pause before the response reaches the app; defaults true"),
+                "group_id" to groupId("breakpoint"),
                 required = listOf("id", "url_pattern"),
             ),
         ),
@@ -273,6 +283,7 @@ internal object WailoMcpTools {
                 "headers" to headers(),
                 "body_text" to string("UTF-8 response body"),
                 "body_base64" to string("Base64 response body; mutually exclusive with body_text"),
+                "group_id" to groupId("seed"),
                 required = listOf("id", "url_pattern"),
             ),
         ),
@@ -302,6 +313,37 @@ internal object WailoMcpTools {
             "set_seeds_enabled",
             "Globally enable or disable seed answering without deleting the library.",
             objectSchema("enabled" to boolean("Global seed state"), required = listOf("enabled")),
+        ),
+        McpToolDefinition(
+            "set_rule_group",
+            "Create a rule group, or rename or re-gate an existing one. Groups organise a panel and can " +
+                "be switched off as a unit: no rule in a disabled group matches, while each rule keeps " +
+                "its own state for when the group comes back on. Create the group before filing rules " +
+                "into it with the group_id argument.",
+            objectSchema(
+                "family" to ruleFamily(),
+                "id" to string("Stable group id"),
+                "name" to string("Author-facing group label shown in Studio"),
+                "enabled" to boolean("Whether rules in this group can match; defaults true"),
+                required = listOf("family", "id"),
+            ),
+        ),
+        McpToolDefinition(
+            "remove_rule_group",
+            "Delete a rule group. Its rules survive as ungrouped rules unless with_rules is true, which " +
+                "deletes them with it.",
+            objectSchema(
+                "family" to ruleFamily(),
+                "id" to string("Group id"),
+                "with_rules" to boolean("Also delete the rules inside the group; defaults false"),
+                required = listOf("family", "id"),
+            ),
+            destructive = true,
+        ),
+        readTool(
+            "list_rule_groups",
+            "List one panel's rule groups with their enabled state.",
+            objectSchema("family" to ruleFamily(), required = listOf("family")),
         ),
         McpToolDefinition(
             "fill_seeds",
@@ -387,6 +429,18 @@ private fun stringArray(description: String): Map<String, Any> = mapOf(
     "type" to "array",
     "description" to description,
     "items" to mapOf("type" to "string"),
+)
+
+private fun ruleFamily(): Map<String, Any> = enumString(
+    "Which panel's groups to act on",
+    RULE_FAMILY_MAP_LOCAL,
+    RULE_FAMILY_BREAKPOINTS,
+    RULE_FAMILY_SEEDS,
+)
+
+private fun groupId(family: String): Map<String, Any> = string(
+    "Id of an existing $family group to file this rule into; omit to leave it where it is, or pass an " +
+        "empty string to move it out of its group. Create groups with set_rule_group.",
 )
 
 private fun headers(): Map<String, Any> = mapOf(

@@ -35,6 +35,7 @@ class WailoMcpServiceTest {
                 "get_map_local",
                 "set_map_local_enabled",
                 "set_capture_filter",
+                "set_capture_filter_enabled",
                 "list_capture_filter",
                 "set_breakpoint",
                 "remove_breakpoint",
@@ -49,6 +50,9 @@ class WailoMcpServiceTest {
                 "clear_seed_queue",
                 "resume_hold",
                 "abort_hold",
+                "set_rule_group",
+                "remove_rule_group",
+                "list_rule_groups",
             ),
             names.toSet(),
         )
@@ -96,6 +100,32 @@ class WailoMcpServiceTest {
             )
             assertFalse(breakpoint.isError)
             assertTrue(engine.breakpointRules.value.rules.single().on_request)
+        } finally {
+            host.stop()
+        }
+    }
+
+    @Test
+    fun theCaptureFilterMasterPausesDevicesWithoutForgettingWhatWasArmed() = runBlocking {
+        val engine = WailoEngine()
+        val host = HeadlessHost.wrap(engine)
+        val service = WailoMcpService(host, 8899)
+        try {
+            service.call("set_capture_filter", mapOf("block_patterns" to listOf("analytics.example.com")))
+            assertTrue(engine.captureFilter.value.blocklist_enabled)
+
+            assertFalse(service.call("set_capture_filter_enabled", mapOf("enabled" to false)).isError)
+            // Devices capture everything again...
+            assertFalse(engine.captureFilter.value.blocklist_enabled)
+            // ...but the list is still armed, and says so, which is what makes the master reversible.
+            val paused = service.call("list_capture_filter", emptyMap()).data
+            assertEquals(false, paused["enabled"])
+            assertEquals(true, paused["blocklist_enabled"])
+            assertEquals(listOf("analytics.example.com"), paused["block_patterns"])
+
+            service.call("set_capture_filter_enabled", mapOf("enabled" to true))
+            assertTrue(engine.captureFilter.value.blocklist_enabled)
+            assertEquals(listOf("analytics.example.com"), engine.captureFilter.value.block_patterns)
         } finally {
             host.stop()
         }
@@ -198,11 +228,65 @@ class WailoMcpServiceTest {
         }
     }
 
+    /**
+     * Grouping is daemon-owned (ADR-0081), so the daemon-less backend has to say no rather than drop the
+     * placement — a rule that quietly landed loose would read back as correctly filed on the next list.
+     */
+    @Test
+    fun aDaemonLessMcpRefusesGroupsInsteadOfIgnoringThem() = runBlocking {
+        val host = HeadlessHost.wrap(WailoEngine())
+        val service = WailoMcpService(host, 8899)
+        try {
+            val group = service.call("set_rule_group", mapOf("family" to "map_local", "id" to "checkout"))
+            assertTrue(group.isError)
+            assertTrue(group.text.contains("daemon"))
+
+            val filed = service.call(
+                "set_map_local",
+                mapOf(
+                    "id" to "fixture",
+                    "url_pattern" to "https://example.com/*",
+                    "group_id" to "checkout",
+                ),
+            )
+            assertTrue(filed.isError)
+            assertTrue(host.mapLocalRules.value.isEmpty())
+
+            // A rule with no group named is unaffected: a flat panel is still a working panel.
+            assertFalse(
+                service.call(
+                    "set_map_local",
+                    mapOf("id" to "fixture", "url_pattern" to "https://example.com/*"),
+                ).isError,
+            )
+            assertEquals(0, service.call("list_rule_groups", mapOf("family" to "map_local")).groups().size)
+        } finally {
+            host.stop()
+        }
+    }
+
+    @Test
+    fun anUnknownRuleFamilyIsNamedRatherThanGuessed() = runBlocking {
+        val host = HeadlessHost.wrap(WailoEngine())
+        val service = WailoMcpService(host, 8899)
+        try {
+            val failure = service.call("list_rule_groups", mapOf("family" to "map-local"))
+            assertTrue(failure.isError)
+            assertTrue(failure.text.contains("map_local"))
+            assertTrue(service.call("list_rule_groups", emptyMap()).isError)
+        } finally {
+            host.stop()
+        }
+    }
+
     @Test
     fun parsesMcpProcessOptions() {
         assertEquals(McpConfig(port = 19001, maxRetained = 500), parseMcpArgs(arrayOf("--port", "19001", "--max-retained", "500")))
     }
 }
+
+@Suppress("UNCHECKED_CAST")
+private fun McpToolResponse.groups(): List<Map<String, Any?>> = data["groups"] as List<Map<String, Any?>>
 
 @Suppress("UNCHECKED_CAST")
 private fun McpToolResponse.rules(): List<Map<String, Any?>> = data["rules"] as List<Map<String, Any?>>

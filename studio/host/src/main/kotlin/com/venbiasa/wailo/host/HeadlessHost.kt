@@ -12,6 +12,7 @@ import com.venbiasa.wailo.engine.pairing.PairingManager
 import com.venbiasa.wailo.engine.pairing.InMemoryPairingKeyStore
 import com.venbiasa.wailo.engine.pairing.PairingKeyStore
 import com.venbiasa.wailo.protocol.BreakpointRule
+import com.venbiasa.wailo.protocol.CaptureFilter
 import com.venbiasa.wailo.protocol.HttpRequest
 import com.venbiasa.wailo.protocol.HttpResponse
 import com.venbiasa.wailo.protocol.MapLocalRule
@@ -76,6 +77,19 @@ class HeadlessHost private constructor(
     @Volatile
     private var mapLocalEnabled = true
 
+    private val _captureFilter = MutableStateFlow(CaptureFilter())
+
+    /**
+     * The capture filter as authored: each list's own armed state, before [isCaptureFilterEnabled] is
+     * folded in. The engine holds the folded form — what devices and the proxy actually apply — so this
+     * is what a frontend edits and what the daemon persists, which is how turning the master off and on
+     * again restores exactly what was armed (ADR-0030).
+     */
+    val captureFilter: StateFlow<CaptureFilter> = _captureFilter.asStateFlow()
+
+    @Volatile
+    private var captureFilterEnabled = true
+
     @Volatile
     private var fallbackBodyProvider: MapLocalBodyProvider? = null
 
@@ -132,12 +146,37 @@ class HeadlessHost private constructor(
 
     fun updateRules(rules: List<MapLocalRule>) = engine.updateRules(rules)
 
+    /**
+     * Replaces the authored filter, and the master with it when [masterEnabled] is given — one lock and
+     * one push, so neither the engine nor a polling frontend can observe the lists of this edit beside
+     * the master of the last one. Null leaves the master as it is, for an edit that is only about hosts.
+     */
+    @Synchronized
     fun updateCaptureFilter(
         allowlistEnabled: Boolean,
         allowPatterns: List<String>,
         blocklistEnabled: Boolean,
         blockPatterns: List<String>,
-    ) = engine.updateCaptureFilter(allowlistEnabled, allowPatterns, blocklistEnabled, blockPatterns)
+        masterEnabled: Boolean? = null,
+    ) {
+        _captureFilter.value = CaptureFilter(
+            allowlist_enabled = allowlistEnabled,
+            allow_patterns = allowPatterns,
+            blocklist_enabled = blocklistEnabled,
+            block_patterns = blockPatterns,
+        )
+        masterEnabled?.let { captureFilterEnabled = it }
+        pushCaptureFilter()
+    }
+
+    /** Flips the filter's feature master, leaving each list's armed state and hosts untouched. */
+    @Synchronized
+    fun setCaptureFilterEnabled(enabled: Boolean) {
+        captureFilterEnabled = enabled
+        pushCaptureFilter()
+    }
+
+    fun isCaptureFilterEnabled(): Boolean = captureFilterEnabled
 
     fun updateBreakpointRules(rules: List<BreakpointRule>) = engine.updateBreakpointRules(rules)
 
@@ -391,6 +430,18 @@ class HeadlessHost private constructor(
     private fun reconcileSeedQueue() {
         val byId = _seeds.value.associateBy { it.id }
         _seedQueue.value = _seedQueue.value.mapNotNull { byId[it.id] }
+    }
+
+    // Mirrors pushRegisteredMapLocalRules: the master gates only what reaches the engine, so an off master
+    // captures everything while each list keeps the armed state it will come back with.
+    private fun pushCaptureFilter() {
+        val authored = _captureFilter.value
+        engine.updateCaptureFilter(
+            allowlistEnabled = captureFilterEnabled && authored.allowlist_enabled,
+            allowPatterns = authored.allow_patterns,
+            blocklistEnabled = captureFilterEnabled && authored.blocklist_enabled,
+            blockPatterns = authored.block_patterns,
+        )
     }
 
     private fun pushRegisteredMapLocalRules() {

@@ -1,5 +1,10 @@
 package com.venbiasa.wailo.mcp
 
+import com.venbiasa.wailo.daemon.DaemonRuleGroup
+import com.venbiasa.wailo.daemon.RULE_FAMILIES
+import com.venbiasa.wailo.daemon.RULE_FAMILY_BREAKPOINTS
+import com.venbiasa.wailo.daemon.RULE_FAMILY_MAP_LOCAL
+import com.venbiasa.wailo.daemon.RULE_FAMILY_SEEDS
 import com.venbiasa.wailo.engine.BodyRef
 import com.venbiasa.wailo.engine.CapturedExchange
 import com.venbiasa.wailo.engine.PausedExchange
@@ -71,6 +76,7 @@ internal class WailoMcpService(
                 "get_map_local" -> getMapLocal(arguments)
                 "set_map_local_enabled" -> setMapLocalEnabled(arguments)
                 "set_capture_filter" -> setCaptureFilter(arguments)
+                "set_capture_filter_enabled" -> setCaptureFilterEnabled(arguments)
                 "list_capture_filter" -> listCaptureFilter()
                 "set_breakpoint" -> setBreakpoint(arguments)
                 "remove_breakpoint" -> removeBreakpoint(arguments)
@@ -81,6 +87,9 @@ internal class WailoMcpService(
                 "list_seeds" -> listSeeds()
                 "get_seed" -> getSeed(arguments)
                 "set_seeds_enabled" -> setSeedsEnabled(arguments)
+                "set_rule_group" -> setRuleGroup(arguments)
+                "remove_rule_group" -> removeRuleGroup(arguments)
+                "list_rule_groups" -> listRuleGroups(arguments)
                 "fill_seeds" -> fillSeeds()
                 "clear_seed_queue" -> clearSeedQueue()
                 "resume_hold" -> resumeHold(arguments)
@@ -271,6 +280,7 @@ internal class WailoMcpService(
         val pattern = arguments.requiredString("url_pattern")
         val body = arguments.optionalBody()
         val statusCode = arguments.int("status_code", 200).inRange("status_code", 100..599)
+        val groupId = arguments.string("group_id")
         backend.upsertMapLocalRule(
             HostMapLocalRule(
                 id = id,
@@ -282,11 +292,62 @@ internal class WailoMcpService(
                 headers = arguments.headers(),
                 body = body ?: ByteArray(0),
             ),
+            groupId,
         )
         return success(
             "Map Local rule $id set",
-            mapOf("id" to id, "body_bytes" to (body?.size ?: 0), "status_code" to statusCode),
+            mapOf(
+                "id" to id,
+                "body_bytes" to (body?.size ?: 0),
+                "status_code" to statusCode,
+                "group_id" to backend.groupIdByRule(RULE_FAMILY_MAP_LOCAL)[id].orEmpty(),
+            ),
         )
+    }
+
+    private suspend fun setRuleGroup(arguments: ToolArguments): McpToolResponse {
+        val family = arguments.ruleFamily()
+        val id = arguments.requiredString("id")
+        val existing = backend.ruleGroups(family).firstOrNull { it.id == id }
+        val group = DaemonRuleGroup(
+            id = id,
+            // Defaults come from the group as it stands, so setting only `enabled` is not also a rename.
+            name = arguments.string("name") ?: existing?.name.orEmpty(),
+            enabled = arguments.boolean("enabled", existing?.enabled ?: true),
+        )
+        backend.setRuleGroup(family, group)
+        return success(
+            "$family group $id set",
+            mapOf("family" to family, "group" to group.summary()),
+        )
+    }
+
+    private suspend fun removeRuleGroup(arguments: ToolArguments): McpToolResponse {
+        val family = arguments.ruleFamily()
+        val id = arguments.requiredString("id")
+        val withRules = arguments.boolean("with_rules", false)
+        if (!backend.removeRuleGroup(family, id, withRules)) throw ToolFailure("$family group not found: $id")
+        return success(
+            "$family group $id removed",
+            mapOf("family" to family, "id" to id, "removed" to true, "with_rules" to withRules),
+        )
+    }
+
+    private fun listRuleGroups(arguments: ToolArguments): McpToolResponse {
+        val family = arguments.ruleFamily()
+        val groups = backend.ruleGroups(family).map { it.summary() }
+        return success("${groups.size} $family group(s)", mapOf("family" to family, "groups" to groups))
+    }
+
+    private fun DaemonRuleGroup.summary(): Map<String, Any?> =
+        mapOf("id" to id, "name" to name, "enabled" to enabled)
+
+    private fun ToolArguments.ruleFamily(): String {
+        val family = requiredString("family")
+        if (family !in RULE_FAMILIES) {
+            throw ToolFailure("Unknown rule family: $family. Expected one of ${RULE_FAMILIES.joinToString()}.")
+        }
+        return family
     }
 
     private suspend fun removeMapLocal(arguments: ToolArguments): McpToolResponse {
@@ -312,11 +373,21 @@ internal class WailoMcpService(
         // An enabled rule whose body never loaded silently declines to serve, so without this an
         // agent asking "why did my fixture not fire" can only misread it as a pattern mismatch.
         "body_available" to rule.bodyAvailable,
+        // Blank for an ungrouped rule. A rule in a group that is switched off already reads enabled
+        // false above, since the daemon folds the group's switch in before anyone sees the rule.
+        "group_id" to backend.groupIdByRule(RULE_FAMILY_MAP_LOCAL)[rule.id].orEmpty(),
     )
 
     private fun listMapLocal(): McpToolResponse {
         val rules = backend.mapLocalRules.map(::mapLocalSummary)
-        return success("${rules.size} Map Local rule(s)", mapOf("enabled" to backend.mapLocalEnabled, "rules" to rules))
+        return success(
+            "${rules.size} Map Local rule(s)",
+            mapOf(
+                "enabled" to backend.mapLocalEnabled,
+                "rules" to rules,
+                "groups" to backend.ruleGroups(RULE_FAMILY_MAP_LOCAL).map { it.summary() },
+            ),
+        )
     }
 
     private fun getMapLocal(arguments: ToolArguments): McpToolResponse {
@@ -357,6 +428,12 @@ internal class WailoMcpService(
         )
     }
 
+    private suspend fun setCaptureFilterEnabled(arguments: ToolArguments): McpToolResponse {
+        val enabled = arguments.requiredBoolean("enabled")
+        backend.setCaptureFilterEnabled(enabled)
+        return success("capture_filter_enabled=$enabled", captureFilterData())
+    }
+
     private fun listCaptureFilter(): McpToolResponse =
         success("Current device-side Capture Filter", captureFilterData())
 
@@ -374,8 +451,12 @@ internal class WailoMcpService(
                 onRequest = onRequest,
                 onResponse = onResponse,
             ),
+            arguments.string("group_id"),
         )
-        return success("Breakpoint $id set", mapOf("id" to id))
+        return success(
+            "Breakpoint $id set",
+            mapOf("id" to id, "group_id" to backend.groupIdByRule(RULE_FAMILY_BREAKPOINTS)[id].orEmpty()),
+        )
     }
 
     private suspend fun removeBreakpoint(arguments: ToolArguments): McpToolResponse {
@@ -385,6 +466,7 @@ internal class WailoMcpService(
     }
 
     private fun listBreakpoints(): McpToolResponse {
+        val groups = backend.groupIdByRule(RULE_FAMILY_BREAKPOINTS)
         val rules = backend.breakpointRules.map {
             mapOf(
                 "id" to it.id,
@@ -393,11 +475,16 @@ internal class WailoMcpService(
                 "methods" to it.methods,
                 "on_request" to it.onRequest,
                 "on_response" to it.onResponse,
+                "group_id" to groups[it.id].orEmpty(),
             )
         }
         return success(
             "${rules.size} breakpoint rule(s)",
-            mapOf("enabled" to backend.breakpointsEnabled, "rules" to rules),
+            mapOf(
+                "enabled" to backend.breakpointsEnabled,
+                "rules" to rules,
+                "groups" to backend.ruleGroups(RULE_FAMILY_BREAKPOINTS).map { it.summary() },
+            ),
         )
     }
 
@@ -421,11 +508,18 @@ internal class WailoMcpService(
                 headers = arguments.headers(),
                 body = body ?: ByteArray(0),
             ),
+            arguments.string("group_id"),
         )
         // Writing a seed does not arm it: the library is the script, fill_seeds is where it starts.
         return success(
             "Seed $id set",
-            mapOf("id" to id, "body_bytes" to (body?.size ?: 0), "status_code" to statusCode, "armed" to false),
+            mapOf(
+                "id" to id,
+                "body_bytes" to (body?.size ?: 0),
+                "status_code" to statusCode,
+                "armed" to false,
+                "group_id" to backend.groupIdByRule(RULE_FAMILY_SEEDS)[id].orEmpty(),
+            ),
         )
     }
 
@@ -448,6 +542,7 @@ internal class WailoMcpService(
         // Being in the library is not being in play: a seed answers one hold and is then spent, so this
         // is the only field that says whether the next matching hold will actually get this response.
         "armed" to (seed.id in armed),
+        "group_id" to backend.groupIdByRule(RULE_FAMILY_SEEDS)[seed.id].orEmpty(),
     )
 
     private fun listSeeds(): McpToolResponse {
@@ -455,7 +550,11 @@ internal class WailoMcpService(
         val seeds = backend.seeds.map { seedSummary(it, armed) }
         return success(
             "${seeds.size} seed(s), ${armed.size} armed",
-            mapOf("enabled" to backend.seedsEnabled, "seeds" to seeds),
+            mapOf(
+                "enabled" to backend.seedsEnabled,
+                "seeds" to seeds,
+                "groups" to backend.ruleGroups(RULE_FAMILY_SEEDS).map { it.summary() },
+            ),
         )
     }
 
@@ -529,6 +628,7 @@ internal class WailoMcpService(
     private fun captureFilterData(): Map<String, Any?> {
         val filter = backend.captureFilter
         return mapOf(
+            "enabled" to backend.captureFilterEnabled,
             "allowlist_enabled" to filter.allowlist_enabled,
             "allow_patterns" to filter.allow_patterns,
             "blocklist_enabled" to filter.blocklist_enabled,

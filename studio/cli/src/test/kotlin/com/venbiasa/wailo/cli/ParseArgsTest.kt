@@ -102,6 +102,30 @@ class ParseArgsTest {
         assertEquals("""{"state":"pending"}""", parsed.bodyText)
     }
 
+    // Grouping is daemon state now (ADR-0081), so the CLI authors it with the same flags the MCP tools
+    // take — the two surfaces have to agree about what a group is or a rule filed from one goes missing
+    // from the other.
+    @Test
+    fun aGroupIsAuthoredAndFiledIntoByIdRatherThanByName() {
+        val group = parseArgs(
+            arrayOf("set_rule_group", "--family", "map_local", "--group-id", "checkout", "--name", "Checkout", "--off"),
+        )!!
+        assertEquals("map_local", group.family)
+        assertEquals("checkout", group.groupId)
+        assertEquals("Checkout", group.name)
+        assertEquals(false, group.flag)
+
+        val filed = parseArgs(
+            arrayOf("set_map_local", "--id", "login", "--url-pattern", "https://example.com/login", "--group-id", "checkout"),
+        )!!
+        assertEquals("checkout", filed.groupId)
+
+        val removal = parseArgs(arrayOf("remove_rule_group", "--family", "seeds", "--group-id", "checkout", "--with-rules"))!!
+        assertEquals("seeds", removal.family)
+        assertTrue(removal.withRules)
+        assertEquals(false, parseArgs(arrayOf("remove_rule_group", "--family", "seeds", "--group-id", "checkout"))!!.withRules)
+    }
+
     @Test
     fun commandEnumCoversTier1Surface() {
         val verbs = Command.entries.map { it.verb }.toSet()

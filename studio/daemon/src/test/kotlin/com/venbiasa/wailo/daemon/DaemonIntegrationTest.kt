@@ -181,23 +181,27 @@ class DaemonIntegrationTest {
     }
 
     @Test
-    fun mapLocalRulesSurviveADaemonRestart() = runBlocking {
+    fun mapLocalRulesAndTheirGroupsSurviveADaemonRestart() = runBlocking {
         val directory = Files.createTempDirectory("wailo-daemon-fixtures")
         try {
             harness(directory, deleteDirectory = false).use { first ->
                 val client = first.client()
                 try {
                     assertTrue(client.awaitReady())
-                    client.replaceMapLocalRules(
+                    client.replaceMapLocalNodes(
                         listOf(
-                            HostMapLocalRule(
-                                id = "login",
-                                urlPattern = "https://example.com/login",
-                                body = """{"ok":true}""".toByteArray(),
+                            DaemonRuleNode(
+                                group = DaemonRuleGroup("checkout", "Checkout"),
+                                rules = listOf(
+                                    HostMapLocalRule(
+                                        id = "login",
+                                        urlPattern = "https://example.com/login",
+                                        body = """{"ok":true}""".toByteArray(),
+                                    ),
+                                ),
                             ),
                         ),
                         enabled = true,
-                        layout = "R|login|1|aHR0cHM6Ly9leGFtcGxlLmNvbS9sb2dpbg==||200|",
                     )
                 } finally {
                     client.close()
@@ -213,13 +217,81 @@ class DaemonIntegrationTest {
                     val rule = client.mapLocalRules.value.single()
                     assertEquals("https://example.com/login", rule.urlPattern)
                     assertEquals("""{"ok":true}""", rule.bodyCopy().decodeToString())
-                    assertEquals("R|login|1|aHR0cHM6Ly9leGFtcGxlLmNvbS9sb2dpbg==||200|", client.mapLocalLayout.value)
+                    val node = client.mapLocalNodes.value.single()
+                    assertEquals(DaemonRuleGroup("checkout", "Checkout"), node.group)
+                    assertEquals("login", node.rules.single().id)
                 } finally {
                     client.close()
                 }
             }
         } finally {
             directory.toFile().deleteRecursively()
+        }
+    }
+
+    /**
+     * The point of moving grouping onto the daemon (ADR-0080): a rule an agent writes lands in a real
+     * group, and every other frontend sees it there without Studio having been open.
+     */
+    @Test
+    fun aRuleWrittenIntoAGroupIsReadBackInThatGroup() = runBlocking {
+        harness().use { harness ->
+            val client = harness.client()
+            try {
+                assertTrue(client.awaitReady())
+                client.setRuleGroup(RULE_FAMILY_MAP_LOCAL, DaemonRuleGroup("checkout", "Checkout"))
+                client.upsertMapLocalRule(
+                    HostMapLocalRule(id = "login", urlPattern = "https://example.com/login"),
+                    groupId = "checkout",
+                )
+
+                assertEquals(listOf(DaemonRuleGroup("checkout", "Checkout")), client.listRuleGroups(RULE_FAMILY_MAP_LOCAL))
+                assertEquals(mapOf("login" to "checkout"), client.nodesFor(RULE_FAMILY_MAP_LOCAL).groupIdByRule { it })
+
+                // A second frontend attaching later must be told the same thing.
+                val observer = harness.client()
+                try {
+                    assertTrue(observer.awaitReady())
+                    withTimeout(5_000) {
+                        while (observer.mapLocalNodes.value.isEmpty()) delay(25)
+                    }
+                    val node = observer.mapLocalNodes.value.single()
+                    assertEquals("checkout", node.group?.id)
+                    assertEquals("login", node.rules.single().id)
+                } finally {
+                    observer.close()
+                }
+            } finally {
+                client.close()
+            }
+        }
+    }
+
+    /**
+     * A group's switch has to be resolved before the host sees the rule: what devices match on must be
+     * right with no window open (invariant #2), so an off group cannot rely on a frontend to close it.
+     */
+    @Test
+    fun aDisabledGroupPushesItsRulesToTheHostAsDisabled() = runBlocking {
+        harness().use { harness ->
+            val client = harness.client()
+            try {
+                assertTrue(client.awaitReady())
+                client.setRuleGroup(RULE_FAMILY_MAP_LOCAL, DaemonRuleGroup("checkout", "Checkout"))
+                client.upsertMapLocalRule(
+                    HostMapLocalRule(id = "login", urlPattern = "https://example.com/login", enabled = true),
+                    groupId = "checkout",
+                )
+                client.setRuleGroup(RULE_FAMILY_MAP_LOCAL, DaemonRuleGroup("checkout", "Checkout", enabled = false))
+
+                withTimeout(5_000) {
+                    while (harness.host.mapLocalRules.value.singleOrNull()?.enabled != false) delay(25)
+                }
+                // The rule keeps its own state, so switching the group back on restores it (ADR-0030).
+                assertTrue(client.mapLocalNodes.value.single().rules.single().enabled)
+            } finally {
+                client.close()
+            }
         }
     }
 
@@ -231,16 +303,19 @@ class DaemonIntegrationTest {
                 val client = first.client()
                 try {
                     assertTrue(client.awaitReady())
-                    client.replaceSeeds(
+                    client.replaceSeedNodes(
                         listOf(
-                            HostSeed(
-                                id = "poll-1",
-                                urlPattern = "https://example.com/poll",
-                                body = """{"state":"pending"}""".toByteArray(),
+                            DaemonRuleNode(
+                                rules = listOf(
+                                    HostSeed(
+                                        id = "poll-1",
+                                        urlPattern = "https://example.com/poll",
+                                        body = """{"state":"pending"}""".toByteArray(),
+                                    ),
+                                ),
                             ),
                         ),
                         enabled = true,
-                        layout = "R|poll-1|1|aHR0cHM6Ly9leGFtcGxlLmNvbS9wb2xs||200|",
                     )
                     assertEquals(1, client.fillSeeds())
                 } finally {
@@ -257,7 +332,6 @@ class DaemonIntegrationTest {
                     val seed = client.seeds.value.single()
                     assertEquals("https://example.com/poll", seed.urlPattern)
                     assertEquals("""{"state":"pending"}""", seed.bodyCopy().decodeToString())
-                    assertEquals("R|poll-1|1|aHR0cHM6Ly9leGFtcGxlLmNvbS9wb2xs||200|", client.seedLayout.value)
                     // A half-spent queue is a position in a run, not a preference (ADR-0041).
                     assertTrue(client.seedQueue.value.isEmpty())
                 } finally {
@@ -266,6 +340,83 @@ class DaemonIntegrationTest {
             }
         } finally {
             directory.toFile().deleteRecursively()
+        }
+    }
+
+    /**
+     * The regression that made the master worth owning here: it used to be folded into the two list
+     * flags before they were stored, so a restart could not tell a paused filter from an unarmed one and
+     * a frontend guessed it back as off, every launch (ADR-0082).
+     */
+    @Test
+    fun anOffCaptureFilterMasterSurvivesARestartWithItsListsStillArmed() = runBlocking {
+        val directory = Files.createTempDirectory("wailo-daemon-filter")
+        try {
+            harness(directory, deleteDirectory = false).use { first ->
+                val client = first.client()
+                try {
+                    assertTrue(client.awaitReady())
+                    client.updateCaptureFilter(
+                        allowlistEnabled = false,
+                        allowPatterns = emptyList(),
+                        blocklistEnabled = true,
+                        blockPatterns = listOf("analytics.example.com"),
+                        enabled = false,
+                    )
+                } finally {
+                    client.close()
+                }
+            }
+            harness(directory, deleteDirectory = false).use { second ->
+                val client = second.client()
+                try {
+                    assertTrue(client.awaitReady())
+                    withTimeout(5_000) {
+                        while (client.captureFilter.value.block_patterns.isEmpty()) delay(25)
+                    }
+                    assertFalse(client.captureFilterEnabled.value)
+                    assertTrue(client.captureFilter.value.blocklist_enabled)
+                    // Devices still capture everything while the master is off.
+                    assertFalse(second.host.engine.captureFilter.value.blocklist_enabled)
+                } finally {
+                    client.close()
+                }
+            }
+        } finally {
+            directory.toFile().deleteRecursively()
+        }
+    }
+
+    /**
+     * Studio publishes the whole panel, so the master has to travel with the lists. Sent as two calls it
+     * left a window where the daemon held this edit's lists beside the previous master, and the frontend
+     * that adopts what the daemon reports handed the user back the master they had just changed.
+     */
+    @Test
+    fun oneCallSetsTheListsAndTheMasterTogetherAndOmittingItLeavesTheMasterAlone() = runBlocking {
+        harness().use { harness ->
+            val client = harness.client()
+            try {
+                assertTrue(client.awaitReady())
+                client.updateCaptureFilter(
+                    allowlistEnabled = false,
+                    allowPatterns = emptyList(),
+                    blocklistEnabled = true,
+                    blockPatterns = listOf("analytics.example.com"),
+                    enabled = false,
+                )
+                assertFalse(harness.host.isCaptureFilterEnabled())
+                assertTrue(harness.host.captureFilter.value.blocklist_enabled)
+                assertFalse(harness.host.engine.captureFilter.value.blocklist_enabled)
+
+                // A list-only edit — what the CLI and an agent send — must not disturb a paused master.
+                client.updateCaptureFilter(false, emptyList(), true, listOf("metrics.example.com"))
+                assertFalse(harness.host.isCaptureFilterEnabled())
+                assertEquals(listOf("metrics.example.com"), harness.host.captureFilter.value.block_patterns)
+                assertFalse(harness.host.engine.captureFilter.value.blocklist_enabled)
+            } finally {
+                client.close()
+            }
         }
     }
 

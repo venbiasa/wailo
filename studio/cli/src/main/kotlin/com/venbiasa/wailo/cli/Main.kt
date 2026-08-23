@@ -1,6 +1,10 @@
 package com.venbiasa.wailo.cli
 
 import com.venbiasa.wailo.daemon.DaemonClient
+import com.venbiasa.wailo.daemon.DaemonRuleGroup
+import com.venbiasa.wailo.daemon.RULE_FAMILIES
+import com.venbiasa.wailo.daemon.RULE_FAMILY_MAP_LOCAL
+import com.venbiasa.wailo.daemon.groupIdByRule
 import com.venbiasa.wailo.engine.WailoEngine
 import com.venbiasa.wailo.host.HostMapLocalRule
 import com.venbiasa.wailo.host.HostSeed
@@ -150,17 +154,22 @@ internal suspend fun dispatch(host: DaemonClient, args: ParsedArgs): CommandResu
         }
         "list_map_local", "list-map-local" -> {
             val rules = host.mapLocalRules.value
+            val groups = host.nodesFor(RULE_FAMILY_MAP_LOCAL).groupIdByRule { it }
             CommandResult(
                 if (rules.isEmpty()) {
                     "(no Map Local rules)"
                 } else {
                     rules.joinToString("\n") { rule ->
                         val methods = rule.methods.takeIf { it.isNotEmpty() }?.joinToString(",") ?: "*"
-                        "${rule.id}\t${if (rule.enabled) "on" else "off"}\t$methods\t${rule.statusCode}\t${rule.bodySize}B\t${rule.urlPattern}"
+                        val group = groups[rule.id]?.let { "\t[$it]" }.orEmpty()
+                        "${rule.id}\t${if (rule.enabled) "on" else "off"}\t$methods\t${rule.statusCode}\t${rule.bodySize}B\t${rule.urlPattern}$group"
                     }
                 },
             )
         }
+        "set_rule_group", "set-rule-group" -> setRuleGroup(host, args)
+        "remove_rule_group", "remove-rule-group" -> removeRuleGroup(host, args)
+        "list_rule_groups", "list-rule-groups" -> listRuleGroups(host, args)
         "set_map_local_enabled", "set-map-local-enabled" -> {
             val enabled = args.flag
                 ?: return CommandResult("set_map_local_enabled requires --on or --off", exitCode = 2)
@@ -227,6 +236,12 @@ internal suspend fun dispatch(host: DaemonClient, args: ParsedArgs): CommandResu
                 "capture_filter allow=${args.allowPatterns.size} block=${args.blockPatterns.size}",
             )
         }
+        "set_capture_filter_enabled", "set-capture-filter-enabled" -> {
+            val enabled = args.flag
+                ?: return CommandResult("set_capture_filter_enabled requires --on or --off", exitCode = 2)
+            host.setCaptureFilterEnabled(enabled)
+            CommandResult("capture_filter_enabled=$enabled")
+        }
         "clear_capture_filter", "clear-capture-filter" -> {
             host.updateCaptureFilter(false, emptyList(), false, emptyList())
             CommandResult("capture_filter cleared")
@@ -235,6 +250,7 @@ internal suspend fun dispatch(host: DaemonClient, args: ParsedArgs): CommandResu
             val filter = host.captureFilter.value
             CommandResult(
                 buildString {
+                    appendLine("enabled=${host.captureFilterEnabled.value}")
                     appendLine("allowlist=${filter.allowlist_enabled}")
                     filter.allow_patterns.forEach { appendLine("  allow $it") }
                     appendLine("blocklist=${filter.blocklist_enabled}")
@@ -455,8 +471,61 @@ private suspend fun setMapLocal(host: DaemonClient, args: ParsedArgs): CommandRe
             headers = canned.headers,
             body = canned.body,
         ),
+        args.groupId,
     )
     return CommandResult("Map Local rule ${canned.id} set (${canned.body.size} bytes)")
+}
+
+/**
+ * The group commands for all three panels (ADR-0081). One set with `--family` rather than three
+ * near-identical trios, since the model behind them is the same and only the panel differs.
+ */
+private suspend fun setRuleGroup(host: DaemonClient, args: ParsedArgs): CommandResult {
+    val family = args.family?.takeIf { it in RULE_FAMILIES }
+        ?: return CommandResult(
+            "set_rule_group requires --family ${RULE_FAMILIES.joinToString("|")}",
+            exitCode = 2,
+        )
+    val id = args.groupId ?: return CommandResult("set_rule_group requires --group-id", exitCode = 2)
+    // Read first so setting one field does not reset the other to its default.
+    val existing = host.listRuleGroups(family).firstOrNull { it.id == id }
+    val group = DaemonRuleGroup(
+        id = id,
+        name = args.name ?: existing?.name.orEmpty(),
+        enabled = args.flag ?: existing?.enabled ?: true,
+    )
+    host.setRuleGroup(family, group)
+    return CommandResult("$family group $id set (${if (group.enabled) "on" else "off"})")
+}
+
+private suspend fun removeRuleGroup(host: DaemonClient, args: ParsedArgs): CommandResult {
+    val family = args.family?.takeIf { it in RULE_FAMILIES }
+        ?: return CommandResult(
+            "remove_rule_group requires --family ${RULE_FAMILIES.joinToString("|")}",
+            exitCode = 2,
+        )
+    val id = args.groupId ?: return CommandResult("remove_rule_group requires --group-id", exitCode = 2)
+    if (!host.removeRuleGroup(family, id, args.withRules)) {
+        return CommandResult("$family group not found: $id", exitCode = 1)
+    }
+    val fate = if (args.withRules) "with its rules" else "rules kept"
+    return CommandResult("removed $family group $id ($fate)")
+}
+
+private suspend fun listRuleGroups(host: DaemonClient, args: ParsedArgs): CommandResult {
+    val family = args.family?.takeIf { it in RULE_FAMILIES }
+        ?: return CommandResult(
+            "list_rule_groups requires --family ${RULE_FAMILIES.joinToString("|")}",
+            exitCode = 2,
+        )
+    val groups = host.listRuleGroups(family)
+    return CommandResult(
+        if (groups.isEmpty()) {
+            "(no $family groups)"
+        } else {
+            groups.joinToString("\n") { "${it.id}\t${if (it.enabled) "on" else "off"}\t${it.name}" }
+        },
+    )
 }
 
 /**
@@ -478,6 +547,7 @@ private suspend fun setSeed(host: DaemonClient, args: ParsedArgs): CommandResult
             headers = canned.headers,
             body = canned.body,
         ),
+        args.groupId,
     )
     return CommandResult("seed ${canned.id} set (${canned.body.size} bytes)")
 }
@@ -558,6 +628,9 @@ internal enum class Command(val verb: String) {
     RemoveMapLocal("remove_map_local"),
     ListMapLocal("list_map_local"),
     SetMapLocalEnabled("set_map_local_enabled"),
+    SetRuleGroup("set_rule_group"),
+    RemoveRuleGroup("remove_rule_group"),
+    ListRuleGroups("list_rule_groups"),
     SetSeed("set_seed"),
     RemoveSeed("remove_seed"),
     ListSeeds("list_seeds"),
@@ -565,6 +638,7 @@ internal enum class Command(val verb: String) {
     FillSeeds("fill_seeds"),
     ClearSeedQueue("clear_seed_queue"),
     SetCaptureFilter("set_capture_filter"),
+    SetCaptureFilterEnabled("set_capture_filter_enabled"),
     ClearCaptureFilter("clear_capture_filter"),
     ListCaptureFilter("list_capture_filter"),
     ListDevices("list_devices"),
@@ -612,6 +686,10 @@ internal data class ParsedArgs(
     val bodyText: String? = null,
     val out: String? = null,
     val keep: Boolean = false,
+    val family: String? = null,
+    val groupId: String? = null,
+    val name: String? = null,
+    val withRules: Boolean = false,
 )
 
 internal fun parseArgs(args: Array<String>): ParsedArgs? {
@@ -637,6 +715,10 @@ internal fun parseArgs(args: Array<String>): ParsedArgs? {
     var bodyText: String? = null
     var out: String? = null
     var keep = false
+    var family: String? = null
+    var groupId: String? = null
+    var name: String? = null
+    var withRules = false
     var i = 1
     while (i < args.size) {
         when (val a = args[i]) {
@@ -663,6 +745,10 @@ internal fun parseArgs(args: Array<String>): ParsedArgs? {
             "--on" -> flag = true
             "--off" -> flag = false
             "--keep" -> keep = true
+            "--family" -> family = args.getOrNull(++i) ?: return null
+            "--group-id" -> groupId = args.getOrNull(++i) ?: return null
+            "--name" -> name = args.getOrNull(++i) ?: return null
+            "--with-rules" -> withRules = true
             else -> return null
         }
         i += 1
@@ -691,6 +777,10 @@ internal fun parseArgs(args: Array<String>): ParsedArgs? {
         bodyText = bodyText,
         out = out,
         keep = keep,
+        family = family,
+        groupId = groupId,
+        name = name,
+        withRules = withRules,
     )
 }
 
@@ -707,17 +797,24 @@ private fun printUsage() {
         wailo-cli get_exchange --id ID
         wailo-cli set_map_local --id ID --url-pattern GLOB [--method M] [--status C]
                     [--header "Name: value"]... [--body-file PATH|--body-text TEXT] [--off]
+                    [--group-id ID]
         wailo-cli remove_map_local --id ID
         wailo-cli list_map_local
         wailo-cli set_map_local_enabled --on|--off
+        wailo-cli set_rule_group --family map_local|breakpoints|seeds --group-id ID
+                    [--name TEXT] [--on|--off]
+        wailo-cli remove_rule_group --family F --group-id ID [--with-rules]
+        wailo-cli list_rule_groups --family F
         wailo-cli set_seed --id ID --url-pattern GLOB [--method M] [--status C]
                     [--header "Name: value"]... [--body-file PATH|--body-text TEXT] [--off]
+                    [--group-id ID]
         wailo-cli remove_seed --id ID
         wailo-cli list_seeds
         wailo-cli set_seeds_enabled --on|--off
         wailo-cli fill_seeds
         wailo-cli clear_seed_queue
         wailo-cli set_capture_filter [--allow HOST_PATTERN]... [--block HOST_PATTERN]...
+        wailo-cli set_capture_filter_enabled --on|--off
         wailo-cli clear_capture_filter
         wailo-cli list_capture_filter
         wailo-cli list_devices
@@ -743,6 +840,11 @@ private fun printUsage() {
         Every invocation auto-starts and attaches to the same daemon. It stays up while anything refers
         to it — an open Studio, an MCP session, a connected app — and exits on its own once nothing has
         for a while. `serve --keep` holds it open until Ctrl-C; `wailo-cli stop` ends it immediately.
+
+        Rules are organised into groups, which Studio shows as collapsible sections and which can be
+        switched off as a unit — no rule in a disabled group matches, and each keeps its own state for
+        when the group comes back. Create a group with set_rule_group before filing rules into it with
+        --group-id; removing one keeps its rules unless you pass --with-rules.
 
         Seeds are canned responses that answer held exchanges in order (ADR-0041). set_seed builds the
         library; fill_seeds arms every enabled one and sweeps the holds already waiting, and each hold it

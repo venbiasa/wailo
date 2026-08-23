@@ -23,7 +23,7 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import okio.ByteString.Companion.toByteString
 
-internal const val DAEMON_CONTROL_PROTOCOL_VERSION = 9
+internal const val DAEMON_CONTROL_PROTOCOL_VERSION = 11
 
 /**
  * The one command whose socket is not answered and closed. The daemon holds it open and counts it as a
@@ -80,21 +80,23 @@ internal data class PollResponse(
     val capturing: Boolean,
     val maxRetained: Int,
     val connectedDevices: List<ConnectedDeviceDto>,
+    // The filter as authored — each list's own armed state, not the form folded through
+    // [captureFilterEnabled] that devices apply. A frontend needs both to render the panel (ADR-0082).
     val captureFilterBase64: String,
+    val captureFilterEnabled: Boolean,
     val holdsHash: String,
     val holds: List<PausedExchangeDto>? = null,
     val mapLocalEnabled: Boolean,
     val mapLocalHash: String,
-    val mapLocalRules: List<MapLocalRuleDto>? = null,
-    val mapLocalLayout: String? = null,
+    // The grouped structure, not a flat list beside an opaque blob (ADR-0081). Every frontend reads its
+    // groups from here, so a rule an agent filed into one is in that group for the panel too.
+    val mapLocalNodes: List<DaemonRuleNode<MapLocalRuleDto>>? = null,
     val breakpointsEnabled: Boolean,
     val breakpointHash: String,
-    val breakpointRules: List<BreakpointRuleDto>? = null,
-    val breakpointLayout: String? = null,
+    val breakpointNodes: List<DaemonRuleNode<BreakpointRuleDto>>? = null,
     val seedsEnabled: Boolean,
     val seedHash: String,
-    val seeds: List<SeedRuleDto>? = null,
-    val seedLayout: String? = null,
+    val seedNodes: List<DaemonRuleNode<SeedRuleDto>>? = null,
     // The armed queue as ids into the library above, not whole seeds: it changes on every spend, so a
     // poll that carried the bodies again would re-send them on each answered hold. Session state, so it
     // rides outside the hash-gated snapshot (ADR-0067).
@@ -294,7 +296,10 @@ internal data class MapLocalRuleDto(
     // frontend built either side of this change still talk without a control-protocol bump.
     val name: String = "",
 ) {
-    fun toDomain() = HostMapLocalRule(
+    // [enabled] is overridden when the rule sits in a group, whose own switch gates it (see
+    // `effectiveEnabled`). The authored value stays on the DTO so a frontend can still show the rule's
+    // own state, and turning the group back on restores it.
+    fun toDomain(enabled: Boolean = this.enabled) = HostMapLocalRule(
         id = id,
         name = name,
         enabled = enabled,
@@ -316,7 +321,7 @@ internal data class BreakpointRuleDto(
     val onRequest: Boolean,
     val onResponse: Boolean,
 ) {
-    fun toDomain() = HostBreakpointRule(
+    fun toDomain(enabled: Boolean = this.enabled) = HostBreakpointRule(
         id = id,
         enabled = enabled,
         urlPattern = urlPattern,
@@ -342,7 +347,7 @@ internal data class SeedRuleDto(
     val bodyBase64: String,
     val bodyAvailable: Boolean = true,
 ) {
-    fun toDomain() = HostSeed(
+    fun toDomain(enabled: Boolean = this.enabled) = HostSeed(
         id = id,
         enabled = enabled,
         urlPattern = urlPattern,
@@ -427,28 +432,81 @@ internal data class CaptureFilterRequest(
     val allowPatterns: List<String>,
     val blocklistEnabled: Boolean,
     val blockPatterns: List<String>,
+    // The master rides with the lists so a frontend that edits both applies them as one. Sent apart, the
+    // poll between the two calls reports a filter that is half this edit and half the last one, and a
+    // frontend that adopts what the daemon reports would take that back as the user's intent (ADR-0082).
+    // Null leaves the master alone, which is what a list-only edit from the CLI or an agent means.
+    val enabled: Boolean? = null,
 )
 
 @Serializable
 internal data class ReplaceMapLocalRequest(
     val enabled: Boolean,
-    val rules: List<MapLocalRuleDto>,
-    val layout: String? = null,
+    val nodes: List<DaemonRuleNode<MapLocalRuleDto>>,
 )
 
 @Serializable
 internal data class ReplaceBreakpointsRequest(
     val enabled: Boolean,
-    val rules: List<BreakpointRuleDto>,
-    val layout: String? = null,
+    val nodes: List<DaemonRuleNode<BreakpointRuleDto>>,
 )
 
 @Serializable
 internal data class ReplaceSeedsRequest(
     val enabled: Boolean,
-    val rules: List<SeedRuleDto>,
-    val layout: String? = null,
+    val nodes: List<DaemonRuleNode<SeedRuleDto>>,
 )
+
+/**
+ * An upsert that can also place the rule, so a headless frontend can file into a group rather than only
+ * appending loose rules. A null [groupId] leaves an existing rule where it is; an empty one moves it out
+ * to the top level. The group must already exist — it is addressed by id (ADR-0081).
+ */
+@Serializable
+internal data class UpsertMapLocalRequest(
+    val rule: MapLocalRuleDto,
+    val groupId: String? = null,
+)
+
+@Serializable
+internal data class UpsertBreakpointRequest(
+    val rule: BreakpointRuleDto,
+    val groupId: String? = null,
+)
+
+@Serializable
+internal data class UpsertSeedRequest(
+    val seed: SeedRuleDto,
+    val groupId: String? = null,
+)
+
+/** Which panel's groups a group command addresses; the three share one set of commands. */
+@Serializable
+internal data class SetRuleGroupRequest(
+    val family: String,
+    val group: DaemonRuleGroup,
+)
+
+@Serializable
+internal data class RemoveRuleGroupRequest(
+    val family: String,
+    val id: String,
+    val withRules: Boolean = false,
+)
+
+@Serializable
+internal data class ListRuleGroupsRequest(val family: String)
+
+@Serializable
+internal data class RuleGroupListDto(val groups: List<DaemonRuleGroup>)
+
+const val RULE_FAMILY_MAP_LOCAL = "map_local"
+
+const val RULE_FAMILY_BREAKPOINTS = "breakpoints"
+
+const val RULE_FAMILY_SEEDS = "seeds"
+
+val RULE_FAMILIES = listOf(RULE_FAMILY_MAP_LOCAL, RULE_FAMILY_BREAKPOINTS, RULE_FAMILY_SEEDS)
 
 @Serializable
 internal data class ResumeHoldRequest(
@@ -520,6 +578,20 @@ internal fun PausedExchange.toDto() = PausedExchangeDto(
     requestBase64 = request?.encode()?.encodeBase64(),
     responseBase64 = response?.encode()?.encodeBase64(),
 )
+
+/**
+ * The match set the engine actually serves: flattened to priority order, with each group's switch folded
+ * into the rules under it. This is the only projection devices ever see — the grouping above it is
+ * authoring structure and never reaches the wire.
+ */
+internal fun List<DaemonRuleNode<MapLocalRuleDto>>.toHostRules(): List<HostMapLocalRule> =
+    flatMap { node -> node.rules.map { it.toDomain(effectiveEnabled(it.enabled, node.group)) } }
+
+internal fun List<DaemonRuleNode<BreakpointRuleDto>>.toHostBreakpointRules(): List<HostBreakpointRule> =
+    flatMap { node -> node.rules.map { it.toDomain(effectiveEnabled(it.enabled, node.group)) } }
+
+internal fun List<DaemonRuleNode<SeedRuleDto>>.toHostSeeds(): List<HostSeed> =
+    flatMap { node -> node.rules.map { it.toDomain(effectiveEnabled(it.enabled, node.group)) } }
 
 internal fun HostMapLocalRule.toDto() = MapLocalRuleDto(
     id = id,

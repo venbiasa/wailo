@@ -2,8 +2,8 @@
 adr: 0061
 title: Daemon-owned configuration is durable; traffic and holds stay a session
 date: "2026-08-16"
-status: accepted
-relations: amends ADR-0058 (durable configuration); extends ADR-0019/0026/0027/0029
+status: partly superseded
+relations: amends ADR-0058 (durable configuration); extends ADR-0019/0026/0027/0029; its opaque-layout decision superseded by ADR-0081
 ---
 # ADR-0061 — Daemon-owned configuration is durable; traffic and holds stay a session
 

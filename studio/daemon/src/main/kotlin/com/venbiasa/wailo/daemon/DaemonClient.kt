@@ -99,28 +99,35 @@ class DaemonClient internal constructor(
     val lanAddress: StateFlow<String> = _lanAddress.asStateFlow()
     private val _maxRetained = MutableStateFlow(10_000)
     val maxRetained: StateFlow<Int> = _maxRetained.asStateFlow()
+    // The filter as authored, with its feature master beside it rather than folded in, so a frontend can
+    // show what each list will come back armed with once the master flips on again (ADR-0082).
     private val _captureFilter = MutableStateFlow(CaptureFilter())
     val captureFilter: StateFlow<CaptureFilter> = _captureFilter.asStateFlow()
+    private val _captureFilterEnabled = MutableStateFlow(true)
+    val captureFilterEnabled: StateFlow<Boolean> = _captureFilterEnabled.asStateFlow()
     private val _pausedExchanges = MutableStateFlow<List<PausedExchange>>(emptyList())
     val pausedExchanges: StateFlow<List<PausedExchange>> = _pausedExchanges.asStateFlow()
+    // The grouped structure is what the daemon actually holds (ADR-0081); the flat `…Rules` flows below
+    // are its flattened projection, kept because most callers only ever want "which rules are there".
+    // Both are updated from one poll field, so they cannot disagree.
+    private val _mapLocalNodes = MutableStateFlow<List<DaemonRuleNode<HostMapLocalRule>>>(emptyList())
+    val mapLocalNodes: StateFlow<List<DaemonRuleNode<HostMapLocalRule>>> = _mapLocalNodes.asStateFlow()
     private val _mapLocalRules = MutableStateFlow<List<HostMapLocalRule>>(emptyList())
     val mapLocalRules: StateFlow<List<HostMapLocalRule>> = _mapLocalRules.asStateFlow()
     private val _mapLocalEnabled = MutableStateFlow(true)
     val mapLocalEnabled: StateFlow<Boolean> = _mapLocalEnabled.asStateFlow()
-    private val _mapLocalLayout = MutableStateFlow("")
-    val mapLocalLayout: StateFlow<String> = _mapLocalLayout.asStateFlow()
+    private val _breakpointNodes = MutableStateFlow<List<DaemonRuleNode<HostBreakpointRule>>>(emptyList())
+    val breakpointNodes: StateFlow<List<DaemonRuleNode<HostBreakpointRule>>> = _breakpointNodes.asStateFlow()
     private val _breakpointRules = MutableStateFlow<List<HostBreakpointRule>>(emptyList())
     val breakpointRules: StateFlow<List<HostBreakpointRule>> = _breakpointRules.asStateFlow()
     private val _breakpointsEnabled = MutableStateFlow(true)
     val breakpointsEnabled: StateFlow<Boolean> = _breakpointsEnabled.asStateFlow()
-    private val _breakpointLayout = MutableStateFlow("")
-    val breakpointLayout: StateFlow<String> = _breakpointLayout.asStateFlow()
+    private val _seedNodes = MutableStateFlow<List<DaemonRuleNode<HostSeed>>>(emptyList())
+    val seedNodes: StateFlow<List<DaemonRuleNode<HostSeed>>> = _seedNodes.asStateFlow()
     private val _seeds = MutableStateFlow<List<HostSeed>>(emptyList())
     val seeds: StateFlow<List<HostSeed>> = _seeds.asStateFlow()
     private val _seedsEnabled = MutableStateFlow(true)
     val seedsEnabled: StateFlow<Boolean> = _seedsEnabled.asStateFlow()
-    private val _seedLayout = MutableStateFlow("")
-    val seedLayout: StateFlow<String> = _seedLayout.asStateFlow()
 
     /**
      * The armed queue, resolved against [seeds] from the ids the poll carries. A seed the library no
@@ -375,15 +382,27 @@ class DaemonClient internal constructor(
     /** Asks every attached frontend to exit. The caller stops the daemon itself, once they are gone. */
     suspend fun requestQuit() = command("request_quit")
 
+    /**
+     * Replaces the authored lists, and the master with them when [enabled] is given — the whole panel in
+     * one call, which is what an authoring frontend needs: these flows drive what it renders, so two
+     * calls would publish a state that was never authored and invite it straight back (ADR-0082).
+     */
     suspend fun updateCaptureFilter(
         allowlistEnabled: Boolean,
         allowPatterns: List<String>,
         blocklistEnabled: Boolean,
         blockPatterns: List<String>,
+        enabled: Boolean? = null,
     ) {
         command(
             "set_capture_filter",
-            CaptureFilterRequest(allowlistEnabled, allowPatterns, blocklistEnabled, blockPatterns),
+            CaptureFilterRequest(
+                allowlistEnabled,
+                allowPatterns,
+                blocklistEnabled,
+                blockPatterns,
+                enabled,
+            ),
         )
         _captureFilter.value = CaptureFilter(
             allowlist_enabled = allowlistEnabled,
@@ -391,27 +410,36 @@ class DaemonClient internal constructor(
             blocklist_enabled = blocklistEnabled,
             block_patterns = blockPatterns,
         )
+        enabled?.let { _captureFilterEnabled.value = it }
     }
 
-    suspend fun replaceMapLocalRules(
-        rules: List<HostMapLocalRule>,
-        enabled: Boolean,
-        layout: String? = null,
-    ) {
-        command("replace_map_local", ReplaceMapLocalRequest(enabled, rules.map { it.toDto() }, layout))
-        _mapLocalRules.value = rules.toList()
+    suspend fun setCaptureFilterEnabled(enabled: Boolean) {
+        command("set_capture_filter_enabled", BooleanValue(enabled))
+        _captureFilterEnabled.value = enabled
+    }
+
+    /** Replaces the whole panel, grouping included — the authoring frontend's single mutation. */
+    suspend fun replaceMapLocalNodes(nodes: List<DaemonRuleNode<HostMapLocalRule>>, enabled: Boolean) {
+        val dtos = nodes.mapRules { it.toDto() }
+        command("replace_map_local", ReplaceMapLocalRequest(enabled, dtos))
+        applyMapLocal(dtos)
         _mapLocalEnabled.value = enabled
-        if (layout != null) _mapLocalLayout.value = layout
     }
 
-    suspend fun upsertMapLocalRule(rule: HostMapLocalRule) {
-        command("upsert_map_local", rule.toDto())
-        _mapLocalRules.value = _mapLocalRules.value.filterNot { it.id == rule.id } + rule
+    /**
+     * Adds or edits one rule, optionally filing it into [groupId] — the headless frontends' mutation,
+     * since an agent edits one rule rather than redrawing a panel it cannot see. Fails when the group is
+     * unknown, so a mistyped id is reported instead of quietly landing the rule somewhere else.
+     */
+    suspend fun upsertMapLocalRule(rule: HostMapLocalRule, groupId: String? = null) {
+        val dto = rule.toDto()
+        command("upsert_map_local", UpsertMapLocalRequest(dto, groupId))
+        mapLocalNodeDtos.upsertRule(dto, groupId) { it.id }?.let(::applyMapLocal)
     }
 
     suspend fun removeMapLocalRule(id: String): Boolean {
         val removed = booleanCommand("remove_map_local", IdRequest(id))
-        if (removed) _mapLocalRules.value = _mapLocalRules.value.filterNot { it.id == id }
+        if (removed) applyMapLocal(mapLocalNodeDtos.removeRule(id) { it.id })
         return removed
     }
 
@@ -420,25 +448,22 @@ class DaemonClient internal constructor(
         _mapLocalEnabled.value = enabled
     }
 
-    suspend fun replaceBreakpointRules(
-        rules: List<HostBreakpointRule>,
-        enabled: Boolean,
-        layout: String? = null,
-    ) {
-        command("replace_breakpoints", ReplaceBreakpointsRequest(enabled, rules.map { it.toDto() }, layout))
-        _breakpointRules.value = rules.toList()
+    suspend fun replaceBreakpointNodes(nodes: List<DaemonRuleNode<HostBreakpointRule>>, enabled: Boolean) {
+        val dtos = nodes.mapRules { it.toDto() }
+        command("replace_breakpoints", ReplaceBreakpointsRequest(enabled, dtos))
+        applyBreakpoints(dtos)
         _breakpointsEnabled.value = enabled
-        if (layout != null) _breakpointLayout.value = layout
     }
 
-    suspend fun upsertBreakpointRule(rule: HostBreakpointRule) {
-        command("upsert_breakpoint", rule.toDto())
-        _breakpointRules.value = _breakpointRules.value.filterNot { it.id == rule.id } + rule
+    suspend fun upsertBreakpointRule(rule: HostBreakpointRule, groupId: String? = null) {
+        val dto = rule.toDto()
+        command("upsert_breakpoint", UpsertBreakpointRequest(dto, groupId))
+        breakpointNodeDtos.upsertRule(dto, groupId) { it.id }?.let(::applyBreakpoints)
     }
 
     suspend fun removeBreakpointRule(id: String): Boolean {
         val removed = booleanCommand("remove_breakpoint", IdRequest(id))
-        if (removed) _breakpointRules.value = _breakpointRules.value.filterNot { it.id == id }
+        if (removed) applyBreakpoints(breakpointNodeDtos.removeRule(id) { it.id })
         return removed
     }
 
@@ -447,27 +472,65 @@ class DaemonClient internal constructor(
         _breakpointsEnabled.value = enabled
     }
 
-    suspend fun replaceSeeds(
-        seeds: List<HostSeed>,
-        enabled: Boolean,
-        layout: String? = null,
-    ) {
-        command("replace_seeds", ReplaceSeedsRequest(enabled, seeds.map { it.toDto() }, layout))
-        _seeds.value = seeds.toList()
+    suspend fun replaceSeedNodes(nodes: List<DaemonRuleNode<HostSeed>>, enabled: Boolean) {
+        val dtos = nodes.mapRules { it.toDto() }
+        command("replace_seeds", ReplaceSeedsRequest(enabled, dtos))
+        applySeeds(dtos)
         _seedsEnabled.value = enabled
-        if (layout != null) _seedLayout.value = layout
     }
 
-    suspend fun upsertSeed(seed: HostSeed) {
-        command("upsert_seed", seed.toDto())
-        _seeds.value = _seeds.value.filterNot { it.id == seed.id } + seed
+    suspend fun upsertSeed(seed: HostSeed, groupId: String? = null) {
+        val dto = seed.toDto()
+        command("upsert_seed", UpsertSeedRequest(dto, groupId))
+        seedNodeDtos.upsertRule(dto, groupId) { it.id }?.let(::applySeeds)
     }
 
     suspend fun removeSeed(id: String): Boolean {
         val removed = booleanCommand("remove_seed", IdRequest(id))
-        if (removed) _seeds.value = _seeds.value.filterNot { it.id == id }
+        if (removed) applySeeds(seedNodeDtos.removeRule(id) { it.id })
         return removed
     }
+
+    /**
+     * A family's layout with its rules erased to their ids, so a caller that only wants the *shape* —
+     * which groups exist, and which one a rule is in — does not have to switch on the family itself.
+     */
+    fun nodesFor(family: String): List<DaemonRuleNode<String>> = when (family) {
+        RULE_FAMILY_MAP_LOCAL -> _mapLocalNodes.value.mapRules { it.id }
+        RULE_FAMILY_BREAKPOINTS -> _breakpointNodes.value.mapRules { it.id }
+        RULE_FAMILY_SEEDS -> _seedNodes.value.mapRules { it.id }
+        else -> emptyList()
+    }
+
+    /** Creates a group, or renames/re-gates one that exists. [family] is one of the `RULE_FAMILY_*` ids. */
+    suspend fun setRuleGroup(family: String, group: DaemonRuleGroup) {
+        command("set_rule_group", SetRuleGroupRequest(family, group))
+        // Locally too, or the very next call to file a rule into it would be told the group is unknown.
+        when (family) {
+            RULE_FAMILY_MAP_LOCAL -> applyMapLocal(mapLocalNodeDtos.upsertGroup(group))
+            RULE_FAMILY_BREAKPOINTS -> applyBreakpoints(breakpointNodeDtos.upsertGroup(group))
+            RULE_FAMILY_SEEDS -> applySeeds(seedNodeDtos.upsertGroup(group))
+        }
+    }
+
+    /** Deletes a group, keeping its rules as loose rules unless [withRules]. False when it never existed. */
+    suspend fun removeRuleGroup(family: String, id: String, withRules: Boolean = false): Boolean {
+        val removed = booleanCommand("remove_rule_group", RemoveRuleGroupRequest(family, id, withRules))
+        if (removed) {
+            when (family) {
+                RULE_FAMILY_MAP_LOCAL -> mapLocalNodeDtos.removeGroup(id, withRules)?.let(::applyMapLocal)
+                RULE_FAMILY_BREAKPOINTS -> breakpointNodeDtos.removeGroup(id, withRules)?.let(::applyBreakpoints)
+                RULE_FAMILY_SEEDS -> seedNodeDtos.removeGroup(id, withRules)?.let(::applySeeds)
+            }
+        }
+        return removed
+    }
+
+    suspend fun listRuleGroups(family: String): List<DaemonRuleGroup> = rpc.call(
+        "list_rule_groups",
+        DaemonJson.encodeToJsonElement(ListRuleGroupsRequest.serializer(), ListRuleGroupsRequest(family)),
+        RuleGroupListDto.serializer(),
+    ).groups
 
     suspend fun setSeedsEnabled(enabled: Boolean) {
         command("set_seeds_enabled", BooleanValue(enabled))
@@ -559,6 +622,33 @@ class DaemonClient internal constructor(
         }
     }
 
+    /**
+     * The wire-shaped mirror the local edits below are applied to, so an upsert lands in the same place
+     * the daemon put it without this class re-deriving where that was. Keeping it in DTO form is what
+     * lets [upsertRule] — the daemon's own placement rule — be the single implementation of it.
+     */
+    private var mapLocalNodeDtos: List<DaemonRuleNode<MapLocalRuleDto>> = emptyList()
+    private var breakpointNodeDtos: List<DaemonRuleNode<BreakpointRuleDto>> = emptyList()
+    private var seedNodeDtos: List<DaemonRuleNode<SeedRuleDto>> = emptyList()
+
+    private fun applyMapLocal(nodes: List<DaemonRuleNode<MapLocalRuleDto>>) {
+        mapLocalNodeDtos = nodes
+        _mapLocalNodes.value = nodes.mapRules { it.toDomain() }
+        _mapLocalRules.value = nodes.toHostRules()
+    }
+
+    private fun applyBreakpoints(nodes: List<DaemonRuleNode<BreakpointRuleDto>>) {
+        breakpointNodeDtos = nodes
+        _breakpointNodes.value = nodes.mapRules { it.toDomain() }
+        _breakpointRules.value = nodes.toHostBreakpointRules()
+    }
+
+    private fun applySeeds(nodes: List<DaemonRuleNode<SeedRuleDto>>) {
+        seedNodeDtos = nodes
+        _seedNodes.value = nodes.mapRules { it.toDomain() }
+        _seeds.value = nodes.toHostSeeds()
+    }
+
     private suspend fun pollOnce(): Boolean {
         val current = _exchanges.value
         val pollRequest = PollRequest(
@@ -593,19 +683,17 @@ class DaemonClient internal constructor(
         _maxRetained.value = response.maxRetained
         _connectedDevices.value = response.connectedDevices.map(ConnectedDeviceDto::toDomain)
         _captureFilter.value = response.captureFilterBase64.decodeCaptureFilter()
+        _captureFilterEnabled.value = response.captureFilterEnabled
         response.holds?.let { _pausedExchanges.value = it.map(PausedExchangeDto::toDomain) }
         holdsHash = response.holdsHash
         _mapLocalEnabled.value = response.mapLocalEnabled
-        response.mapLocalRules?.let { _mapLocalRules.value = it.map(MapLocalRuleDto::toDomain) }
-        response.mapLocalLayout?.let { _mapLocalLayout.value = it }
+        response.mapLocalNodes?.let(::applyMapLocal)
         mapHash = response.mapLocalHash
         _breakpointsEnabled.value = response.breakpointsEnabled
-        response.breakpointRules?.let { _breakpointRules.value = it.map(BreakpointRuleDto::toDomain) }
-        response.breakpointLayout?.let { _breakpointLayout.value = it }
+        response.breakpointNodes?.let(::applyBreakpoints)
         breakpointHash = response.breakpointHash
         _seedsEnabled.value = response.seedsEnabled
-        response.seeds?.let { _seeds.value = it.map(SeedRuleDto::toDomain) }
-        response.seedLayout?.let { _seedLayout.value = it }
+        response.seedNodes?.let(::applySeeds)
         seedHash = response.seedHash
         // Resolved after the library above, so a fill that arms a freshly pushed seed is never reported
         // as an id with nothing behind it.
