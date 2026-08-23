@@ -344,6 +344,77 @@ class DaemonIntegrationTest {
     }
 
     /**
+     * A filter with no hosts at all is the case a frontend could never read correctly while it kept its
+     * own copy: emptiness looked like "the daemon has nothing", so a paused master came back on when the
+     * local copy was published over it. There is one copy now (ADR-0085), and this is what it has to
+     * survive — a restart where the only thing ever authored was the master going off.
+     */
+    @Test
+    fun aFilterThatIsOnlyAPausedMasterSurvivesARestart() = runBlocking {
+        val directory = Files.createTempDirectory("wailo-daemon-filter")
+        try {
+            harness(directory, deleteDirectory = false).use { fresh ->
+                val client = fresh.client()
+                try {
+                    assertTrue(client.awaitReady())
+                    assertTrue(client.captureFilterEnabled.value, "the shipped default is live")
+                    client.setCaptureFilterEnabled(false)
+                } finally {
+                    client.close()
+                }
+            }
+            harness(directory, deleteDirectory = false).use { restarted ->
+                val client = restarted.client()
+                try {
+                    assertTrue(client.awaitReady())
+                    withTimeout(5_000) {
+                        while (client.captureFilterEnabled.value) delay(25)
+                    }
+                    assertTrue(client.captureFilter.value.allow_patterns.isEmpty())
+                    assertTrue(client.captureFilter.value.block_patterns.isEmpty())
+                } finally {
+                    client.close()
+                }
+            }
+        } finally {
+            directory.toFile().deleteRecursively()
+        }
+    }
+
+    /** Bookmarks are daemon state now, so they outlive the window that set them (ADR-0084). */
+    @Test
+    fun bookmarkedHostsSurviveARestartAndAreVisibleToEveryFrontend() = runBlocking {
+        val directory = Files.createTempDirectory("wailo-daemon-bookmarks")
+        try {
+            harness(directory, deleteDirectory = false).use { fresh ->
+                val client = fresh.client()
+                try {
+                    assertTrue(client.awaitReady())
+                    client.setBookmarked("api.example.com", bookmarked = true)
+                    client.setBookmarked("cdn.example.com", bookmarked = true)
+                    client.setBookmarked("api.example.com", bookmarked = false)
+                } finally {
+                    client.close()
+                }
+            }
+            harness(directory, deleteDirectory = false).use { restarted ->
+                val client = restarted.client()
+                try {
+                    assertTrue(client.awaitReady())
+                    withTimeout(5_000) {
+                        while (client.bookmarkedHosts.value.isEmpty()) delay(25)
+                    }
+                    assertEquals(listOf("cdn.example.com"), client.bookmarkedHosts.value)
+                } finally {
+                    client.close()
+                }
+            }
+        } finally {
+            directory.toFile().deleteRecursively()
+        }
+    }
+
+    /**
      * The regression that made the master worth owning here: it used to be folded into the two list
      * flags before they were stored, so a restart could not tell a paused filter from an unarmed one and
      * a frontend guessed it back as off, every launch (ADR-0082).

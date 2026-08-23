@@ -23,7 +23,7 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import okio.ByteString.Companion.toByteString
 
-internal const val DAEMON_CONTROL_PROTOCOL_VERSION = 11
+internal const val DAEMON_CONTROL_PROTOCOL_VERSION = 12
 
 /**
  * The one command whose socket is not answered and closed. The daemon holds it open and counts it as a
@@ -84,6 +84,9 @@ internal data class PollResponse(
     // [captureFilterEnabled] that devices apply. A frontend needs both to render the panel (ADR-0082).
     val captureFilterBase64: String,
     val captureFilterEnabled: Boolean,
+    // Which hosts the user marked as worth watching. Daemon state so an agent or a CLI session can read
+    // what the user cares about with no window open (ADR-0084).
+    val bookmarkedHosts: List<String>,
     val holdsHash: String,
     val holds: List<PausedExchangeDto>? = null,
     val mapLocalEnabled: Boolean,
@@ -437,6 +440,16 @@ internal data class CaptureFilterRequest(
     // frontend that adopts what the daemon reports would take that back as the user's intent (ADR-0082).
     // Null leaves the master alone, which is what a list-only edit from the CLI or an agent means.
     val enabled: Boolean? = null,
+)
+
+/**
+ * One host, not the whole list: two frontends bookmarking at the same time would each send a list built
+ * from what they last read, and the later write would drop the other's host (ADR-0084).
+ */
+@Serializable
+internal data class BookmarkRequest(
+    val host: String,
+    val bookmarked: Boolean,
 )
 
 @Serializable

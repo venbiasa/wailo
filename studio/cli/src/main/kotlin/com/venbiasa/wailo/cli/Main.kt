@@ -446,8 +446,18 @@ internal suspend fun dispatch(host: DaemonClient, args: ParsedArgs): CommandResu
                 "devices=${host.connectedDevices.value.size} exchanges=${host.exchanges.value.size} " +
                 "capturing=${host.capturing.value} " +
                 "proxy=${if (host.proxy.value.running) "on:${host.proxy.value.port}" else "off"} " +
+                "bookmarks=${host.bookmarkedHosts.value.size} " +
                 "mcp_access=${host.mcpAccess.value} mcp_redaction=${host.mcpRedactSecrets.value}",
         )
+        "list_bookmarks", "list-bookmarks" -> host.bookmarkedHosts.value.let { hosts ->
+            CommandResult(if (hosts.isEmpty()) "no bookmarked hosts" else hosts.joinToString("\n"))
+        }
+        "set_bookmark", "set-bookmark" -> {
+            val target = args.hosts.singleOrNull()
+                ?: return CommandResult("set_bookmark requires exactly one --host HOST", exitCode = 2)
+            host.setBookmarked(target, bookmarked = args.flag ?: true)
+            CommandResult("bookmark $target ${if (args.flag == false) "removed" else "set"}")
+        }
         "stop", "daemon_stop", "daemon-stop" -> {
             host.stopDaemon()
             CommandResult("Wailo daemon stopped")
@@ -660,6 +670,8 @@ internal enum class Command(val verb: String) {
     RemoveProxyCa("remove_proxy_ca"),
     SetMcpAccess("set_mcp_access"),
     SetMcpRedaction("set_mcp_redaction"),
+    ListBookmarks("list_bookmarks"),
+    SetBookmark("set_bookmark"),
     Status("status"),
     Stop("stop"),
 }
@@ -836,6 +848,8 @@ private fun printUsage() {
         wailo-cli remove_proxy_ca
         wailo-cli set_mcp_access --on|--off
         wailo-cli set_mcp_redaction --on|--off
+        wailo-cli list_bookmarks
+        wailo-cli set_bookmark --host HOST [--off]
 
         Every invocation auto-starts and attaches to the same daemon. It stays up while anything refers
         to it — an open Studio, an MCP session, a connected app — and exits on its own once nothing has

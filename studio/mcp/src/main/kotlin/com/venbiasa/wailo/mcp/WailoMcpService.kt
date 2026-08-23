@@ -122,6 +122,9 @@ internal class WailoMcpService(
             "seeds_enabled" to backend.seedsEnabled,
             "seed_count" to backend.seeds.size,
             "armed_seed_count" to backend.seedQueue.size,
+            // The hosts the user singled out — a standing hint about which traffic is worth looking at
+            // first, available here because it is daemon state rather than a Studio preference (ADR-0084).
+            "bookmarked_hosts" to backend.bookmarkedHosts,
             // So a caller reading "<wailo:redacted>" knows the value was withheld rather than that the
             // app really sent that.
             "redacting_secrets" to backend.redactSecrets,

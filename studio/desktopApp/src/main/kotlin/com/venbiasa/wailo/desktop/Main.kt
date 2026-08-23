@@ -187,10 +187,7 @@ private fun runWailo(engine: DaemonClient) = application {
             portError = when {
                 next !in WailoEngine.PORT_RANGE ->
                     "Port must be between ${WailoEngine.PORT_RANGE.first} and ${WailoEngine.PORT_RANGE.last}."
-                engine.rebind(next) -> {
-                    PortStore.save(next)
-                    null
-                }
+                engine.rebind(next) -> null
                 else -> portUnavailable(next)
             }
         }
@@ -203,7 +200,6 @@ private fun runWailo(engine: DaemonClient) = application {
     val applyUsbPort: (Int) -> Unit = { next ->
         if (next in WailoEngine.PORT_RANGE) {
             usbPortError = null
-            UsbPortStore.save(next)
             scope.launch { engine.setUsbPort(next) }
         } else {
             usbPortError =
@@ -220,7 +216,6 @@ private fun runWailo(engine: DaemonClient) = application {
         if (next in WailoEngine.RETAINED_RANGE) {
             maxRetainedError = null
             scope.launch { engine.setMaxRetained(next) }
-            MaxRetainedStore.save(next)
         } else {
             maxRetainedError = "Must be between ${WailoEngine.RETAINED_RANGE.first} and " +
                 "${WailoEngine.RETAINED_RANGE.last} requests."
@@ -336,10 +331,7 @@ private fun runWailo(engine: DaemonClient) = application {
                 is PairingAction.Forget -> engine.forgetDevice(action.deviceId)
                 PairingAction.ForgetAll -> engine.forgetAllDevices()
                 PairingAction.ResetIdentity -> engine.resetIdentity()
-                is PairingAction.SetRequirePairing -> {
-                    engine.setRequirePairing(action.enabled)
-                    RequirePairingStore.save(action.enabled)
-                }
+                is PairingAction.SetRequirePairing -> engine.setRequirePairing(action.enabled)
                 is PairingAction.DismissRefusal -> engine.dismissRefusal(action.deviceId)
             }
         }
@@ -390,86 +382,48 @@ private fun runWailo(engine: DaemonClient) = application {
         ThemeStore.save(next)
     }
 
-    // Bookmarked hosts, host-owned and persisted so they survive restarts (like the theme and text
-    // scale above). `shared` gets the list plus add/remove callbacks and stays stateless (ADR-0013).
-    var bookmarks by remember { mutableStateOf(BookmarkStore.load()) }
+    // Bookmarked hosts: daemon state, so which hosts the user cares about is readable by an agent or a
+    // CLI session with no window open (ADR-0084). One host per call, so two frontends bookmarking at once
+    // do not overwrite each other. `shared` gets the list plus add/remove callbacks and stays stateless.
+    val bookmarks by engine.bookmarkedHosts.collectAsState()
     val addBookmark = { host: String ->
         if (host.isNotBlank() && host !in bookmarks) {
-            bookmarks = bookmarks + host
-            BookmarkStore.save(bookmarks)
+            scope.launch { engine.setBookmarked(host, bookmarked = true) }
+            Unit
         }
     }
     val removeBookmark = { host: String ->
         if (host in bookmarks) {
-            bookmarks = bookmarks - host
-            BookmarkStore.save(bookmarks)
+            scope.launch { engine.setBookmarked(host, bookmarked = false) }
+            Unit
         }
     }
 
     // Capture filter: the allow/block host lists + each list's on/off switch that decide which traffic
     // devices capture and stream (ADR-0029). The daemon owns it, feature master included (ADR-0082), and
     // folds the master in only on the way to devices — so the lists come back armed exactly as authored.
-    // Prefs stay a local copy for one job: re-seeding a daemon that genuinely has nothing. `shared`
-    // renders it and hands back a whole new [CaptureFilterState] for any change and stays stateless.
+    // Read straight off the daemon with no local copy beside it: a second copy needs a rule for which one
+    // wins on launch, and every version of that rule mistook a deliberately empty filter for an
+    // unconfigured one and published the local copy over it (ADR-0085). `shared` renders this and hands
+    // back a whole new [CaptureFilterState] for any change, so a change is one write to the owner.
     val daemonCaptureFilter by engine.captureFilter.collectAsState()
     val daemonCaptureFilterEnabled by engine.captureFilterEnabled.collectAsState()
-    val initialDaemonCaptureFilter = remember { engine.captureFilter.value }
-    val daemonFilterConfigured = initialDaemonCaptureFilter.allow_patterns.isNotEmpty() ||
-        initialDaemonCaptureFilter.block_patterns.isNotEmpty()
-    var captureFilter by remember {
-        mutableStateOf(
-            if (daemonFilterConfigured) {
-                initialDaemonCaptureFilter.toUiState(engine.captureFilterEnabled.value)
-            } else {
-                CaptureFilterStore.load()
-            },
-        )
-    }
+    val captureFilter = daemonCaptureFilter.toUiState(daemonCaptureFilterEnabled)
+    // One call, master included: sent apart, the daemon reports the new lists beside the old master for as
+    // long as the second call takes, and this would render that half-applied state back at the user
+    // (ADR-0082). Edits are discrete acts — add a host, flip a switch — never a keystroke, so the
+    // round-trip is not in the way of typing.
     val onCaptureFilterChange = { next: CaptureFilterState ->
-        captureFilter = next
-        CaptureFilterStore.save(next)
-    }
-    // Push the filter on first composition and every change; the engine re-pushes to any device that
-    // hasn't acked it (like the Map Local rules below). Devices apply the newest snapshot they receive.
-    var lastPublishedFilterSignature by remember {
-        mutableStateOf(
-            captureFilterSignature(initialDaemonCaptureFilter, engine.captureFilterEnabled.value),
-        )
-    }
-    // One call, master included: published apart, the daemon reports the new lists beside the old master
-    // for as long as the second call takes, and the adopting effect below would import that and hand the
-    // user back a master they just changed (ADR-0082).
-    val publishCaptureFilter: suspend (CaptureFilterState) -> Unit = { filter ->
-        engine.updateCaptureFilter(
-            allowlistEnabled = filter.allowEnabled,
-            allowPatterns = filter.allowHosts,
-            blocklistEnabled = filter.blockEnabled,
-            blockPatterns = filter.blockHosts,
-            enabled = filter.masterEnabled,
-        )
-        lastPublishedFilterSignature = captureFilterSignature(filter)
-    }
-    LaunchedEffect(captureFilter) {
-        if (captureFilterSignature(captureFilter) != lastPublishedFilterSignature) {
-            publishCaptureFilter(captureFilter)
+        scope.launch {
+            engine.updateCaptureFilter(
+                allowlistEnabled = next.allowEnabled,
+                allowPatterns = next.allowHosts,
+                blocklistEnabled = next.blockEnabled,
+                blockPatterns = next.blockHosts,
+                enabled = next.masterEnabled,
+            )
         }
-    }
-    LaunchedEffect(daemonCaptureFilter, daemonCaptureFilterEnabled) {
-        val signature = captureFilterSignature(daemonCaptureFilter, daemonCaptureFilterEnabled)
-        if (signature == lastPublishedFilterSignature) return@LaunchedEffect
-        val daemonConfigured = daemonCaptureFilter.allow_patterns.isNotEmpty() ||
-            daemonCaptureFilter.block_patterns.isNotEmpty()
-        val localConfigured = captureFilter.allowHosts.isNotEmpty() || captureFilter.blockHosts.isNotEmpty()
-        // An empty daemon snapshot is a restart, not a user-cleared filter. Re-push the authored lists
-        // rather than copying emptiness into prefs (ADR-0061).
-        if (localConfigured && !daemonConfigured) {
-            publishCaptureFilter(captureFilter)
-            return@LaunchedEffect
-        }
-        val imported = daemonCaptureFilter.toUiState(daemonCaptureFilterEnabled)
-        captureFilter = imported
-        CaptureFilterStore.save(imported)
-        lastPublishedFilterSignature = signature
+        Unit
     }
 
     // Map Local layout (groups + rules, in priority order). The daemon owns it now, grouping included
@@ -540,61 +494,23 @@ private fun runWailo(engine: DaemonClient) = application {
         lastPublishedMapSignature = signature
     }
 
-    // Breakpoint layout: owned by the daemon, grouping included, exactly as Map Local above (ADR-0081).
+    // Breakpoint layout: owned by the daemon, grouping included, exactly as Map Local above (ADR-0081),
+    // and read straight off it with no local copy (ADR-0085). A reorder commits once on drop and a toggle
+    // is one click, so writing through on every change costs one round-trip per deliberate act.
     val daemonBreakpointNodes by engine.breakpointNodes.collectAsState()
-    val daemonBreakpointsEnabled by engine.breakpointsEnabled.collectAsState()
-    val storedBreakpoints = remember { BreakpointStore.load() }
-    val initialDaemonBreakpointNodes = remember { engine.breakpointNodes.value }
-    var breakpointNodes by remember {
-        mutableStateOf(initialBreakpointNodes(storedBreakpoints, engine.breakpointNodes.value))
-    }
+    val breakpointsEnabled by engine.breakpointsEnabled.collectAsState()
+    val breakpointNodes = remember(daemonBreakpointNodes) { daemonBreakpointNodes.toBreakpointNodes() }
     val onBreakpointLayoutChange = { next: List<BreakpointNode> ->
-        breakpointNodes = next
-        BreakpointStore.save(next)
+        scope.launch {
+            engine.replaceBreakpointNodes(next.toDaemonBreakpointNodes(), breakpointsEnabled)
+        }
+        Unit
     }
     // Breakpoints' feature master (ADR-0030), mirroring Map Local: off pushes no rules (so nothing pauses)
     // while the saved layout stays intact for when it flips back on.
-    var breakpointsEnabled by remember {
-        mutableStateOf(
-            if (storedBreakpoints.isNotEmpty()) {
-                BreakpointStore.loadEnabled()
-            } else {
-                engine.breakpointsEnabled.value
-            },
-        )
-    }
     val onBreakpointsEnabledChange = { next: Boolean ->
-        breakpointsEnabled = next
-        BreakpointStore.saveEnabled(next)
-    }
-    var lastPublishedBreakpointSignature by remember {
-        mutableStateOf(breakpointRuleSignature(initialDaemonBreakpointNodes, engine.breakpointsEnabled.value))
-    }
-    LaunchedEffect(breakpointNodes, breakpointsEnabled) {
-        val nodes = breakpointNodes.toDaemonBreakpointNodes()
-        val signature = breakpointRuleSignature(nodes, breakpointsEnabled)
-        if (signature != lastPublishedBreakpointSignature) {
-            engine.replaceBreakpointNodes(nodes, breakpointsEnabled)
-            lastPublishedBreakpointSignature = signature
-        }
-    }
-    LaunchedEffect(daemonBreakpointNodes, daemonBreakpointsEnabled) {
-        val signature = breakpointRuleSignature(daemonBreakpointNodes, daemonBreakpointsEnabled)
-        if (signature == lastPublishedBreakpointSignature) return@LaunchedEffect
-        if (daemonBreakpointsEnabled != breakpointsEnabled) {
-            breakpointsEnabled = daemonBreakpointsEnabled
-            BreakpointStore.saveEnabled(daemonBreakpointsEnabled)
-        }
-        if (daemonBreakpointNodes.isEmpty() && breakpointNodes.isNotEmpty()) {
-            val nodes = breakpointNodes.toDaemonBreakpointNodes()
-            engine.replaceBreakpointNodes(nodes, breakpointsEnabled)
-            lastPublishedBreakpointSignature = breakpointRuleSignature(nodes, breakpointsEnabled)
-            return@LaunchedEffect
-        }
-        val adopted = daemonBreakpointNodes.toBreakpointNodes()
-        breakpointNodes = adopted
-        BreakpointStore.save(adopted)
-        lastPublishedBreakpointSignature = signature
+        scope.launch { engine.setBreakpointsEnabled(next) }
+        Unit
     }
 
     // Seed layout: owned by the daemon with its bytes inline — a seed is spent by whoever owns the hold,
@@ -1237,14 +1153,6 @@ private fun CaptureFilter.toUiState(masterEnabled: Boolean) = CaptureFilterState
     blockEnabled = blocklist_enabled,
     blockHosts = block_patterns,
 )
-
-private fun captureFilterSignature(filter: CaptureFilter, masterEnabled: Boolean): String =
-    "$masterEnabled|${filter.allowlist_enabled}:${filter.allow_patterns.joinToString("\u0000")}|" +
-        "${filter.blocklist_enabled}:${filter.block_patterns.joinToString("\u0000")}"
-
-private fun captureFilterSignature(filter: CaptureFilterState): String =
-    "${filter.masterEnabled}|${filter.allowEnabled}:${filter.allowHosts.joinToString("\u0000")}|" +
-        "${filter.blockEnabled}:${filter.blockHosts.joinToString("\u0000")}"
 
 private fun initialMapLocalNodes(
     stored: List<MapLocalNode>,

@@ -124,6 +124,14 @@ internal class DaemonRuntime(
     var seedNodes: List<DaemonRuleNode<SeedRuleDto>> = emptyList()
         private set
 
+    // One host at a time rather than a whole-list replace: bookmarking is the one edit two frontends
+    // plausibly make at once, and a read-modify-write of the list would drop one of them (ADR-0084).
+    private val bookmarkLock = Any()
+
+    @Volatile
+    var bookmarkedHosts: List<String> = emptyList()
+        private set
+
     init {
         restoreFixtures()
     }
@@ -173,6 +181,7 @@ internal class DaemonRuntime(
             // armed state the master is currently suppressing, or it cannot restore it (ADR-0082).
             captureFilterBase64 = host.captureFilter.value.encodeBase64(),
             captureFilterEnabled = host.isCaptureFilterEnabled(),
+            bookmarkedHosts = bookmarkedHosts,
             holdsHash = holdsHash,
             holds = holds.takeUnless { request.holdsHash == holdsHash }?.map { it.toDto() },
             mapLocalEnabled = host.isMapLocalEnabled(),
@@ -467,6 +476,22 @@ internal class DaemonRuntime(
         persistCaptureFilter()
     }
 
+    /** Adds or removes one host, keeping authoring order. Idempotent, so a repeat is not an error. */
+    fun setBookmarked(host: String, bookmarked: Boolean) {
+        val trimmed = host.trim()
+        if (trimmed.isEmpty()) return
+        synchronized(bookmarkLock) {
+            val current = bookmarkedHosts
+            val next = when {
+                bookmarked && trimmed !in current -> current + trimmed
+                !bookmarked -> current - trimmed
+                else -> return
+            }
+            bookmarkedHosts = next
+            fixtures.saveBookmarks(PersistedBookmarks(next))
+        }
+    }
+
     override fun close() {
         proxy.close()
         usb.close()
@@ -497,6 +522,7 @@ internal class DaemonRuntime(
                     filter.masterEnabled,
                 )
             }
+            bookmarkedHosts = fixtures.loadBookmarks().hosts
         }
     }
 
@@ -790,6 +816,11 @@ internal class DaemonServer(
             }
             "set_capture_filter_enabled" -> {
                 runtime.setCaptureFilterEnabled(request.decode(BooleanValue.serializer()).value)
+                success()
+            }
+            "set_bookmark" -> {
+                val value = request.decode(BookmarkRequest.serializer())
+                runtime.setBookmarked(value.host, value.bookmarked)
                 success()
             }
             "replace_map_local" -> {

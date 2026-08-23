@@ -105,6 +105,10 @@ class DaemonClient internal constructor(
     val captureFilter: StateFlow<CaptureFilter> = _captureFilter.asStateFlow()
     private val _captureFilterEnabled = MutableStateFlow(true)
     val captureFilterEnabled: StateFlow<Boolean> = _captureFilterEnabled.asStateFlow()
+
+    /** Hosts the user marked as worth watching, in authoring order — daemon state (ADR-0084). */
+    private val _bookmarkedHosts = MutableStateFlow<List<String>>(emptyList())
+    val bookmarkedHosts: StateFlow<List<String>> = _bookmarkedHosts.asStateFlow()
     private val _pausedExchanges = MutableStateFlow<List<PausedExchange>>(emptyList())
     val pausedExchanges: StateFlow<List<PausedExchange>> = _pausedExchanges.asStateFlow()
     // The grouped structure is what the daemon actually holds (ADR-0081); the flat `…Rules` flows below
@@ -418,6 +422,16 @@ class DaemonClient internal constructor(
         _captureFilterEnabled.value = enabled
     }
 
+    suspend fun setBookmarked(host: String, bookmarked: Boolean) {
+        command("set_bookmark", BookmarkRequest(host, bookmarked))
+        val current = _bookmarkedHosts.value
+        _bookmarkedHosts.value = when {
+            bookmarked && host !in current -> current + host
+            !bookmarked -> current - host
+            else -> current
+        }
+    }
+
     /** Replaces the whole panel, grouping included — the authoring frontend's single mutation. */
     suspend fun replaceMapLocalNodes(nodes: List<DaemonRuleNode<HostMapLocalRule>>, enabled: Boolean) {
         val dtos = nodes.mapRules { it.toDto() }
@@ -684,6 +698,7 @@ class DaemonClient internal constructor(
         _connectedDevices.value = response.connectedDevices.map(ConnectedDeviceDto::toDomain)
         _captureFilter.value = response.captureFilterBase64.decodeCaptureFilter()
         _captureFilterEnabled.value = response.captureFilterEnabled
+        _bookmarkedHosts.value = response.bookmarkedHosts
         response.holds?.let { _pausedExchanges.value = it.map(PausedExchangeDto::toDomain) }
         holdsHash = response.holdsHash
         _mapLocalEnabled.value = response.mapLocalEnabled

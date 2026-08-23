@@ -67,6 +67,17 @@ internal data class PersistedCaptureFilter(
     val blockPatterns: List<String> = emptyList(),
 )
 
+/**
+ * The hosts the user marked as worth watching. Configuration rather than session state — a bookmark
+ * outlives the traffic that prompted it — and daemon-owned so a headless CLI or MCP session can read
+ * which hosts the user actually cares about instead of that being visible only behind a window
+ * (ADR-0084). [hosts] keeps authoring order, which is the order the list is shown in.
+ */
+@Serializable
+internal data class PersistedBookmarks(
+    val hosts: List<String> = emptyList(),
+)
+
 internal class DaemonFixturesStore(
     private val directory: Path = wailoStateDir(),
 ) {
@@ -74,6 +85,7 @@ internal class DaemonFixturesStore(
     private val breakpointsPath: Path get() = directory.resolve("breakpoints.json")
     private val seedsPath: Path get() = directory.resolve("seeds.json")
     private val captureFilterPath: Path get() = directory.resolve("capture-filter.json")
+    private val bookmarksPath: Path get() = directory.resolve("bookmarks.json")
 
     @Synchronized
     fun loadMapLocal(): PersistedMapLocal = read(mapLocalPath, PersistedMapLocal())
@@ -115,6 +127,12 @@ internal class DaemonFixturesStore(
     @Synchronized
     fun saveCaptureFilter(value: PersistedCaptureFilter) =
         write(captureFilterPath, DaemonJson.encodeToString(value))
+
+    @Synchronized
+    fun loadBookmarks(): PersistedBookmarks = read(bookmarksPath, PersistedBookmarks())
+
+    @Synchronized
+    fun saveBookmarks(value: PersistedBookmarks) = write(bookmarksPath, DaemonJson.encodeToString(value))
 
     private inline fun <reified T> read(path: Path, fallback: T): T {
         if (!Files.isRegularFile(path)) return fallback

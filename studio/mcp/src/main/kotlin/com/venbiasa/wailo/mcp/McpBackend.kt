@@ -54,6 +54,9 @@ internal interface McpBackend {
     val captureFilter: CaptureFilter
     val captureFilterEnabled: Boolean
 
+    /** Hosts the user marked as worth watching — which hosts they care about, readable here (ADR-0084). */
+    val bookmarkedHosts: List<String>
+
     fun searchTraffic(
         urlContains: String?,
         urlPattern: String?,
@@ -137,6 +140,7 @@ internal class DaemonMcpBackend(
     override val seedQueue get() = daemon.seedQueue.value
     override val captureFilter get() = daemon.captureFilter.value
     override val captureFilterEnabled get() = daemon.captureFilterEnabled.value
+    override val bookmarkedHosts get() = daemon.bookmarkedHosts.value
 
     override fun searchTraffic(
         urlContains: String?,
@@ -216,6 +220,10 @@ internal class LocalMcpBackend(
     override val seedQueue get() = host.seedQueue.value
     override val captureFilter get() = host.captureFilter.value
     override val captureFilterEnabled get() = host.isCaptureFilterEnabled()
+
+    // Bookmarks are daemon state, and this backend wraps a bare host with no daemon behind it, so there
+    // is nothing to report rather than an empty list standing in for "none bookmarked".
+    override val bookmarkedHosts: List<String> get() = emptyList()
 
     override fun searchTraffic(
         urlContains: String?,
