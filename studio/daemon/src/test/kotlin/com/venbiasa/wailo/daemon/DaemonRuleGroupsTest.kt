@@ -130,6 +130,52 @@ class DaemonRuleGroupsTest {
         assertNull(nodes(DaemonRuleNode(rules = listOf("a"))).removeGroup("nope", withRules = false))
     }
 
+    @Test
+    fun orderingAGroupSetsThePriorityOfItsRulesAlone() {
+        val layout = nodes(
+            DaemonRuleNode(DaemonRuleGroup("g1"), listOf("a", "b", "c")),
+            DaemonRuleNode(rules = listOf("loose")),
+        ).reorder("g1", listOf("c", "a", "b")) { it }!!
+
+        assertEquals(listOf("c", "a", "b", "loose"), layout.flattenRules())
+    }
+
+    /** Promoting one rule should not require restating the container it sits in. */
+    @Test
+    fun idsLeftOutKeepTheirOrderBehindTheOnesNamed() {
+        val layout = nodes(DaemonRuleNode(DaemonRuleGroup("g1"), listOf("a", "b", "c", "d")))
+            .reorder("g1", listOf("d")) { it }!!
+
+        assertEquals(listOf("d", "a", "b", "c"), layout.flattenRules())
+    }
+
+    /** The top level holds both kinds of entry, so an id there is a group's or a loose rule's. */
+    @Test
+    fun theTopLevelOrdersGroupsAndLooseRulesTogether() {
+        val layout = nodes(
+            DaemonRuleNode(DaemonRuleGroup("g1"), listOf("a")),
+            DaemonRuleNode(rules = listOf("loose")),
+            DaemonRuleNode(DaemonRuleGroup("g2"), listOf("b")),
+        ).reorder(null, listOf("loose", "g2")) { it }!!
+
+        assertEquals(listOf("loose", "b", "a"), layout.flattenRules())
+    }
+
+    @Test
+    fun anIdTheContainerDoesNotHoldIsRejectedRatherThanSkipped() {
+        val layout = nodes(
+            DaemonRuleNode(DaemonRuleGroup("g1"), listOf("a", "b")),
+            DaemonRuleNode(rules = listOf("loose")),
+        )
+
+        // A rule in another container is as unknown as one that does not exist: ordering is per container.
+        assertNull(layout.reorder("g1", listOf("b", "loose")) { it })
+        assertNull(layout.reorder("g1", listOf("b", "nope")) { it })
+        assertNull(layout.reorder("nope", listOf("a")) { it })
+        // A group id is not a rule id, so it cannot be used to order inside a group either.
+        assertNull(layout.reorder("g1", listOf("g1")) { it })
+    }
+
     /** An off group gates its rules while each rule keeps its own state for when it comes back. */
     @Test
     fun aGroupSwitchGatesItsRulesWithoutRewritingThem() {

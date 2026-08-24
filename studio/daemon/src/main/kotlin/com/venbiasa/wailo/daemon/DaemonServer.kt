@@ -470,6 +470,37 @@ internal class DaemonRuntime(
         }
     }
 
+    /**
+     * Reorders one container in [family] — see [reorder]. False when the group or an id is unknown.
+     *
+     * Nothing here touches [ruleBodies]: order is layout, and a rule's bytes are held under its id
+     * (ADR-0086), so re-prioritising a set of megabyte fixtures moves a handful of ids.
+     */
+    suspend fun setRuleOrder(family: String, groupId: String?, ids: List<String>): Boolean = when (family) {
+        RULE_FAMILY_MAP_LOCAL -> mapLocalMutex.withLock {
+            mapLocalNodes.reorder(groupId, ids) { it.id }?.let {
+                mapLocalNodes = it
+                pushMapLocal(host.isMapLocalEnabled())
+                true
+            } ?: false
+        }
+        RULE_FAMILY_BREAKPOINTS -> breakpointMutex.withLock {
+            breakpointNodes.reorder(groupId, ids) { it.id }?.let {
+                breakpointNodes = it
+                pushBreakpoints(host.areBreakpointsEnabled())
+                true
+            } ?: false
+        }
+        RULE_FAMILY_SEEDS -> seedMutex.withLock {
+            seedNodes.reorder(groupId, ids) { it.id }?.let {
+                seedNodes = it
+                pushSeeds(host.areSeedsEnabled())
+                true
+            } ?: false
+        }
+        else -> false
+    }
+
     suspend fun removeRuleGroup(family: String, id: String, withRules: Boolean): Boolean = when (family) {
         RULE_FAMILY_MAP_LOCAL -> mapLocalMutex.withLock {
             mapLocalNodes.removeGroup(id, withRules)?.let {
@@ -1043,6 +1074,18 @@ internal class DaemonServer(
                     success(
                         DaemonJson.encodeToJsonElement(
                             RuleGroupListDto(runtime.listRuleGroups(value.family)),
+                        ),
+                    )
+                }
+            }
+            "set_rule_order" -> {
+                val value = request.decode(SetRuleOrderRequest.serializer())
+                if (value.family !in RULE_FAMILIES) {
+                    unknownFamily(value.family)
+                } else {
+                    success(
+                        DaemonJson.encodeToJsonElement(
+                            BooleanValue(runtime.setRuleOrder(value.family, value.groupId, value.ids)),
                         ),
                     )
                 }

@@ -254,7 +254,22 @@ class ParseArgsTest {
                 "set_max_retained",
                 "wait_device",
                 "list_paired",
+                "set_rule_order",
             ),
         ))
+    }
+
+    // An order is a list, and a shell is as likely to build it by repeating the flag as by joining it.
+    @Test
+    fun anOrderIsAcceptedCommaSeparatedOrRepeated() {
+        assertEquals(
+            listOf("a", "b", "c"),
+            parseArgs(arrayOf("set_rule_order", "--family", "map_local", "--ids", "a,b,c"))!!.ids,
+        )
+        assertEquals(
+            listOf("a", "b"),
+            parseArgs(arrayOf("set_rule_order", "--family", "seeds", "--ids", "a", "--ids", "b"))!!.ids,
+        )
+        assertTrue(parseArgs(arrayOf("set_rule_order", "--family", "map_local"))!!.ids.isEmpty())
     }
 }

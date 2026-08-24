@@ -201,6 +201,7 @@ internal suspend fun dispatch(host: DaemonClient, args: ParsedArgs): CommandResu
         "set_rule_group", "set-rule-group" -> setRuleGroup(host, args)
         "remove_rule_group", "remove-rule-group" -> removeRuleGroup(host, args)
         "list_rule_groups", "list-rule-groups" -> listRuleGroups(host, args)
+        "set_rule_order", "set-rule-order" -> setRuleOrder(host, args)
         "set_map_local_enabled", "set-map-local-enabled" -> {
             val enabled = args.flag
                 ?: return CommandResult("set_map_local_enabled requires --on or --off", exitCode = 2)
@@ -827,6 +828,26 @@ private suspend fun removeRuleGroup(host: DaemonClient, args: ParsedArgs): Comma
     return CommandResult("removed $family group $id ($fate)")
 }
 
+/**
+ * Sets the priority of one container (ADR-0026): the rules in `--group-id`, or the top level without it,
+ * where an entry is a group or a loose rule. Ids not named keep their relative order behind those that
+ * are, so promoting one rule does not mean restating the panel.
+ */
+private suspend fun setRuleOrder(host: DaemonClient, args: ParsedArgs): CommandResult {
+    val family = args.family?.takeIf { it in RULE_FAMILIES }
+        ?: return CommandResult(
+            "set_rule_order requires --family ${RULE_FAMILIES.joinToString("|")}",
+            exitCode = 2,
+        )
+    if (args.ids.isEmpty()) return CommandResult("set_rule_order requires --ids a,b,c", exitCode = 2)
+    if (!host.setRuleOrder(family, args.groupId, args.ids)) {
+        val container = args.groupId?.let { "group $it" } ?: "the top level"
+        return CommandResult("$family: $container does not hold all of ${args.ids.joinToString(",")}", exitCode = 1)
+    }
+    val where = args.groupId?.let { " in group $it" } ?: ""
+    return CommandResult("$family order$where: ${args.ids.joinToString(",")} first")
+}
+
 private suspend fun listRuleGroups(host: DaemonClient, args: ParsedArgs): CommandResult {
     val family = args.family?.takeIf { it in RULE_FAMILIES }
         ?: return CommandResult(
@@ -964,6 +985,7 @@ internal enum class Command(val verb: String) {
     SetRuleGroup("set_rule_group"),
     RemoveRuleGroup("remove_rule_group"),
     ListRuleGroups("list_rule_groups"),
+    SetRuleOrder("set_rule_order"),
     SetBreakpoint("set_breakpoint"),
     RemoveBreakpoint("remove_breakpoint"),
     ListBreakpoints("list_breakpoints"),
@@ -1042,6 +1064,7 @@ internal data class ParsedArgs(
     val groupId: String? = null,
     val name: String? = null,
     val withRules: Boolean = false,
+    val ids: List<String> = emptyList(),
     val deviceName: String? = null,
     val phase: String? = null,
     val onRequest: Boolean? = null,
@@ -1082,6 +1105,7 @@ internal fun parseArgs(args: Array<String>): ParsedArgs? {
     var groupId: String? = null
     var name: String? = null
     var withRules = false
+    val ids = mutableListOf<String>()
     var deviceName: String? = null
     var phase: String? = null
     var onRequest: Boolean? = null
@@ -1125,6 +1149,8 @@ internal fun parseArgs(args: Array<String>): ParsedArgs? {
             "--group-id" -> groupId = args.getOrNull(++i) ?: return null
             "--name" -> name = args.getOrNull(++i) ?: return null
             "--with-rules" -> withRules = true
+            // Comma-separated or repeated, since an order is a list and a shell makes either easy.
+            "--ids" -> ids += (args.getOrNull(++i) ?: return null).split(',').filter { it.isNotBlank() }
             "--device" -> deviceName = args.getOrNull(++i) ?: return null
             "--phase" -> phase = args.getOrNull(++i) ?: return null
             "--on-request" -> onRequest = true
@@ -1166,6 +1192,7 @@ internal fun parseArgs(args: Array<String>): ParsedArgs? {
         groupId = groupId,
         name = name,
         withRules = withRules,
+        ids = ids,
         deviceName = deviceName,
         phase = phase,
         onRequest = onRequest,
@@ -1197,6 +1224,7 @@ private fun printUsage() {
                     [--name TEXT] [--on|--off]
         wailo-cli remove_rule_group --family F --group-id ID [--with-rules]
         wailo-cli list_rule_groups --family F
+        wailo-cli set_rule_order --family F --ids a,b,c [--group-id ID]
         wailo-cli set_breakpoint --id ID --url-pattern GLOB [--method M]
                     [--on-request] [--on-response] [--off] [--group-id ID]
         wailo-cli remove_breakpoint --id ID
@@ -1255,8 +1283,13 @@ private fun printUsage() {
 
         Rules are organised into groups, which Studio shows as collapsible sections and which can be
         switched off as a unit — no rule in a disabled group matches, and each keeps its own state for
-        when the group comes back. Create a group with set_rule_group before filing rules into it with
+        when the group comes back.         Create a group with set_rule_group before filing rules into it with
         --group-id; removing one keeps its rules unless you pass --with-rules.
+
+        Top-to-bottom order is match priority: of two rules that both match, the higher one wins.
+        set_rule_order sets it for one container — the rules inside --group-id, or the top level
+        (groups and loose rules) without it. Ids you leave out keep their order behind the ones you
+        name, so promoting a rule takes one call rather than restating the panel.
 
         Seeds are canned responses that answer held exchanges in order (ADR-0041). set_seed builds the
         library; fill_seeds arms every enabled one and sweeps the holds already waiting, and each hold it

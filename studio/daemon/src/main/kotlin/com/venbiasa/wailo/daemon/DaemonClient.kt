@@ -610,6 +610,23 @@ class DaemonClient internal constructor(
         return removed
     }
 
+    /**
+     * Reorders one container — the rules in [groupId], or the top level when it is null. [ids] may name
+     * a prefix; see [reorder]. False when the group, or an id in it, is not there.
+     */
+    suspend fun setRuleOrder(family: String, groupId: String?, ids: List<String>): Boolean {
+        val ordered = booleanCommand("set_rule_order", SetRuleOrderRequest(family, groupId, ids))
+        if (ordered) {
+            when (family) {
+                RULE_FAMILY_MAP_LOCAL -> mapLocalNodeDtos.reorder(groupId, ids) { it.id }?.let(::applyMapLocal)
+                RULE_FAMILY_BREAKPOINTS ->
+                    breakpointNodeDtos.reorder(groupId, ids) { it.id }?.let(::applyBreakpoints)
+                RULE_FAMILY_SEEDS -> seedNodeDtos.reorder(groupId, ids) { it.id }?.let(::applySeeds)
+            }
+        }
+        return ordered
+    }
+
     suspend fun listRuleGroups(family: String): List<DaemonRuleGroup> = rpc.call(
         "list_rule_groups",
         DaemonJson.encodeToJsonElement(ListRuleGroupsRequest.serializer(), ListRuleGroupsRequest(family)),

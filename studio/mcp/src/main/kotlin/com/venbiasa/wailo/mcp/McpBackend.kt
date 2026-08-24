@@ -93,6 +93,9 @@ internal interface McpBackend {
 
     suspend fun removeRuleGroup(family: String, id: String, withRules: Boolean): Boolean
 
+    /** Sets match priority within one container (ADR-0026). False when it does not hold every id. */
+    suspend fun setRuleOrder(family: String, groupId: String?, ids: List<String>): Boolean
+
     /**
      * A bounded read of one authored fixture's body. A rule arrives naming its body rather than carrying
      * it (ADR-0086), so `list_*` reports the size and this is what `get_*` shows.
@@ -177,6 +180,9 @@ internal class DaemonMcpBackend(
 
     override suspend fun removeRuleGroup(family: String, id: String, withRules: Boolean) =
         daemon.removeRuleGroup(family, id, withRules)
+
+    override suspend fun setRuleOrder(family: String, groupId: String?, ids: List<String>) =
+        daemon.setRuleOrder(family, groupId, ids)
 
     override suspend fun readRuleBody(family: String, id: String, limit: Int) =
         daemon.readRuleBody(family, id, length = limit)
@@ -265,6 +271,11 @@ internal class LocalMcpBackend(
     override suspend fun setRuleGroup(family: String, group: DaemonRuleGroup) = refuseGroups()
 
     override suspend fun removeRuleGroup(family: String, id: String, withRules: Boolean): Boolean = refuseGroups()
+
+    // Order is part of the same daemon-owned layout, and this backend reports a flat panel it cannot
+    // rearrange, so it says so instead of accepting an order nothing would apply.
+    override suspend fun setRuleOrder(family: String, groupId: String?, ids: List<String>): Boolean =
+        throw UnsupportedOperationException("Rule order needs a running Wailo daemon")
 
     private fun refuseGroups(): Nothing =
         throw UnsupportedOperationException("Rule groups need a running Wailo daemon")

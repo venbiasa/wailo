@@ -130,6 +130,48 @@ internal fun <T> List<DaemonRuleNode<T>>.removeGroup(
 }
 
 /**
+ * Reorders one container: the top level when [groupId] is null or empty, or the rules inside that group.
+ *
+ * Order is match priority (ADR-0026), so this is the operation that decides which of two overlapping
+ * rules wins. It is scoped to one container rather than restating the family, because a caller that has
+ * to send the whole layout to move one rule can only do so by first reading it — and would overwrite
+ * whatever another frontend changed in between.
+ *
+ * [ids] need not be complete: what it names moves to the front in the order given, and everything else
+ * keeps its relative order behind that, so "promote these" is one call and a full list is exact. A
+ * top-level id is a group's id or a loose rule's, since both sit at that level and either can be moved
+ * there. Membership is not expressible here — a rule changes group through the upsert that files it.
+ *
+ * Returns null when [groupId] names no group, or when [ids] holds an id this container does not: an
+ * unknown id means the caller is ordering something other than what it thinks, and half of that order
+ * landing is worse than none of it.
+ */
+internal fun <T> List<DaemonRuleNode<T>>.reorder(
+    groupId: String?,
+    ids: List<String>,
+    idOf: (T) -> String,
+): List<DaemonRuleNode<T>>? {
+    if (groupId.isNullOrEmpty()) {
+        val keyOf = { node: DaemonRuleNode<T> -> node.group?.id ?: node.rules.firstOrNull()?.let(idOf) }
+        if (ids.any { id -> none { keyOf(it) == id } }) return null
+        return promoting(ids, keyOf)
+    }
+    val target = firstOrNull { it.group?.id == groupId } ?: return null
+    if (ids.any { id -> target.rules.none { idOf(it) == id } }) return null
+    val ordered = target.rules.promoting(ids) { idOf(it) }
+    return map { node -> if (node.group?.id == groupId) node.copy(rules = ordered) else node }
+}
+
+/**
+ * [ids] first in the order given, then everything else. Stable by construction — every unnamed element
+ * ranks the same, so an element the caller did not mention cannot be reordered against its neighbours.
+ */
+private fun <E> List<E>.promoting(ids: List<String>, keyOf: (E) -> String?): List<E> {
+    val rank = ids.withIndex().associate { (index, id) -> id to index }
+    return sortedBy { rank[keyOf(it)] ?: ids.size }
+}
+
+/**
  * Whether a rule in [group] matches at all: an off group gates every rule under it while each rule keeps
  * its own remembered state (ADR-0026/0030).
  *

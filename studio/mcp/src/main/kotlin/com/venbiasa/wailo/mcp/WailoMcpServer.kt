@@ -350,6 +350,21 @@ internal object WailoMcpTools {
             objectSchema("family" to ruleFamily(), required = listOf("family")),
         ),
         McpToolDefinition(
+            "set_rule_order",
+            "Set match priority within one container: of two rules that both match, the higher one wins. " +
+                "With group_id the ids are the rules inside that group; without it they are the top-level " +
+                "entries, where an id is either a group id or an ungrouped rule's id. Ids you omit keep " +
+                "their order behind the ones you name, so promoting one rule needs only that rule's id. " +
+                "To move a rule into another group, file it there with set_map_local/set_breakpoint/" +
+                "set_seed and its group_id instead.",
+            objectSchema(
+                "family" to ruleFamily(),
+                "group_id" to string("Order the rules inside this group; omit to order the top level"),
+                "ids" to stringArray("Ids in the order they should match, highest priority first"),
+                required = listOf("family", "ids"),
+            ),
+        ),
+        McpToolDefinition(
             "fill_seeds",
             "Arm every enabled seed in order and immediately answer the holds already waiting, then keep " +
                 "answering matching holds as they arrive until the queue is spent. Returns how many are " +

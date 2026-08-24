@@ -53,6 +53,7 @@ class WailoMcpServiceTest {
                 "set_rule_group",
                 "remove_rule_group",
                 "list_rule_groups",
+                "set_rule_order",
             ),
             names.toSet(),
         )
@@ -302,6 +303,28 @@ class WailoMcpServiceTest {
                 ).isError,
             )
             assertEquals(0, service.call("list_rule_groups", mapOf("family" to "map_local")).groups().size)
+
+            // Order is the same daemon-owned layout, so it is refused for the same reason.
+            val ordered = service.call(
+                "set_rule_order",
+                mapOf("family" to "map_local", "ids" to listOf("fixture")),
+            )
+            assertTrue(ordered.isError)
+            assertTrue(ordered.text.contains("daemon"))
+        } finally {
+            host.stop()
+        }
+    }
+
+    /** An empty order is a caller mistake, not a request to flatten the panel into its current shape. */
+    @Test
+    fun anOrderWithoutIdsIsRefused() = runBlocking {
+        val host = HeadlessHost.wrap(WailoEngine())
+        val service = WailoMcpService(host, 8899)
+        try {
+            val empty = service.call("set_rule_order", mapOf("family" to "map_local", "ids" to emptyList<String>()))
+            assertTrue(empty.isError)
+            assertTrue(empty.text.contains("ids"))
         } finally {
             host.stop()
         }

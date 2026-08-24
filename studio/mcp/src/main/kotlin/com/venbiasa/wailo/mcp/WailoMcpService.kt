@@ -90,6 +90,7 @@ internal class WailoMcpService(
                 "set_rule_group" -> setRuleGroup(arguments)
                 "remove_rule_group" -> removeRuleGroup(arguments)
                 "list_rule_groups" -> listRuleGroups(arguments)
+                "set_rule_order" -> setRuleOrder(arguments)
                 "fill_seeds" -> fillSeeds()
                 "clear_seed_queue" -> clearSeedQueue()
                 "resume_hold" -> resumeHold(arguments)
@@ -333,6 +334,21 @@ internal class WailoMcpService(
         return success(
             "$family group $id removed",
             mapOf("family" to family, "id" to id, "removed" to true, "with_rules" to withRules),
+        )
+    }
+
+    private suspend fun setRuleOrder(arguments: ToolArguments): McpToolResponse {
+        val family = arguments.ruleFamily()
+        val groupId = arguments.string("group_id")?.takeIf { it.isNotEmpty() }
+        val ids = arguments.strings("ids")
+        if (ids.isEmpty()) throw ToolFailure("set_rule_order needs at least one id in ids")
+        if (!backend.setRuleOrder(family, groupId, ids)) {
+            val container = groupId?.let { "group $it" } ?: "the top level"
+            throw ToolFailure("$family: $container does not hold all of ${ids.joinToString()}")
+        }
+        return success(
+            "$family order set",
+            mapOf("family" to family, "group_id" to groupId.orEmpty(), "ids" to ids),
         )
     }
 

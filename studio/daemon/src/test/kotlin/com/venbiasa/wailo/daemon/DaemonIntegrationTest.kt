@@ -387,6 +387,38 @@ class DaemonIntegrationTest {
     }
 
     /**
+     * Priority is authored state like any other, so a headless caller must be able to set it and the host
+     * must see the new order — the flattened list it matches on *is* the order (ADR-0026).
+     */
+    @Test
+    fun reorderingRulesChangesWhichOneTheHostMatchesFirst() = runBlocking {
+        harness().use { harness ->
+            val client = harness.client()
+            try {
+                assertTrue(client.awaitReady())
+                client.upsertMapLocalRule(HostMapLocalRule(id = "broad", urlPattern = "https://example.com/*"))
+                client.upsertMapLocalRule(HostMapLocalRule(id = "narrow", urlPattern = "https://example.com/login"))
+                withTimeout(5_000) {
+                    while (harness.host.mapLocalRules.value.size < 2) delay(25)
+                }
+                assertEquals(listOf("broad", "narrow"), harness.host.mapLocalRules.value.map { it.id })
+
+                assertTrue(client.setRuleOrder(RULE_FAMILY_MAP_LOCAL, groupId = null, ids = listOf("narrow")))
+
+                withTimeout(5_000) {
+                    while (harness.host.mapLocalRules.value.firstOrNull()?.id != "narrow") delay(25)
+                }
+                assertEquals(listOf("narrow", "broad"), client.mapLocalRules.value.map { it.id })
+                // An id the container does not hold is refused, so a typo cannot half-apply.
+                assertTrue(!client.setRuleOrder(RULE_FAMILY_MAP_LOCAL, groupId = null, ids = listOf("nope")))
+                assertEquals(listOf("narrow", "broad"), harness.host.mapLocalRules.value.map { it.id })
+            } finally {
+                client.close()
+            }
+        }
+    }
+
+    /**
      * A group's switch has to be resolved before the host sees the rule: what devices match on must be
      * right with no window open (invariant #2), so an off group cannot rely on a frontend to close it.
      */

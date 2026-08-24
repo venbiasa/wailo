@@ -23,7 +23,7 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import okio.ByteString.Companion.toByteString
 
-internal const val DAEMON_CONTROL_PROTOCOL_VERSION = 14
+internal const val DAEMON_CONTROL_PROTOCOL_VERSION = 15
 
 /**
  * The one command whose socket is not answered and closed. The daemon holds it open and counts it as a
@@ -550,6 +550,17 @@ internal data class RemoveRuleGroupRequest(
     val family: String,
     val id: String,
     val withRules: Boolean = false,
+)
+
+/**
+ * A new order for one container: the rules inside [groupId], or the top level when it is absent. Ids the
+ * container does not hold are rejected rather than skipped, so a typo cannot half-apply.
+ */
+@Serializable
+internal data class SetRuleOrderRequest(
+    val family: String,
+    val groupId: String? = null,
+    val ids: List<String> = emptyList(),
 )
 
 @Serializable
