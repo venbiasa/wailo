@@ -131,6 +131,49 @@ class WailoMcpServiceTest {
         }
     }
 
+    // A list can be populated and disarmed — the state Studio has always been able to author. Reaching it
+    // must not cost the patterns, so naming only the switch leaves the list it applies to alone.
+    @Test
+    fun aListCanBeDisarmedWithoutResendingIt() = runBlocking {
+        val engine = WailoEngine()
+        val host = HeadlessHost.wrap(engine)
+        val service = WailoMcpService(host, 8899)
+        try {
+            service.call("set_capture_filter", mapOf("allow_patterns" to listOf("api.example.com")))
+            assertTrue(engine.captureFilter.value.allowlist_enabled)
+
+            val disarmed = service.call("set_capture_filter", mapOf("allowlist_enabled" to false))
+            assertFalse(disarmed.isError)
+            assertFalse(engine.captureFilter.value.allowlist_enabled)
+            assertEquals(listOf("api.example.com"), engine.captureFilter.value.allow_patterns)
+
+            service.call("set_capture_filter", mapOf("allowlist_enabled" to true))
+            assertTrue(engine.captureFilter.value.allowlist_enabled)
+            assertEquals(listOf("api.example.com"), engine.captureFilter.value.allow_patterns)
+        } finally {
+            host.stop()
+        }
+    }
+
+    // The old shape has to keep meaning what it did: patterns for one list and nothing for the other still
+    // empties the other, so a script written against the derived behaviour does not change under it.
+    @Test
+    fun omittingAListStillEmptiesIt() = runBlocking {
+        val engine = WailoEngine()
+        val host = HeadlessHost.wrap(engine)
+        val service = WailoMcpService(host, 8899)
+        try {
+            service.call("set_capture_filter", mapOf("allow_patterns" to listOf("api.example.com")))
+            service.call("set_capture_filter", mapOf("block_patterns" to listOf("ads.example.com")))
+
+            assertTrue(engine.captureFilter.value.allow_patterns.isEmpty())
+            assertFalse(engine.captureFilter.value.allowlist_enabled)
+            assertEquals(listOf("ads.example.com"), engine.captureFilter.value.block_patterns)
+        } finally {
+            host.stop()
+        }
+    }
+
     @Test
     fun invalidOrStaleMutationsReturnToolErrors() = runBlocking {
         val host = HeadlessHost.wrap(WailoEngine())

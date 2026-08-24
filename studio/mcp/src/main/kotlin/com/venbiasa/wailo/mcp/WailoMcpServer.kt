@@ -231,10 +231,15 @@ internal object WailoMcpTools {
         ),
         McpToolDefinition(
             "set_capture_filter",
-            "Replace the device-side Capture Filter. Empty or omitted arrays disable that side; both empty means capture everything.",
+            "Replace the device-side Capture Filter. Patterns replace the list they are given for, and a " +
+                "list is armed by having any; passing neither patterns nor a switch for a list empties it. " +
+                "Send only allowlist_enabled or blocklist_enabled to arm or disarm a list without " +
+                "resending it.",
             objectSchema(
                 "allow_patterns" to stringArray("Host wildcard patterns to allow"),
                 "block_patterns" to stringArray("Host wildcard patterns to block"),
+                "allowlist_enabled" to boolean("Whether the allowlist applies; defaults to whether it has patterns"),
+                "blocklist_enabled" to boolean("Whether the blocklist applies; defaults to whether it has patterns"),
             ),
         ),
         McpToolDefinition(

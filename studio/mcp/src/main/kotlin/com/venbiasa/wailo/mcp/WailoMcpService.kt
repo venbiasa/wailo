@@ -417,16 +417,33 @@ internal class WailoMcpService(
     }
 
     private suspend fun setCaptureFilter(arguments: ToolArguments): McpToolResponse {
-        val allow = arguments.strings("allow_patterns")
-        val block = arguments.strings("block_patterns")
+        val current = backend.captureFilter
+        val allowSwitch = arguments.booleanOrNull("allowlist_enabled")
+        val blockSwitch = arguments.booleanOrNull("blocklist_enabled")
+        // Patterns replace the list they are given for, and a list arms itself by having any. Naming only
+        // the switch keeps that list's patterns: disarming a populated allowlist is a state Studio can
+        // hold (ADR-0082), and a caller that had to resend the whole list to reach it could not.
+        val allow = if (arguments.contains("allow_patterns") || allowSwitch == null) {
+            arguments.strings("allow_patterns")
+        } else {
+            current.allow_patterns
+        }
+        val block = if (arguments.contains("block_patterns") || blockSwitch == null) {
+            arguments.strings("block_patterns")
+        } else {
+            current.block_patterns
+        }
+        val allowlist = allowSwitch ?: allow.isNotEmpty()
         backend.updateCaptureFilter(
-            allowlistEnabled = allow.isNotEmpty(),
+            allowlistEnabled = allowlist,
             allowPatterns = allow,
-            blocklistEnabled = block.isNotEmpty(),
+            blocklistEnabled = blockSwitch ?: block.isNotEmpty(),
             blockPatterns = block,
         )
         return success(
-            "Capture Filter updated: ${allow.size} allow, ${block.size} block",
+            "Capture Filter updated: ${allow.size} allow, ${block.size} block" +
+                // An armed allowlist admits only what it lists, so an empty one admits nothing.
+                if (allowlist && allow.isEmpty()) " — an armed allowlist with no patterns captures nothing" else "",
             captureFilterData(),
         )
     }
@@ -851,8 +868,10 @@ private class ToolArguments(private val values: Map<String, Any?>) {
     fun requiredBoolean(name: String): Boolean =
         values[name] as? Boolean ?: throw ToolFailure("$name is required")
 
-    fun boolean(name: String, default: Boolean): Boolean =
-        values[name]?.let { it as? Boolean ?: throw ToolFailure("$name must be a boolean") } ?: default
+    fun boolean(name: String, default: Boolean): Boolean = booleanOrNull(name) ?: default
+
+    fun booleanOrNull(name: String): Boolean? =
+        values[name]?.let { it as? Boolean ?: throw ToolFailure("$name must be a boolean") }
 
     fun requiredInt(name: String): Int = intOrNull(name) ?: throw ToolFailure("$name is required")
 

@@ -205,6 +205,20 @@ class ParseArgsTest {
         assertEquals(64, asked.bodyChars)
     }
 
+    // Each Capture Filter list has its own switch (ADR-0082). Unset has to stay distinct from off, or
+    // every existing invocation would start disarming lists it only meant to leave alone.
+    @Test
+    fun captureFilterListSwitchesAreUnsetUntilNamed() {
+        val derived = parseArgs(arrayOf("set_capture_filter", "--allow", "example.com"))!!
+        assertNull(derived.allowlistEnabled)
+        assertNull(derived.blocklistEnabled)
+
+        val disarmed = parseArgs(arrayOf("set_capture_filter", "--allow-off", "--block-on"))!!
+        assertEquals(false, disarmed.allowlistEnabled)
+        assertEquals(true, disarmed.blocklistEnabled)
+        assertTrue(disarmed.allowPatterns.isEmpty())
+    }
+
     // Retention is a count of exchanges, not the list limit --limit already means.
     @Test
     fun retentionIsItsOwnCount() {

@@ -312,14 +312,34 @@ internal suspend fun dispatch(host: DaemonClient, args: ParsedArgs): CommandResu
             CommandResult("seed queue cleared")
         }
         "set_capture_filter", "set-capture-filter" -> {
+            val current = host.captureFilter.value
+            // Patterns replace the list they are given for, and a list arms itself by having any. Naming
+            // only the switch keeps that list's patterns: disarming a populated allowlist is a state
+            // Studio can hold (ADR-0082), and having to resend the list to reach it is not holding it.
+            val allow = if (args.allowPatterns.isNotEmpty() || args.allowlistEnabled == null) {
+                args.allowPatterns
+            } else {
+                current.allow_patterns
+            }
+            val block = if (args.blockPatterns.isNotEmpty() || args.blocklistEnabled == null) {
+                args.blockPatterns
+            } else {
+                current.block_patterns
+            }
+            val allowlist = args.allowlistEnabled ?: allow.isNotEmpty()
+            val blocklist = args.blocklistEnabled ?: block.isNotEmpty()
             host.updateCaptureFilter(
-                allowlistEnabled = args.allowPatterns.isNotEmpty(),
-                allowPatterns = args.allowPatterns,
-                blocklistEnabled = args.blockPatterns.isNotEmpty(),
-                blockPatterns = args.blockPatterns,
+                allowlistEnabled = allowlist,
+                allowPatterns = allow,
+                blocklistEnabled = blocklist,
+                blockPatterns = block,
             )
             CommandResult(
-                "capture_filter allow=${args.allowPatterns.size} block=${args.blockPatterns.size}",
+                "capture_filter allow=${allow.size} allowlist=$allowlist " +
+                    "block=${block.size} blocklist=$blocklist" +
+                    // An armed allowlist admits only what it lists, so an empty one admits nothing. Studio
+                    // can author that too, so it is said out loud rather than refused.
+                    if (allowlist && allow.isEmpty()) "\nAn armed allowlist with no patterns captures nothing." else "",
             )
         }
         "set_capture_filter_enabled", "set-capture-filter-enabled" -> {
@@ -1010,6 +1030,9 @@ internal data class ParsedArgs(
     val headers: List<String> = emptyList(),
     val allowPatterns: List<String> = emptyList(),
     val blockPatterns: List<String> = emptyList(),
+    // Null means "derive it from whether the list has patterns", which is what every existing script gets.
+    val allowlistEnabled: Boolean? = null,
+    val blocklistEnabled: Boolean? = null,
     val hosts: List<String> = emptyList(),
     val bodyFile: String? = null,
     val bodyText: String? = null,
@@ -1048,6 +1071,8 @@ internal fun parseArgs(args: Array<String>): ParsedArgs? {
     val headers = mutableListOf<String>()
     val allowPatterns = mutableListOf<String>()
     val blockPatterns = mutableListOf<String>()
+    var allowlistEnabled: Boolean? = null
+    var blocklistEnabled: Boolean? = null
     val hosts = mutableListOf<String>()
     var bodyFile: String? = null
     var bodyText: String? = null
@@ -1085,6 +1110,10 @@ internal fun parseArgs(args: Array<String>): ParsedArgs? {
             "--header" -> headers += args.getOrNull(++i) ?: return null
             "--allow" -> allowPatterns += args.getOrNull(++i) ?: return null
             "--block" -> blockPatterns += args.getOrNull(++i) ?: return null
+            "--allow-on" -> allowlistEnabled = true
+            "--allow-off" -> allowlistEnabled = false
+            "--block-on" -> blocklistEnabled = true
+            "--block-off" -> blocklistEnabled = false
             "--host" -> hosts += args.getOrNull(++i) ?: return null
             "--body-file" -> bodyFile = args.getOrNull(++i) ?: return null
             "--body-text" -> bodyText = args.getOrNull(++i) ?: return null
@@ -1126,6 +1155,8 @@ internal fun parseArgs(args: Array<String>): ParsedArgs? {
         headers = headers,
         allowPatterns = allowPatterns,
         blockPatterns = blockPatterns,
+        allowlistEnabled = allowlistEnabled,
+        blocklistEnabled = blocklistEnabled,
         hosts = hosts,
         bodyFile = bodyFile,
         bodyText = bodyText,
@@ -1181,6 +1212,7 @@ private fun printUsage() {
         wailo-cli fill_seeds
         wailo-cli clear_seed_queue
         wailo-cli set_capture_filter [--allow HOST_PATTERN]... [--block HOST_PATTERN]...
+                    [--allow-on|--allow-off] [--block-on|--block-off]
         wailo-cli set_capture_filter_enabled --on|--off
         wailo-cli clear_capture_filter
         wailo-cli list_capture_filter
@@ -1236,6 +1268,11 @@ private fun printUsage() {
         that apply to the phase it stopped in: --method and --set-url before the request goes out, --status
         after it came back, headers and body either way. Anything else is refused rather than ignored, so a
         script cannot believe it changed something it did not. abort_hold fails the exchange instead.
+
+        The Capture Filter has three switches, not one: set_capture_filter_enabled gates the whole thing,
+        and each list applies on its own. Patterns replace the list they are given for, and a list with any
+        is armed — so passing neither patterns nor a switch for a list empties it. Pass only --allow-off or
+        --block-off to disarm a list while it keeps what is in it.
 
         set_require_pairing decides whether an unknown device may connect at all. Approving a specific one
         happens in Studio, where the code is on screen next to the device asking; here you can require
