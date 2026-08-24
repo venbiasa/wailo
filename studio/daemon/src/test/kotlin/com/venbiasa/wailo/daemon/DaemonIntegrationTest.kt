@@ -9,6 +9,7 @@ import java.nio.file.Files
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import kotlin.test.Test
+import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertFails
@@ -216,7 +217,13 @@ class DaemonIntegrationTest {
                     }
                     val rule = client.mapLocalRules.value.single()
                     assertEquals("https://example.com/login", rule.urlPattern)
-                    assertEquals("""{"ok":true}""", rule.bodyCopy().decodeToString())
+                    // The body is beside the layout now (ADR-0086), so surviving a restart means the
+                    // file and the reference in the layout still agree — not that the poll carried it.
+                    assertEquals(11, rule.bodySize)
+                    assertEquals(
+                        """{"ok":true}""",
+                        client.readRuleBody(RULE_FAMILY_MAP_LOCAL, "login").decodeToString(),
+                    )
                     val node = client.mapLocalNodes.value.single()
                     assertEquals(DaemonRuleGroup("checkout", "Checkout"), node.group)
                     assertEquals("login", node.rules.single().id)
@@ -226,6 +233,118 @@ class DaemonIntegrationTest {
             }
         } finally {
             directory.toFile().deleteRecursively()
+        }
+    }
+
+    /**
+     * The upgrade path off the inline body. A rule whose bytes are still in `map-local.json` has to keep
+     * serving them, and has to stop being written there — otherwise the file a user already has stays
+     * expensive forever, since nothing but an edit to that rule would ever move it.
+     */
+    @Test
+    fun aFixtureFileWrittenWithInlineBodiesIsMovedBesideIt() = runBlocking {
+        val directory = Files.createTempDirectory("wailo-daemon-inline")
+        try {
+            val body = """{"legacy":true}""".toByteArray()
+            DaemonFixturesStore(directory).saveMapLocal(
+                PersistedMapLocal(
+                    enabled = true,
+                    nodes = listOf(
+                        DaemonRuleNode(
+                            rules = listOf(
+                                MapLocalRuleDto(
+                                    id = "login",
+                                    enabled = true,
+                                    urlPattern = "https://example.com/login",
+                                    methods = emptyList(),
+                                    statusCode = 200,
+                                    headers = emptyList(),
+                                    bodyBase64 = body.encodeBase64(),
+                                ),
+                            ),
+                        ),
+                    ),
+                ),
+            )
+
+            harness(directory, deleteDirectory = false).use { harness ->
+                val client = harness.client()
+                try {
+                    assertTrue(client.awaitReady())
+                    withTimeout(5_000) {
+                        while (client.mapLocalRules.value.none { it.id == "login" }) delay(25)
+                    }
+
+                    assertEquals(body.size, client.mapLocalRules.value.single().bodySize)
+                    assertContentEquals(body, client.readRuleBody(RULE_FAMILY_MAP_LOCAL, "login"))
+                    // Rewritten on the way in, so the cost is paid once rather than on every publish.
+                    val rewritten = Files.readString(directory.resolve("map-local.json"))
+                    assertFalse(rewritten.contains(body.encodeBase64()))
+                    assertTrue(rewritten.contains(bodyDigest(body)))
+                } finally {
+                    client.close()
+                }
+            }
+        } finally {
+            directory.toFile().deleteRecursively()
+        }
+    }
+
+    /**
+     * The point of ADR-0086: a layout publish that carries no bytes is the common case — a toggle, a
+     * rename, a reorder — and every body it does not mention has to be left exactly where it was.
+     */
+    @Test
+    fun republishingALayoutWithoutBodiesKeepsThem() = runBlocking {
+        harness().use { harness ->
+            val client = harness.client()
+            try {
+                assertTrue(client.awaitReady())
+                val body = """{"ok":true}""".toByteArray()
+                client.replaceMapLocalNodes(
+                    listOf(
+                        DaemonRuleNode(
+                            rules = listOf(
+                                HostMapLocalRule(id = "login", urlPattern = "https://example.com/login"),
+                                HostMapLocalRule(id = "cart", urlPattern = "https://example.com/cart"),
+                            ),
+                        ),
+                    ),
+                    enabled = true,
+                    bodies = mapOf("login" to body),
+                )
+
+                // What Studio sends on a toggle: the rules as the daemon reported them, no bodies map.
+                client.replaceMapLocalNodes(
+                    listOf(
+                        DaemonRuleNode(
+                            rules = client.mapLocalRules.value.map {
+                                HostMapLocalRule(
+                                    id = it.id,
+                                    enabled = it.id != "login",
+                                    urlPattern = it.urlPattern,
+                                    bodySize = it.bodySize,
+                                    bodyHash = it.bodyHash,
+                                )
+                            },
+                        ),
+                    ),
+                    enabled = true,
+                )
+
+                assertContentEquals(body, client.readRuleBody(RULE_FAMILY_MAP_LOCAL, "login"))
+                assertEquals(false, harness.host.mapLocalRules.value.single { it.id == "login" }.enabled)
+                assertContentEquals(
+                    body,
+                    harness.host.mapLocalRules.value.single { it.id == "login" }.bodyCopy(),
+                )
+
+                // And a rule dropped from the layout takes its body with it.
+                client.replaceMapLocalNodes(emptyList(), enabled = true)
+                assertContentEquals(ByteArray(0), client.readRuleBody(RULE_FAMILY_MAP_LOCAL, "login"))
+            } finally {
+                client.close()
+            }
         }
     }
 
@@ -331,7 +450,10 @@ class DaemonIntegrationTest {
                     }
                     val seed = client.seeds.value.single()
                     assertEquals("https://example.com/poll", seed.urlPattern)
-                    assertEquals("""{"state":"pending"}""", seed.bodyCopy().decodeToString())
+                    assertEquals(
+                        """{"state":"pending"}""",
+                        client.readRuleBody(RULE_FAMILY_SEEDS, "poll-1").decodeToString(),
+                    )
                     // A half-spent queue is a position in a run, not a preference (ADR-0041).
                     assertTrue(client.seedQueue.value.isEmpty())
                 } finally {
@@ -509,7 +631,7 @@ class DaemonIntegrationTest {
                 withTimeout(5_000) {
                     while (observer.seeds.value.none { it.id == "shared" }) delay(25)
                 }
-                assertEquals("canned", observer.seeds.value.single().bodyCopy().decodeToString())
+                assertEquals("canned", observer.readRuleBody(RULE_FAMILY_SEEDS, "shared").decodeToString())
                 // Nothing is armed until an explicit fill, so the observer can tell "authored" from "in play".
                 assertTrue(observer.seedQueue.value.isEmpty())
 

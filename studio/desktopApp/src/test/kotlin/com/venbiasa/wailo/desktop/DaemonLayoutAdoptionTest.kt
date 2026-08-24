@@ -5,6 +5,7 @@ import com.venbiasa.wailo.daemon.DaemonRuleNode
 import com.venbiasa.wailo.daemon.mapRules
 import com.venbiasa.wailo.host.HostBreakpointRule
 import com.venbiasa.wailo.host.HostMapLocalRule
+import com.venbiasa.wailo.host.HostSeed
 import com.venbiasa.wailo.protocol.Header
 import com.venbiasa.wailo.shared.BreakpointNode
 import com.venbiasa.wailo.shared.BreakpointRuleDef
@@ -17,13 +18,12 @@ import com.venbiasa.wailo.shared.RuleNode
 import com.venbiasa.wailo.shared.SeedNode
 import com.venbiasa.wailo.shared.SeedRuleDef
 import kotlin.test.Test
-import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 
 /**
  * Studio's seam with the daemon's layout: the panel holds no copy of it, so these conversions are the
  * whole of what survives an edit (ADR-0081, ADR-0085). Breakpoints are the pure structural case; Map
- * Local and seeds add the bodies, which now travel with the rule instead of sitting in a local file.
+ * Local and seeds add a body *reference*, which is what a publish repeats back (ADR-0086).
  */
 class DaemonLayoutAdoptionTest {
     private val grouped: List<BreakpointNode> = listOf(
@@ -84,17 +84,40 @@ class DaemonLayoutAdoptionTest {
     )
 
     /**
-     * The body is what a Map Local rule is *for*, so it has to make the trip with the rule — there is no
-     * longer a local file the panel could fall back to if it did not.
+     * A publish repeats the daemon's reference and sends no bytes (ADR-0086). That is what makes a
+     * reorder or a toggle cost the rows alone — and it has to survive the trip, since a rule that
+     * published a blank reference would have the daemon read its body back as empty.
      */
     @Test
-    fun aRulesBodyTravelsWithItAndComesBack() {
-        val authored = """{"error":"nope"}""".toByteArray()
+    fun aRulesBodyReferenceTravelsWithItAndNoBytesDo() {
+        val known = mapOf(
+            "profile" to HostMapLocalRule(
+                id = "profile",
+                urlPattern = "https://example.com/profile",
+                bodySize = 16,
+                bodyHash = "cafe",
+            ),
+        )
 
-        val published = mapLocal.toDaemonMapLocalNodes { authored }
+        val published = mapLocal.toDaemonMapLocalNodes(known).single().rules.single()
 
-        assertContentEquals(authored, published.single().rules.single().bodyCopy())
-        assertEquals(mapLocal, published.toMapLocalNodes())
+        assertEquals(16, published.bodySize)
+        assertEquals("cafe", published.bodyHash)
+        assertEquals(0, published.bodyCopy().size)
+        assertEquals(mapLocal, mapLocal.toDaemonMapLocalNodes(known).toMapLocalNodes())
+    }
+
+    /**
+     * A rule the daemon has never seen publishes an empty reference rather than borrowing one. Anything
+     * else would name a body it does not have, and the bytes for a rule this new are travelling in the
+     * publish's own body map.
+     */
+    @Test
+    fun aRuleTheDaemonHasNotSeenPublishesAnEmptyReference() {
+        val published = mapLocal.toDaemonMapLocalNodes(emptyMap()).single().rules.single()
+
+        assertEquals(0, published.bodySize)
+        assertEquals("", published.bodyHash)
     }
 
     /**
@@ -103,7 +126,7 @@ class DaemonLayoutAdoptionTest {
      */
     @Test
     fun theDaemonsContentLengthIsNotAdoptedBackIntoTheEditor() {
-        val published = mapLocal.toDaemonMapLocalNodes { ByteArray(4) }
+        val published = mapLocal.toDaemonMapLocalNodes(emptyMap())
         val withLength = published.mapRules { rule ->
             HostMapLocalRule(
                 id = rule.id,
@@ -113,7 +136,7 @@ class DaemonLayoutAdoptionTest {
                 methods = rule.methods,
                 statusCode = rule.statusCode,
                 headers = rule.headers + Header(name = "Content-Length", value_ = "4"),
-                body = rule.bodyCopy(),
+                bodySize = 4,
             )
         }
 
@@ -125,12 +148,14 @@ class DaemonLayoutAdoptionTest {
     )
 
     @Test
-    fun aSeedsBodyTravelsWithItAndComesBack() {
-        val authored = """{"ok":true}""".toByteArray()
+    fun aSeedsBodyReferenceTravelsWithItAndNoBytesDo() {
+        val known = mapOf("poll" to HostSeed(id = "poll", bodySize = 11, bodyHash = "f00d"))
 
-        val published = seeds.toDaemonSeedNodes { authored }
+        val published = seeds.toDaemonSeedNodes(known).single().rules.single()
 
-        assertContentEquals(authored, published.single().rules.single().bodyCopy())
-        assertEquals(seeds, published.toSeedNodes())
+        assertEquals(11, published.bodySize)
+        assertEquals("f00d", published.bodyHash)
+        assertEquals(0, published.bodyCopy().size)
+        assertEquals(seeds, seeds.toDaemonSeedNodes(known).toSeedNodes())
     }
 }

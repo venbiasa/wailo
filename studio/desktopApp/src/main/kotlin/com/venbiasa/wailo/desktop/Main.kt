@@ -35,6 +35,9 @@ import com.venbiasa.wailo.daemon.DaemonLauncher
 import com.venbiasa.wailo.daemon.DaemonRuleGroup
 import com.venbiasa.wailo.daemon.DaemonRuleNode
 import com.venbiasa.wailo.daemon.ProxyCertificate
+import com.venbiasa.wailo.daemon.RULE_FAMILY_MAP_LOCAL
+import com.venbiasa.wailo.daemon.RULE_FAMILY_SEEDS
+import com.venbiasa.wailo.daemon.bodyDigest
 import com.venbiasa.wailo.daemon.UsbConnectionStatus
 import com.venbiasa.wailo.daemon.UsbDeviceInfo
 import com.venbiasa.wailo.engine.BodyRef
@@ -430,26 +433,31 @@ private fun runWailo(engine: DaemonClient) = application {
     // Bodies an editor has saved but whose layout has not been published yet. The rule editors commit a
     // body and its row through two separate callbacks, so the bytes wait here for the publish that
     // follows and are dropped once the daemon has them. Not a second copy of anything: it holds only what
-    // the daemon has not been told (ADR-0085).
+    // the daemon has not been told (ADR-0085), and only what is being changed (ADR-0086).
     val pendingBodies = remember { mutableStateMapOf<String, ByteArray>() }
 
     // Map Local layout (groups + rules, in priority order). The daemon owns it, grouping included
-    // (ADR-0081) and bodies inline, so a rule an agent files into a group is in that group here too and
-    // serves the same bytes. Read straight off it with no local copy (ADR-0085); `shared` only renders it.
+    // (ADR-0081), so a rule an agent files into a group is in that group here too and serves the same
+    // bytes. Read straight off it with no local copy (ADR-0085); `shared` only renders it. A rule arrives
+    // naming its body rather than carrying it, so the bytes are fetched per rule (ADR-0086).
     val daemonMapLocalNodes by engine.mapLocalNodes.collectAsState()
     val mapLocalEnabled by engine.mapLocalEnabled.collectAsState()
     val daemonMapRules = remember(daemonMapLocalNodes) {
         daemonMapLocalNodes.flatMap { it.rules }.associateBy { it.id }
     }
     val mapLocalNodes = remember(daemonMapLocalNodes) { daemonMapLocalNodes.toMapLocalNodes() }
-    val mapLocalBody: (String) -> ByteArray = { id ->
-        pendingBodies[id] ?: daemonMapRules[id]?.bodyCopy() ?: ByteArray(0)
+    val mapLocalBody: suspend (String) -> ByteArray = { id ->
+        pendingBodies[id] ?: engine.readRuleBody(RULE_FAMILY_MAP_LOCAL, id)
     }
-    // Off the UI thread, unlike the other daemon calls here: the bodies ride along, so a publish is a
-    // base64 encode and a socket write of every authored payload rather than a few fields.
+    // A layout and no bytes: every rule the daemon already knows keeps the body it is holding, so
+    // toggling or reordering costs the rows alone. Only what an editor just staged travels.
     val onLayoutChange = { next: List<MapLocalNode> ->
-        scope.launch(Dispatchers.IO) {
-            engine.replaceMapLocalNodes(next.toDaemonMapLocalNodes(mapLocalBody), mapLocalEnabled)
+        scope.launch {
+            engine.replaceMapLocalNodes(
+                next.toDaemonMapLocalNodes(daemonMapRules),
+                mapLocalEnabled,
+                pendingBodies.staged(next.allRules().map { it.id }),
+            )
         }
         Unit
     }
@@ -479,21 +487,25 @@ private fun runWailo(engine: DaemonClient) = application {
         Unit
     }
 
-    // Seed layout: owned by the daemon with its bytes inline — a seed is spent by whoever owns the hold,
-    // and that is the daemon whether or not this window exists (ADR-0067). Read and written exactly like
-    // Map Local above; unlike it, nothing reaches a device.
+    // Seed layout: owned by the daemon, which holds the bytes too — a seed is spent by whoever owns the
+    // hold, and that is the daemon whether or not this window exists (ADR-0067). Read and written exactly
+    // like Map Local above; unlike it, nothing reaches a device.
     val daemonSeedNodes by engine.seedNodes.collectAsState()
     val seedsEnabled by engine.seedsEnabled.collectAsState()
     val daemonSeedRules = remember(daemonSeedNodes) {
         daemonSeedNodes.flatMap { it.rules }.associateBy { it.id }
     }
     val seedNodes = remember(daemonSeedNodes) { daemonSeedNodes.toSeedNodes() }
-    val seedBody: (String) -> ByteArray = { id ->
-        pendingBodies[id] ?: daemonSeedRules[id]?.bodyCopy() ?: ByteArray(0)
+    val seedBody: suspend (String) -> ByteArray = { id ->
+        pendingBodies[id] ?: engine.readRuleBody(RULE_FAMILY_SEEDS, id)
     }
     val onSeedLayoutChange = { next: List<SeedNode> ->
-        scope.launch(Dispatchers.IO) {
-            engine.replaceSeedNodes(next.toDaemonSeedNodes(seedBody), seedsEnabled)
+        scope.launch {
+            engine.replaceSeedNodes(
+                next.toDaemonSeedNodes(daemonSeedRules),
+                seedsEnabled,
+                pendingBodies.staged(next.allRules().map { it.id }),
+            )
         }
         Unit
     }
@@ -502,14 +514,14 @@ private fun runWailo(engine: DaemonClient) = application {
         Unit
     }
 
-    // A staged body is released only once the daemon reports those exact bytes back, never when the
-    // publish call returns. The lookups above are captured per composition, so dropping it any earlier
-    // leaves a frame in which a second edit reads the pre-save body and republishes it over the save.
+    // A staged body is released only once the daemon reports that digest back, never when the publish
+    // call returns. Dropping it any earlier leaves a frame in which the rule's bytes are neither here nor
+    // acknowledged there, and an edit landing in it would publish a layout that unstages the save.
     LaunchedEffect(daemonMapRules, daemonSeedRules) {
         pendingBodies.keys
             .filter { id ->
-                val published = daemonMapRules[id]?.bodyCopy() ?: daemonSeedRules[id]?.bodyCopy()
-                published.contentEquals(pendingBodies[id])
+                val published = daemonMapRules[id]?.bodyHash ?: daemonSeedRules[id]?.bodyHash
+                published != null && published == bodyDigest(pendingBodies.getValue(id))
             }
             .forEach(pendingBodies::remove)
     }
@@ -539,9 +551,13 @@ private fun runWailo(engine: DaemonClient) = application {
             statusCode = rule.statusCode,
             headers = rule.headers,
         )
-        pendingBodies[seed.id] = mapLocalBody(rule.id)
-        onSeedLayoutChange(seedNodes + RuleNode(seed))
-        openSeedPanelRequests += 1
+        // The source rule's bytes are the daemon's, so the copy is a fetch — and the layout is published
+        // only once they are staged, or the new seed would land naming a body nothing had sent.
+        scope.launch {
+            pendingBodies[seed.id] = mapLocalBody(rule.id)
+            onSeedLayoutChange(seedNodes + RuleNode(seed))
+            openSeedPanelRequests += 1
+        }
         Unit
     }
 
@@ -994,18 +1010,22 @@ private fun runWailo(engine: DaemonClient) = application {
 }
 
 /**
- * The daemon's copy of the library: the in-order rules the panel shows, each carrying the bytes it will
- * answer with. Bodies ride along rather than being read at spend time, because the daemon has to answer
- * a hold with no Studio to ask (ADR-0067) and is where they live (ADR-0085).
+ * The daemon's copy of the library: the in-order rules the panel shows, each naming the body it will
+ * answer with. The bytes are the daemon's — it has to answer a hold with no Studio to ask (ADR-0067) —
+ * so a publish repeats the reference it was given rather than sending the payload back (ADR-0086).
+ * [known] is the daemon's own view of each seed, which is where that reference comes from; a seed it has
+ * never heard of has none until the bodies beside this layout give it one.
  */
-internal fun List<SeedNode>.toDaemonSeedNodes(body: (String) -> ByteArray): List<DaemonRuleNode<HostSeed>> = map { node ->
+internal fun List<SeedNode>.toDaemonSeedNodes(
+    known: Map<String, HostSeed>,
+): List<DaemonRuleNode<HostSeed>> = map { node ->
     when (node) {
-        is GroupNode -> DaemonRuleNode(node.group.toDaemonGroup(), node.rules.map { it.toHostSeed(body) })
-        is RuleNode -> DaemonRuleNode(null, listOf(node.rule.toHostSeed(body)))
+        is GroupNode -> DaemonRuleNode(node.group.toDaemonGroup(), node.rules.map { it.toHostSeed(known) })
+        is RuleNode -> DaemonRuleNode(null, listOf(node.rule.toHostSeed(known)))
     }
 }
 
-private fun SeedRuleDef.toHostSeed(body: (String) -> ByteArray) = HostSeed(
+private fun SeedRuleDef.toHostSeed(known: Map<String, HostSeed>) = HostSeed(
     id = id,
     // The whole library goes over, disabled seeds included — Fill is what filters, and a seed that
     // vanished from the daemon while switched off could not be listed or re-armed from anywhere else.
@@ -1014,7 +1034,8 @@ private fun SeedRuleDef.toHostSeed(body: (String) -> ByteArray) = HostSeed(
     method = method,
     statusCode = statusCode,
     headers = headers.map { Header(name = it.name, value_ = it.value) },
-    body = body(id),
+    bodySize = known[id]?.bodySize ?: 0,
+    bodyHash = known[id]?.bodyHash.orEmpty(),
 )
 
 private fun HostSeed.toSeedRuleDef() = SeedRuleDef(
@@ -1029,6 +1050,16 @@ private fun HostSeed.toSeedRuleDef() = SeedRuleDef(
 internal fun List<DaemonRuleNode<HostSeed>>.toSeedNodes(): List<SeedNode> = flatMap { node ->
     val definitions = node.rules.map { it.toSeedRuleDef() }
     node.group?.let { listOf(GroupNode(it.toRuleGroup(), definitions)) } ?: definitions.map { RuleNode(it) }
+}
+
+/**
+ * The staged bodies that belong with a publish of [ids]. One waiting for the other panel's turn, or for
+ * a rule that has since been deleted, stays put rather than riding along with a layout that never names
+ * it — the daemon sweeps bodies no rule claims, so an unnamed one would be written and then collected.
+ */
+private fun Map<String, ByteArray>.staged(ids: List<String>): Map<String, ByteArray> {
+    val named = ids.toSet()
+    return filterKeys { it in named }
 }
 
 private fun RuleGroup.toDaemonGroup() = DaemonRuleGroup(id = id, name = name, enabled = enabled)
@@ -1049,15 +1080,15 @@ private fun CaptureFilter.toUiState(masterEnabled: Boolean) = CaptureFilterState
  * group that is turned off still remembers being on.
  */
 internal fun List<MapLocalNode>.toDaemonMapLocalNodes(
-    body: (String) -> ByteArray,
+    known: Map<String, HostMapLocalRule>,
 ): List<DaemonRuleNode<HostMapLocalRule>> = map { node ->
     when (node) {
-        is GroupNode -> DaemonRuleNode(node.group.toDaemonGroup(), node.rules.map { it.toHostRule(body) })
-        is RuleNode -> DaemonRuleNode(null, listOf(node.rule.toHostRule(body)))
+        is GroupNode -> DaemonRuleNode(node.group.toDaemonGroup(), node.rules.map { it.toHostRule(known) })
+        is RuleNode -> DaemonRuleNode(null, listOf(node.rule.toHostRule(known)))
     }
 }
 
-private fun MapLocalRuleDef.toHostRule(body: (String) -> ByteArray) = HostMapLocalRule(
+private fun MapLocalRuleDef.toHostRule(known: Map<String, HostMapLocalRule>) = HostMapLocalRule(
     id = id,
     name = name,
     enabled = enabled,
@@ -1067,7 +1098,9 @@ private fun MapLocalRuleDef.toHostRule(body: (String) -> ByteArray) = HostMapLoc
         .filter(String::isNotEmpty),
     statusCode = statusCode,
     headers = headers.map { Header(name = it.name, value_ = it.value) },
-    body = body(id),
+    // The daemon's reference, echoed back rather than the bytes it stands for (ADR-0086).
+    bodySize = known[id]?.bodySize ?: 0,
+    bodyHash = known[id]?.bodyHash.orEmpty(),
 )
 
 /**

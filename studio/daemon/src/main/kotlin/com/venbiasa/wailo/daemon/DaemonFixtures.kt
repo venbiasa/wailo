@@ -79,7 +79,7 @@ internal data class PersistedBookmarks(
 )
 
 internal class DaemonFixturesStore(
-    private val directory: Path = wailoStateDir(),
+    internal val directory: Path = wailoStateDir(),
 ) {
     private val mapLocalPath: Path get() = directory.resolve("map-local.json")
     private val breakpointsPath: Path get() = directory.resolve("breakpoints.json")

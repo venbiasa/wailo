@@ -23,7 +23,7 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import okio.ByteString.Companion.toByteString
 
-internal const val DAEMON_CONTROL_PROTOCOL_VERSION = 13
+internal const val DAEMON_CONTROL_PROTOCOL_VERSION = 14
 
 /**
  * The one command whose socket is not answered and closed. The daemon holds it open and counts it as a
@@ -66,6 +66,7 @@ internal data class PollRequest(
     val breakpointHash: String? = null,
     val seedHash: String? = null,
     val holdsHash: String? = null,
+    val captureFilterHash: String? = null,
 )
 
 @Serializable
@@ -82,7 +83,10 @@ internal data class PollResponse(
     val connectedDevices: List<ConnectedDeviceDto>,
     // The filter as authored — each list's own armed state, not the form folded through
     // [captureFilterEnabled] that devices apply. A frontend needs both to render the panel (ADR-0082).
-    val captureFilterBase64: String,
+    // Hash-gated like the rule families: it was the one payload re-encoded and re-sent on every tick
+    // whether or not anything had touched it.
+    val captureFilterHash: String,
+    val captureFilterBase64: String? = null,
     val captureFilterEnabled: Boolean,
     // Which hosts the user marked as worth watching. Daemon state so an agent or a CLI session can read
     // what the user cares about with no window open (ADR-0084).
@@ -285,6 +289,11 @@ internal data class HeaderDto(val name: String, val value: String) {
     fun toDomain() = Header(name = name, value_ = value)
 }
 
+/**
+ * A rule names its body by [bodySize] and [bodyHash] rather than carrying it (ADR-0086). The bytes are
+ * the daemon's, fetched with `read_rule_body`; inlining them meant a rule's switch could not be flipped
+ * without rewriting and re-sending every fixture in the set.
+ */
 @Serializable
 internal data class MapLocalRuleDto(
     val id: String,
@@ -293,15 +302,19 @@ internal data class MapLocalRuleDto(
     val methods: List<String>,
     val statusCode: Int,
     val headers: List<HeaderDto>,
-    val bodyBase64: String,
+    val bodySize: Int = 0,
+    val bodyHash: String = "",
     // Defaulted so this stays an additive field: `DaemonJson` ignores unknown keys, so a daemon and a
     // frontend built either side of this change still talk without a control-protocol bump.
     val name: String = "",
+    // How every body was stored before this rule got a file of its own. Read on the way up from an older
+    // `map-local.json` and written into the body store, never written back — see `migrateInlineBodies`.
+    val bodyBase64: String = "",
 ) {
     // [enabled] is overridden when the rule sits in a group, whose own switch gates it (see
     // `effectiveEnabled`). The authored value stays on the DTO so a frontend can still show the rule's
     // own state, and turning the group back on restores it.
-    fun toDomain(enabled: Boolean = this.enabled) = HostMapLocalRule(
+    fun toDomain(enabled: Boolean = this.enabled, body: ByteArray = ByteArray(0)) = HostMapLocalRule(
         id = id,
         name = name,
         enabled = enabled,
@@ -309,7 +322,11 @@ internal data class MapLocalRuleDto(
         methods = methods,
         statusCode = statusCode,
         headers = headers.map(HeaderDto::toDomain),
-        body = bodyBase64.decodeBase64(),
+        body = body,
+        // The reference, not the bytes handed in: the daemon derives both when it adopts a layout, so
+        // they describe what it stores whether or not this caller was given a copy.
+        bodySize = bodySize,
+        bodyHash = bodyHash,
     )
 }
 
@@ -333,9 +350,9 @@ internal data class BreakpointRuleDto(
 }
 
 /**
- * A seed carries its body inline, like [MapLocalRuleDto] and unlike a device-side rule: it is never
- * pushed anywhere, it is spent here, and the daemon has to be able to answer a hold with no Studio to
- * ask for the bytes (ADR-0067).
+ * A seed names its body the way [MapLocalRuleDto] does. The bytes stay with the daemon rather than the
+ * frontend either way: a seed is never pushed anywhere, it is spent here, and a hold has to be
+ * answerable with no Studio to ask for them (ADR-0067).
  */
 @Serializable
 internal data class SeedRuleDto(
@@ -345,16 +362,20 @@ internal data class SeedRuleDto(
     val method: String,
     val statusCode: Int,
     val headers: List<HeaderDto>,
-    val bodyBase64: String,
+    val bodySize: Int = 0,
+    val bodyHash: String = "",
+    val bodyBase64: String = "",
 ) {
-    fun toDomain(enabled: Boolean = this.enabled) = HostSeed(
+    fun toDomain(enabled: Boolean = this.enabled, body: ByteArray = ByteArray(0)) = HostSeed(
         id = id,
         enabled = enabled,
         urlPattern = urlPattern,
         method = method,
         statusCode = statusCode,
         headers = headers.map(HeaderDto::toDomain),
-        body = bodyBase64.decodeBase64(),
+        body = body,
+        bodySize = bodySize,
+        bodyHash = bodyHash,
     )
 }
 
@@ -448,10 +469,16 @@ internal data class BookmarkRequest(
     val bookmarked: Boolean,
 )
 
+/**
+ * A whole layout, and only the bodies it is changing (ADR-0086). [bodies] is base64 by rule id; a rule
+ * absent from it keeps whatever the daemon already holds, which is what makes reordering or toggling
+ * cost nothing. A rule the daemon has never seen and that names no body here has an empty one.
+ */
 @Serializable
 internal data class ReplaceMapLocalRequest(
     val enabled: Boolean,
     val nodes: List<DaemonRuleNode<MapLocalRuleDto>>,
+    val bodies: Map<String, String> = emptyMap(),
 )
 
 @Serializable
@@ -464,17 +491,23 @@ internal data class ReplaceBreakpointsRequest(
 internal data class ReplaceSeedsRequest(
     val enabled: Boolean,
     val nodes: List<DaemonRuleNode<SeedRuleDto>>,
+    val bodies: Map<String, String> = emptyMap(),
 )
 
 /**
  * An upsert that can also place the rule, so a headless frontend can file into a group rather than only
  * appending loose rules. A null [groupId] leaves an existing rule where it is; an empty one moves it out
  * to the top level. The group must already exist — it is addressed by id (ADR-0081).
+ *
+ * [body] carries its bytes inline, unlike a layout publish: this call *is* about one rule, so there is
+ * nothing to be saved by naming the body instead. Null leaves the stored body alone, which is what an
+ * edit that only moves or renames the rule means.
  */
 @Serializable
 internal data class UpsertMapLocalRequest(
     val rule: MapLocalRuleDto,
     val groupId: String? = null,
+    val body: String? = null,
 )
 
 @Serializable
@@ -487,7 +520,23 @@ internal data class UpsertBreakpointRequest(
 internal data class UpsertSeedRequest(
     val seed: SeedRuleDto,
     val groupId: String? = null,
+    val body: String? = null,
 )
+
+/**
+ * A bounded slice of one authored rule body, the counterpart of [ReadBodyRequest] for the fixtures a
+ * frontend wrote rather than the traffic it captured (ADR-0086).
+ */
+@Serializable
+internal data class ReadRuleBodyRequest(
+    val family: String,
+    val id: String,
+    val offset: Long = 0,
+    val length: Int,
+)
+
+@Serializable
+internal data class ReadRuleBodyResponse(val bytesBase64: String)
 
 /** Which panel's groups a group command addresses; the three share one set of commands. */
 @Serializable
@@ -590,17 +639,23 @@ internal fun PausedExchange.toDto() = PausedExchangeDto(
 
 /**
  * The match set the engine actually serves: flattened to priority order, with each group's switch folded
- * into the rules under it. This is the only projection devices ever see — the grouping above it is
- * authoring structure and never reaches the wire.
+ * into the rules under it, and each body read back out of [bodies]. This is the only projection devices
+ * ever see — the grouping above it is authoring structure and never reaches the wire.
  */
-internal fun List<DaemonRuleNode<MapLocalRuleDto>>.toHostRules(): List<HostMapLocalRule> =
-    flatMap { node -> node.rules.map { it.toDomain(effectiveEnabled(it.enabled, node.group)) } }
+internal fun List<DaemonRuleNode<MapLocalRuleDto>>.toHostRules(
+    bodies: (String) -> ByteArray,
+): List<HostMapLocalRule> = flatMap { node ->
+    node.rules.map { it.toDomain(effectiveEnabled(it.enabled, node.group), bodies(it.id)) }
+}
 
 internal fun List<DaemonRuleNode<BreakpointRuleDto>>.toHostBreakpointRules(): List<HostBreakpointRule> =
     flatMap { node -> node.rules.map { it.toDomain(effectiveEnabled(it.enabled, node.group)) } }
 
-internal fun List<DaemonRuleNode<SeedRuleDto>>.toHostSeeds(): List<HostSeed> =
-    flatMap { node -> node.rules.map { it.toDomain(effectiveEnabled(it.enabled, node.group)) } }
+internal fun List<DaemonRuleNode<SeedRuleDto>>.toHostSeeds(
+    bodies: (String) -> ByteArray,
+): List<HostSeed> = flatMap { node ->
+    node.rules.map { it.toDomain(effectiveEnabled(it.enabled, node.group), bodies(it.id)) }
+}
 
 internal fun HostMapLocalRule.toDto() = MapLocalRuleDto(
     id = id,
@@ -609,7 +664,10 @@ internal fun HostMapLocalRule.toDto() = MapLocalRuleDto(
     methods = methods,
     statusCode = statusCode,
     headers = headers.map { HeaderDto(it.name, it.value_) },
-    bodyBase64 = bodyCopy().encodeBase64(),
+    // Carried, not recomputed: a frontend publishing a layout holds bytes only for the rules it is
+    // changing, and the daemon derives the reference for every rule as it adopts them anyway.
+    bodySize = bodySize,
+    bodyHash = bodyHash,
     name = name,
 )
 
@@ -629,7 +687,8 @@ internal fun HostSeed.toDto() = SeedRuleDto(
     method = method,
     statusCode = statusCode,
     headers = headers.map { HeaderDto(it.name, it.value_) },
-    bodyBase64 = bodyCopy().encodeBase64(),
+    bodySize = bodySize,
+    bodyHash = bodyHash,
 )
 
 internal fun PairedDevice.toDto() = PairedDeviceDto(

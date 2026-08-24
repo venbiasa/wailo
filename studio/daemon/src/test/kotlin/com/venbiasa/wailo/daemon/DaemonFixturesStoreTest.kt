@@ -4,18 +4,25 @@ import com.venbiasa.wailo.host.HostMapLocalRule
 import java.nio.file.Files
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class DaemonFixturesStoreTest {
+    /**
+     * The layout file holds the body's *reference*, never its bytes (ADR-0086) — that is what keeps a
+     * reorder or a toggle from rewriting every fixture in the file.
+     */
     @Test
-    fun mapLocalRoundTripsGroupsRulesAndBody() {
+    fun mapLocalRoundTripsGroupsRulesAndTheBodyReferenceButNotTheBytes() {
         val directory = Files.createTempDirectory("wailo-fixtures")
         try {
             val store = DaemonFixturesStore(directory)
+            val body = """{"ok":true}""".toByteArray()
             val rule = HostMapLocalRule(
                 id = "login",
                 urlPattern = "https://example.com/login",
-                body = """{"ok":true}""".toByteArray(),
+                bodySize = body.size,
+                bodyHash = bodyDigest(body),
             )
             store.saveMapLocal(
                 PersistedMapLocal(
@@ -26,13 +33,16 @@ class DaemonFixturesStoreTest {
                 ),
             )
 
+            val file = directory.resolve("map-local.json")
             val loaded = DaemonFixturesStore(directory).loadMapLocal()
-            assertTrue(Files.isRegularFile(directory.resolve("map-local.json")))
+            assertTrue(Files.isRegularFile(file))
             assertEquals(false, loaded.enabled)
             val node = loaded.resolvedNodes().single()
             assertEquals(DaemonRuleGroup("g1", "Checkout", enabled = false), node.group)
             assertEquals("login", node.rules.single().id)
-            assertEquals("""{"ok":true}""", node.rules.single().toDomain().bodyCopy().decodeToString())
+            assertEquals(body.size, node.rules.single().bodySize)
+            assertEquals(bodyDigest(body), node.rules.single().bodyHash)
+            assertFalse(Files.readString(file).contains(body.encodeBase64()))
         } finally {
             directory.toFile().deleteRecursively()
         }

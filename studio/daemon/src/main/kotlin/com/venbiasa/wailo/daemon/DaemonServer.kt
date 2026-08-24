@@ -132,8 +132,20 @@ internal class DaemonRuntime(
     var bookmarkedHosts: List<String> = emptyList()
         private set
 
+    // Derived from the fixtures store rather than injected beside it: a layout and the bodies it names
+    // are one configuration, and two directories that could disagree is not a knob worth having.
+    private val ruleBodies = DaemonRuleBodyStore(fixtures.directory)
+
     init {
         restoreFixtures()
+    }
+
+    /** A bounded slice of one authored body, for a frontend that is about to show or export it. */
+    fun readRuleBody(family: String, id: String, offset: Long, length: Int): ByteArray {
+        val body = ruleBodies.body(family, id)
+        val from = offset.coerceIn(0, body.size.toLong()).toInt()
+        val to = (from.toLong() + length.coerceAtLeast(0)).coerceAtMost(body.size.toLong()).toInt()
+        return body.copyOfRange(from, to)
     }
 
     fun poll(request: PollRequest): PollResponse {
@@ -155,6 +167,8 @@ internal class DaemonRuntime(
 
         val holds = host.listHolds()
         val holdsHash = hash(holds.map { it.toDto() })
+        val captureFilter = host.captureFilter.value
+        val captureFilterHash = hash(listOf(captureFilter.toString(), host.isCaptureFilterEnabled()))
         val mapNodes = mapLocalNodes
         val mapHash = hash(mapNodes)
         val breakpointNodes = this.breakpointNodes
@@ -179,7 +193,12 @@ internal class DaemonRuntime(
             connectedDevices = engine.connectedDevices.value.map { it.toDto() },
             // The authored filter, not the one the engine pushes to devices: a frontend has to see the
             // armed state the master is currently suppressing, or it cannot restore it (ADR-0082).
-            captureFilterBase64 = host.captureFilter.value.encodeBase64(),
+            captureFilterHash = captureFilterHash,
+            captureFilterBase64 = if (request.captureFilterHash == captureFilterHash) {
+                null
+            } else {
+                captureFilter.encodeBase64()
+            },
             captureFilterEnabled = host.isCaptureFilterEnabled(),
             bookmarkedHosts = bookmarkedHosts,
             holdsHash = holdsHash,
@@ -323,21 +342,46 @@ internal class DaemonRuntime(
         _quitRequests.value += 1
     }
 
-    suspend fun replaceMapLocal(nodes: List<DaemonRuleNode<MapLocalRuleDto>>, enabled: Boolean) =
-        mapLocalMutex.withLock {
-            mapLocalNodes = nodes
-            pushMapLocal(enabled)
+    /**
+     * Adopt a whole layout, taking only the bodies [bodies] actually carries (ADR-0086). Everything else
+     * keeps the bytes already held under its id, which is what lets a reorder or a toggle cost nothing.
+     */
+    suspend fun replaceMapLocal(
+        nodes: List<DaemonRuleNode<MapLocalRuleDto>>,
+        enabled: Boolean,
+        bodies: Map<String, ByteArray> = emptyMap(),
+    ) = mapLocalMutex.withLock {
+        bodies.forEach { (id, bytes) -> ruleBodies.put(RULE_FAMILY_MAP_LOCAL, id, bytes) }
+        val known = mapLocalNodes.flattenRules().associateBy { it.id }
+        mapLocalNodes = nodes.mapRules { rule ->
+            val carried = known[rule.id].takeIf { rule.id !in bodies }
+            if (carried == null) {
+                val bytes = ruleBodies.body(RULE_FAMILY_MAP_LOCAL, rule.id)
+                rule.copy(bodySize = bytes.size, bodyHash = bodyDigest(bytes), bodyBase64 = "")
+            } else {
+                rule.copy(bodySize = carried.bodySize, bodyHash = carried.bodyHash, bodyBase64 = "")
+            }
         }
+        pushMapLocal(enabled)
+    }
 
     /**
      * Returns false when [groupId] names a group that does not exist — groups are addressed by id, so a
      * misspelling is reported rather than quietly creating a second group under a guessed name.
      */
-    suspend fun upsertMapLocal(rule: MapLocalRuleDto, groupId: String?): Boolean = mapLocalMutex.withLock {
-        mapLocalNodes = mapLocalNodes.upsertRule(rule, groupId) { it.id } ?: return@withLock false
-        pushMapLocal(host.isMapLocalEnabled())
-        true
-    }
+    suspend fun upsertMapLocal(rule: MapLocalRuleDto, groupId: String?, body: ByteArray?): Boolean =
+        mapLocalMutex.withLock {
+            // A null body keeps whatever is stored, so an edit that only moves or renames the rule does
+            // not blank it. The store is written after the group is validated, or a rejected upsert would
+            // leave a body behind for a rule that was never filed.
+            val bytes = body ?: ruleBodies.body(RULE_FAMILY_MAP_LOCAL, rule.id)
+            val stored = rule.copy(bodySize = bytes.size, bodyHash = bodyDigest(bytes), bodyBase64 = "")
+            val next = mapLocalNodes.upsertRule(stored, groupId) { it.id } ?: return@withLock false
+            if (body != null) ruleBodies.put(RULE_FAMILY_MAP_LOCAL, rule.id, body)
+            mapLocalNodes = next
+            pushMapLocal(host.isMapLocalEnabled())
+            true
+        }
 
     suspend fun removeMapLocal(id: String): Boolean = mapLocalMutex.withLock {
         if (mapLocalNodes.findRule(id) { it.id } == null) return@withLock false
@@ -369,16 +413,35 @@ internal class DaemonRuntime(
 
     suspend fun setBreakpointsEnabled(enabled: Boolean) = breakpointMutex.withLock { pushBreakpoints(enabled) }
 
-    suspend fun replaceSeeds(nodes: List<DaemonRuleNode<SeedRuleDto>>, enabled: Boolean) = seedMutex.withLock {
-        seedNodes = nodes
+    suspend fun replaceSeeds(
+        nodes: List<DaemonRuleNode<SeedRuleDto>>,
+        enabled: Boolean,
+        bodies: Map<String, ByteArray> = emptyMap(),
+    ) = seedMutex.withLock {
+        bodies.forEach { (id, bytes) -> ruleBodies.put(RULE_FAMILY_SEEDS, id, bytes) }
+        val known = seedNodes.flattenRules().associateBy { it.id }
+        seedNodes = nodes.mapRules { seed ->
+            val carried = known[seed.id].takeIf { seed.id !in bodies }
+            if (carried == null) {
+                val bytes = ruleBodies.body(RULE_FAMILY_SEEDS, seed.id)
+                seed.copy(bodySize = bytes.size, bodyHash = bodyDigest(bytes), bodyBase64 = "")
+            } else {
+                seed.copy(bodySize = carried.bodySize, bodyHash = carried.bodyHash, bodyBase64 = "")
+            }
+        }
         pushSeeds(enabled)
     }
 
-    suspend fun upsertSeed(seed: SeedRuleDto, groupId: String?): Boolean = seedMutex.withLock {
-        seedNodes = seedNodes.upsertRule(seed, groupId) { it.id } ?: return@withLock false
-        pushSeeds(host.areSeedsEnabled())
-        true
-    }
+    suspend fun upsertSeed(seed: SeedRuleDto, groupId: String?, body: ByteArray?): Boolean =
+        seedMutex.withLock {
+            val bytes = body ?: ruleBodies.body(RULE_FAMILY_SEEDS, seed.id)
+            val stored = seed.copy(bodySize = bytes.size, bodyHash = bodyDigest(bytes), bodyBase64 = "")
+            val next = seedNodes.upsertRule(stored, groupId) { it.id } ?: return@withLock false
+            if (body != null) ruleBodies.put(RULE_FAMILY_SEEDS, seed.id, body)
+            seedNodes = next
+            pushSeeds(host.areSeedsEnabled())
+            true
+        }
 
     suspend fun removeSeed(id: String): Boolean = seedMutex.withLock {
         if (seedNodes.findRule(id) { it.id } == null) return@withLock false
@@ -439,8 +502,12 @@ internal class DaemonRuntime(
         else -> emptyList()
     }
 
+    // Every mutation lands through one of these, so the sweep for bodies whose rule is gone sits here
+    // rather than at each call site — a group deleted with its rules drops its fixtures like a single
+    // removal does, without either path having to remember to say so.
     private suspend fun pushMapLocal(enabled: Boolean) {
-        host.replaceMapLocalRules(mapLocalNodes.toHostRules(), enabled)
+        ruleBodies.retain(RULE_FAMILY_MAP_LOCAL, mapLocalNodes.flattenRules().map { it.id })
+        host.replaceMapLocalRules(mapLocalNodes.toHostRules(::mapLocalBody), enabled)
         persistMapLocal()
     }
 
@@ -450,9 +517,14 @@ internal class DaemonRuntime(
     }
 
     private suspend fun pushSeeds(enabled: Boolean) {
-        host.replaceSeeds(seedNodes.toHostSeeds(), enabled)
+        ruleBodies.retain(RULE_FAMILY_SEEDS, seedNodes.flattenRules().map { it.id })
+        host.replaceSeeds(seedNodes.toHostSeeds(::seedBody), enabled)
         persistSeeds()
     }
+
+    private fun mapLocalBody(id: String): ByteArray = ruleBodies.body(RULE_FAMILY_MAP_LOCAL, id)
+
+    private fun seedBody(id: String): ByteArray = ruleBodies.body(RULE_FAMILY_SEEDS, id)
 
     fun updateCaptureFilter(
         allowlistEnabled: Boolean,
@@ -502,16 +574,27 @@ internal class DaemonRuntime(
     private fun restoreFixtures() {
         runBlocking {
             fixtures.loadMapLocalIfPresent()?.let { mapLocal ->
-                mapLocalNodes = mapLocal.resolvedNodes()
-                host.replaceMapLocalRules(mapLocalNodes.toHostRules(), mapLocal.enabled)
+                val restored = mapLocal.resolvedNodes()
+                ruleBodies.load(RULE_FAMILY_MAP_LOCAL, restored.flattenRules().map { it.id })
+                val migrated = adoptInlineMapLocalBodies(restored)
+                mapLocalNodes = migrated ?: restored
+                ruleBodies.retain(RULE_FAMILY_MAP_LOCAL, mapLocalNodes.flattenRules().map { it.id })
+                host.replaceMapLocalRules(mapLocalNodes.toHostRules(::mapLocalBody), mapLocal.enabled)
+                // The rewrite is what drops the inline copies, so it only runs where there were some.
+                if (migrated != null) persistMapLocal()
             }
             fixtures.loadBreakpointsIfPresent()?.let { breakpoints ->
                 breakpointNodes = breakpoints.resolvedNodes()
                 host.replaceBreakpointRules(breakpointNodes.toHostBreakpointRules(), breakpoints.enabled)
             }
             fixtures.loadSeedsIfPresent()?.let { seeds ->
-                seedNodes = seeds.resolvedNodes()
-                host.replaceSeeds(seedNodes.toHostSeeds(), seeds.enabled)
+                val restored = seeds.resolvedNodes()
+                ruleBodies.load(RULE_FAMILY_SEEDS, restored.flattenRules().map { it.id })
+                val migrated = adoptInlineSeedBodies(restored)
+                seedNodes = migrated ?: restored
+                ruleBodies.retain(RULE_FAMILY_SEEDS, seedNodes.flattenRules().map { it.id })
+                host.replaceSeeds(seedNodes.toHostSeeds(::seedBody), seeds.enabled)
+                if (migrated != null) persistSeeds()
             }
             fixtures.loadCaptureFilterIfPresent()?.let { filter ->
                 host.updateCaptureFilter(
@@ -523,6 +606,45 @@ internal class DaemonRuntime(
                 )
             }
             bookmarkedHosts = fixtures.loadBookmarks().hosts
+        }
+    }
+
+    /**
+     * Move bodies a build before ADR-0086 wrote inline into the body store, and hand back the layout with
+     * each one replaced by its reference. Null when nothing was inline, which is what keeps this from
+     * rewriting the file on every start — and what makes it a one-shot rather than a versioned migration.
+     *
+     * Twinned with [adoptInlineSeedBodies] rather than shared: the two DTOs have no supertype, and an
+     * interface plus three lambdas to spare a dozen lines is a worse trade than the repetition. They are
+     * deleted together whenever the legacy field goes.
+     */
+    private fun adoptInlineMapLocalBodies(
+        nodes: List<DaemonRuleNode<MapLocalRuleDto>>,
+    ): List<DaemonRuleNode<MapLocalRuleDto>>? {
+        if (nodes.flattenRules().none { it.bodyBase64.isNotEmpty() }) return null
+        return nodes.mapRules { rule ->
+            if (rule.bodyBase64.isEmpty()) {
+                rule
+            } else {
+                val bytes = rule.bodyBase64.decodeInlineBody()
+                ruleBodies.put(RULE_FAMILY_MAP_LOCAL, rule.id, bytes)
+                rule.copy(bodySize = bytes.size, bodyHash = bodyDigest(bytes), bodyBase64 = "")
+            }
+        }
+    }
+
+    private fun adoptInlineSeedBodies(
+        nodes: List<DaemonRuleNode<SeedRuleDto>>,
+    ): List<DaemonRuleNode<SeedRuleDto>>? {
+        if (nodes.flattenRules().none { it.bodyBase64.isNotEmpty() }) return null
+        return nodes.mapRules { seed ->
+            if (seed.bodyBase64.isEmpty()) {
+                seed
+            } else {
+                val bytes = seed.bodyBase64.decodeInlineBody()
+                ruleBodies.put(RULE_FAMILY_SEEDS, seed.id, bytes)
+                seed.copy(bodySize = bytes.size, bodyHash = bodyDigest(bytes), bodyBase64 = "")
+            }
         }
     }
 
@@ -823,14 +945,26 @@ internal class DaemonServer(
                 runtime.setBookmarked(value.host, value.bookmarked)
                 success()
             }
+            "read_rule_body" -> {
+                val value = request.decode(ReadRuleBodyRequest.serializer())
+                if (value.family !in RULE_FAMILIES) {
+                    unknownFamily(value.family)
+                } else {
+                    // Not clamped the way `read_body` is: that cap keeps a caller from pulling a spooled
+                    // multi-gigabyte capture into the heap, while a rule body is already resident here.
+                    // Clamping could only ever shorten a fixture the caller is about to save back.
+                    val bytes = runtime.readRuleBody(value.family, value.id, value.offset, value.length)
+                    success(DaemonJson.encodeToJsonElement(ReadRuleBodyResponse(bytes.encodeBase64())))
+                }
+            }
             "replace_map_local" -> {
                 val value = request.decode(ReplaceMapLocalRequest.serializer())
-                runtime.replaceMapLocal(value.nodes, value.enabled)
+                runtime.replaceMapLocal(value.nodes, value.enabled, value.bodies.decodeBodies())
                 success()
             }
             "upsert_map_local" -> {
                 val value = request.decode(UpsertMapLocalRequest.serializer())
-                if (runtime.upsertMapLocal(value.rule, value.groupId)) {
+                if (runtime.upsertMapLocal(value.rule, value.groupId, value.body?.decodeInlineBody())) {
                     success()
                 } else {
                     unknownGroup(value.groupId)
@@ -869,12 +1003,12 @@ internal class DaemonServer(
             }
             "replace_seeds" -> {
                 val value = request.decode(ReplaceSeedsRequest.serializer())
-                runtime.replaceSeeds(value.nodes, value.enabled)
+                runtime.replaceSeeds(value.nodes, value.enabled, value.bodies.decodeBodies())
                 success()
             }
             "upsert_seed" -> {
                 val value = request.decode(UpsertSeedRequest.serializer())
-                if (runtime.upsertSeed(value.seed, value.groupId)) {
+                if (runtime.upsertSeed(value.seed, value.groupId, value.body?.decodeInlineBody())) {
                     success()
                 } else {
                     unknownGroup(value.groupId)

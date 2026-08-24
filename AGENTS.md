@@ -38,6 +38,14 @@ held, mapped, or answered by a seed on the daemon, so a frontend never resolves 
    its `BodyStore` on receipt and the daemon's implementation keeps them encrypted on disk, so a capture
    is bounded by the volume, not by RAM. Never put bytes back on `CapturedExchange`, in a snapshot, or in
    a poll; fetch a bounded range when something is actually about to show or send it.
+   An *authored* body — a Map Local fixture, a seed — obeys the same rule for the same reason (ADR-0086):
+   the rule carries `bodySize` + `bodyHash`, `DaemonRuleBodyStore` holds the bytes one file per rule, and a
+   frontend fetches one through `read_rule_body` only when it is about to show or send it. Never put bytes
+   back on a rule DTO, in `map-local.json`/`seeds.json`, or in a poll — a fixture is megabytes and a toggle
+   is a click, so anything that ships them together makes the click cost the fixture set. The two stores are
+   not interchangeable: `BodyStore` is capture-session state and is *meant* to be cleared, so an authored
+   body must never live there. A frontend may stage bytes it is authoring, but only until the daemon reports
+   the matching digest back.
 
 ## Module dependency rules
 

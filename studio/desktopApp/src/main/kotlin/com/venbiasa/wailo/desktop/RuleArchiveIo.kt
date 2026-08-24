@@ -8,6 +8,7 @@ import com.venbiasa.wailo.shared.MapLocalRuleDef
 import com.venbiasa.wailo.shared.RuleArchive
 import com.venbiasa.wailo.shared.SeedNode
 import com.venbiasa.wailo.shared.SeedRuleDef
+import com.venbiasa.wailo.shared.allRules
 import com.venbiasa.wailo.shared.mergeIn
 import com.venbiasa.wailo.shared.toArchived
 import com.venbiasa.wailo.shared.toArchivedNodes
@@ -40,7 +41,7 @@ data class ArchiveImport(
  * Collects everything authored into one archive. Bodies come back as container entries rather than
  * fields on the manifest, so this returns both halves together.
  */
-fun buildArchive(
+suspend fun buildArchive(
     mapLocalNodes: List<MapLocalNode>,
     mapLocalEnabled: Boolean,
     breakpointNodes: List<BreakpointNode>,
@@ -48,16 +49,25 @@ fun buildArchive(
     seedNodes: List<SeedNode>,
     seedsEnabled: Boolean,
     captureFilter: CaptureFilterState,
-    mapLocalBody: (String) -> ByteArray,
-    seedBody: (String) -> ByteArray,
+    // Suspending because a body is fetched from the daemon one rule at a time (ADR-0086). An export is
+    // the one caller that wants all of them, and it pulls each once on its way into the zip.
+    mapLocalBody: suspend (String) -> ByteArray,
+    seedBody: suspend (String) -> ByteArray,
 ): ArchiveContents {
     val bodies = mutableMapOf<String, ByteArray>()
 
+    // Fetched up front rather than inside the conversions below, which are `shared`'s and not suspending.
+    // Every one is bound for the zip anyway, so nothing is held that was not about to be.
+    val mapLocalBytes = mapLocalNodes.allRules().associate { it.id to mapLocalBody(it.id) }
+    val seedBytes = seedNodes.allRules().associate { it.id to seedBody(it.id) }
+
     val mapLocal = mapLocalNodes.toArchivedNodes { rule ->
-        rule.toArchived(bodies.addBody("map-local", rule.id, rule.bodyExtension(), mapLocalBody(rule.id)))
+        val entry = bodies.addBody("map-local", rule.id, rule.bodyExtension(), mapLocalBytes.bytesFor(rule.id))
+        rule.toArchived(entry)
     }
     val seeds = seedNodes.toArchivedNodes { seed ->
-        seed.toArchived(bodies.addBody("seeds", seed.id, seed.bodyExtension(), seedBody(seed.id)))
+        val entry = bodies.addBody("seeds", seed.id, seed.bodyExtension(), seedBytes.bytesFor(seed.id))
+        seed.toArchived(entry)
     }
 
     return ArchiveContents(
@@ -154,6 +164,8 @@ private fun MutableMap<String, ByteArray>.addBody(tool: String, id: String, exte
     put(name, bytes)
     return name
 }
+
+private fun Map<String, ByteArray>.bytesFor(id: String): ByteArray = this[id] ?: ByteArray(0)
 
 // The rule's own Content-Type decides the entry's extension, so a body opens in the right editor when
 // someone browses the archive instead of importing it.

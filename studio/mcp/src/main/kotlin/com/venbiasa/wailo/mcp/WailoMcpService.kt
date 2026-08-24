@@ -390,11 +390,14 @@ internal class WailoMcpService(
         )
     }
 
-    private fun getMapLocal(arguments: ToolArguments): McpToolResponse {
+    private suspend fun getMapLocal(arguments: ToolArguments): McpToolResponse {
         val id = arguments.requiredString("id")
         val bodyLimit = arguments.int("body_bytes", DEFAULT_BODY_LIMIT).inRange("body_bytes", 0..MAX_BODY_LIMIT)
         val rule = backend.mapLocalRules.firstOrNull { it.id == id }
             ?: throw ToolFailure("Map Local rule not found: $id")
+        // Fetched here rather than arriving with the rule: a layout names its bodies (ADR-0086), so the
+        // bytes cross only for the one fixture actually being looked at.
+        val body = backend.readRuleBody(RULE_FAMILY_MAP_LOCAL, id, bodyLimit)
         return success(
             "Map Local rule $id",
             mapOf(
@@ -402,7 +405,7 @@ internal class WailoMcpService(
                 // non-matching pattern from the device side.
                 "map_local_enabled" to backend.mapLocalEnabled,
                 "rule" to mapLocalSummary(rule) +
-                    mapOf("body" to renderBody(rule.bodyCopy(), rule.headers, bodyLimit)),
+                    mapOf("body" to ruleBodyData(body, rule.bodySize, rule.headers, bodyLimit)),
             ),
         )
     }
@@ -557,17 +560,18 @@ internal class WailoMcpService(
         )
     }
 
-    private fun getSeed(arguments: ToolArguments): McpToolResponse {
+    private suspend fun getSeed(arguments: ToolArguments): McpToolResponse {
         val id = arguments.requiredString("id")
         val bodyLimit = arguments.int("body_bytes", DEFAULT_BODY_LIMIT).inRange("body_bytes", 0..MAX_BODY_LIMIT)
         val seed = backend.seeds.firstOrNull { it.id == id } ?: throw ToolFailure("Seed not found: $id")
         val armed = backend.seedQueue.mapTo(mutableSetOf()) { it.id }
+        val body = backend.readRuleBody(RULE_FAMILY_SEEDS, id, bodyLimit)
         return success(
             "Seed $id",
             mapOf(
                 "seeds_enabled" to backend.seedsEnabled,
                 "seed" to seedSummary(seed, armed) +
-                    mapOf("body" to renderBody(seed.bodyCopy(), seed.headers, bodyLimit)),
+                    mapOf("body" to ruleBodyData(body, seed.bodySize, seed.headers, bodyLimit)),
             ),
         )
     }
@@ -732,6 +736,22 @@ internal class WailoMcpService(
             "captured_bytes" to capturedBytes,
             "declared_bytes" to declaredSize,
             "source_truncated" to sourceTruncated,
+        )
+    }
+
+    /**
+     * The rule-body twin of [bodyData]. A fixture body is fetched as a prefix now that a layout only
+     * names it (ADR-0086), so "there was more" has to come back from the rule's declared size.
+     */
+    private fun ruleBodyData(
+        bytes: ByteArray,
+        ruleBytes: Int,
+        headers: List<Header>,
+        limit: Int,
+    ): Map<String, Any?> {
+        val rendered = renderBody(bytes, headers, limit)
+        return rendered + mapOf(
+            "output_truncated" to (rendered["output_truncated"] == true || bytes.size < ruleBytes),
         )
     }
 

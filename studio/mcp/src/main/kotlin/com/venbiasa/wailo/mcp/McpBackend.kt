@@ -2,6 +2,8 @@ package com.venbiasa.wailo.mcp
 
 import com.venbiasa.wailo.daemon.DaemonClient
 import com.venbiasa.wailo.daemon.DaemonRuleGroup
+import com.venbiasa.wailo.daemon.RULE_FAMILY_MAP_LOCAL
+import com.venbiasa.wailo.daemon.RULE_FAMILY_SEEDS
 import com.venbiasa.wailo.daemon.groupIdByRule
 import com.venbiasa.wailo.daemon.groups
 import com.venbiasa.wailo.engine.BodyRef
@@ -91,6 +93,12 @@ internal interface McpBackend {
 
     suspend fun removeRuleGroup(family: String, id: String, withRules: Boolean): Boolean
 
+    /**
+     * A bounded read of one authored fixture's body. A rule arrives naming its body rather than carrying
+     * it (ADR-0086), so `list_*` reports the size and this is what `get_*` shows.
+     */
+    suspend fun readRuleBody(family: String, id: String, limit: Int): ByteArray
+
     suspend fun upsertMapLocalRule(rule: HostMapLocalRule, groupId: String?)
     suspend fun removeMapLocalRule(id: String): Boolean
     suspend fun setMapLocalEnabled(enabled: Boolean)
@@ -169,6 +177,9 @@ internal class DaemonMcpBackend(
 
     override suspend fun removeRuleGroup(family: String, id: String, withRules: Boolean) =
         daemon.removeRuleGroup(family, id, withRules)
+
+    override suspend fun readRuleBody(family: String, id: String, limit: Int) =
+        daemon.readRuleBody(family, id, length = limit)
 
     override suspend fun upsertMapLocalRule(rule: HostMapLocalRule, groupId: String?) =
         daemon.upsertMapLocalRule(rule, groupId)
@@ -260,6 +271,17 @@ internal class LocalMcpBackend(
 
     private fun rejectGroup(groupId: String?) {
         if (!groupId.isNullOrEmpty()) refuseGroups()
+    }
+
+    // This backend's rules never left the process, so they still carry their bytes and the read is a copy
+    // rather than a fetch — the seam exists for the daemon-backed one beside it.
+    override suspend fun readRuleBody(family: String, id: String, limit: Int): ByteArray {
+        val body = when (family) {
+            RULE_FAMILY_MAP_LOCAL -> host.mapLocalRules.value.firstOrNull { it.id == id }?.bodyCopy()
+            RULE_FAMILY_SEEDS -> host.seeds.value.firstOrNull { it.id == id }?.bodyCopy()
+            else -> null
+        } ?: return ByteArray(0)
+        return body.copyOf(minOf(body.size, limit.coerceAtLeast(0)))
     }
 
     override suspend fun upsertMapLocalRule(rule: HostMapLocalRule, groupId: String?) {

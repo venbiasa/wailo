@@ -21,13 +21,20 @@ class HostMapLocalRule(
     val statusCode: Int = 200,
     headers: List<Header> = emptyList(),
     body: ByteArray = ByteArray(0),
+    /**
+     * What the daemon holds for this rule, described rather than carried (ADR-0086). The daemon passes
+     * the real [body] and these simply agree with it; a frontend receives the rule without its bytes and
+     * these are all it knows about them — the size a panel shows, and the digest an open editor keys its
+     * fetch on. Never consulted when serving, which always uses the bytes themselves.
+     */
+    bodySize: Int = body.size,
+    val bodyHash: String = "",
 ) {
     val methods: List<String> = methods.toList()
     val headers: List<Header> = headers.toList()
     private val bodyBytes = body.copyOf()
 
-    val bodySize: Int
-        get() = bodyBytes.size
+    val bodySize: Int = bodySize
 
     fun bodyCopy(): ByteArray = bodyBytes.copyOf()
 

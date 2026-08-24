@@ -185,6 +185,7 @@ class DaemonClient internal constructor(
     private var breakpointHash: String? = null
     private var seedHash: String? = null
     private var holdsHash: String? = null
+    private var captureFilterHash: String? = null
 
     // The poll loop has to keep retrying rather than fail, so the reason it is not connected would
     // otherwise be lost and a frontend could only report "not ready" with no cause.
@@ -259,6 +260,31 @@ class DaemonClient internal constructor(
             "read_body",
             DaemonJson.encodeToJsonElement(ReadBodyRequest(ref.id, ref.size, offset, length)),
             ReadBodyResponse.serializer(),
+        )
+        return response.bytesBase64.decodeBase64()
+    }
+
+    /**
+     * Fetch an authored rule's body — the fixture counterpart of [readBody] (ADR-0086). A layout names
+     * its bodies rather than carrying them, so whatever is about to show or export one asks for it here.
+     * [family] is one of the `RULE_FAMILY_*` ids.
+     *
+     * The default reads the whole body, and unlike [readBody] there is no cap to page around: the bytes
+     * are already resident in the daemon, so the range is bounded by the body itself. A short read would
+     * be indistinguishable from a shorter fixture, and the editor and the exporter both save back what
+     * they were given. [length] is for the callers that genuinely want a preview.
+     */
+    suspend fun readRuleBody(
+        family: String,
+        id: String,
+        offset: Long = 0,
+        length: Int = Int.MAX_VALUE,
+    ): ByteArray {
+        if (length <= 0) return ByteArray(0)
+        val response = rpc.call(
+            "read_rule_body",
+            DaemonJson.encodeToJsonElement(ReadRuleBodyRequest(family, id, offset, length)),
+            ReadRuleBodyResponse.serializer(),
         )
         return response.bytesBase64.decodeBase64()
     }
@@ -432,10 +458,26 @@ class DaemonClient internal constructor(
         }
     }
 
-    /** Replaces the whole panel, grouping included — the authoring frontend's single mutation. */
-    suspend fun replaceMapLocalNodes(nodes: List<DaemonRuleNode<HostMapLocalRule>>, enabled: Boolean) {
+    /**
+     * Replaces the whole panel, grouping included — the authoring frontend's single mutation.
+     *
+     * [bodies] carries only the rules whose bytes are changing (ADR-0086); every other rule keeps what
+     * the daemon already holds, which is what makes a reorder or a toggle cost a few hundred bytes
+     * instead of the whole fixture set.
+     *
+     * The local copy below adopts the layout as sent, references and all, which for a rule whose body
+     * just changed still describes the old one until the next poll. That staleness is deliberate: the
+     * digest is how an author knows the daemon has taken its bytes, so computing one here would report a
+     * write as landed before it had.
+     */
+    suspend fun replaceMapLocalNodes(
+        nodes: List<DaemonRuleNode<HostMapLocalRule>>,
+        enabled: Boolean,
+        bodies: Map<String, ByteArray> = emptyMap(),
+    ) {
         val dtos = nodes.mapRules { it.toDto() }
-        command("replace_map_local", ReplaceMapLocalRequest(enabled, dtos))
+        val sent = bodies + nodes.carriedBodies { it.id to it.bodyCopy() }
+        command("replace_map_local", ReplaceMapLocalRequest(enabled, dtos, sent.encodeBodies()))
         applyMapLocal(dtos)
         _mapLocalEnabled.value = enabled
     }
@@ -444,10 +486,17 @@ class DaemonClient internal constructor(
      * Adds or edits one rule, optionally filing it into [groupId] — the headless frontends' mutation,
      * since an agent edits one rule rather than redrawing a panel it cannot see. Fails when the group is
      * unknown, so a mistyped id is reported instead of quietly landing the rule somewhere else.
+     *
+     * The body rides inline, unlike a layout publish: this call is about one rule, so naming the bytes
+     * would save nothing. A null [body] leaves the stored one alone.
      */
-    suspend fun upsertMapLocalRule(rule: HostMapLocalRule, groupId: String? = null) {
+    suspend fun upsertMapLocalRule(
+        rule: HostMapLocalRule,
+        groupId: String? = null,
+        body: ByteArray? = rule.bodyCopy(),
+    ) {
         val dto = rule.toDto()
-        command("upsert_map_local", UpsertMapLocalRequest(dto, groupId))
+        command("upsert_map_local", UpsertMapLocalRequest(dto, groupId, body?.encodeBase64()))
         mapLocalNodeDtos.upsertRule(dto, groupId) { it.id }?.let(::applyMapLocal)
     }
 
@@ -486,16 +535,26 @@ class DaemonClient internal constructor(
         _breakpointsEnabled.value = enabled
     }
 
-    suspend fun replaceSeedNodes(nodes: List<DaemonRuleNode<HostSeed>>, enabled: Boolean) {
+    /** Seeds publish exactly like Map Local above, bodies apart from the layout (ADR-0086). */
+    suspend fun replaceSeedNodes(
+        nodes: List<DaemonRuleNode<HostSeed>>,
+        enabled: Boolean,
+        bodies: Map<String, ByteArray> = emptyMap(),
+    ) {
         val dtos = nodes.mapRules { it.toDto() }
-        command("replace_seeds", ReplaceSeedsRequest(enabled, dtos))
+        val sent = bodies + nodes.carriedBodies { it.id to it.bodyCopy() }
+        command("replace_seeds", ReplaceSeedsRequest(enabled, dtos, sent.encodeBodies()))
         applySeeds(dtos)
         _seedsEnabled.value = enabled
     }
 
-    suspend fun upsertSeed(seed: HostSeed, groupId: String? = null) {
+    suspend fun upsertSeed(
+        seed: HostSeed,
+        groupId: String? = null,
+        body: ByteArray? = seed.bodyCopy(),
+    ) {
         val dto = seed.toDto()
-        command("upsert_seed", UpsertSeedRequest(dto, groupId))
+        command("upsert_seed", UpsertSeedRequest(dto, groupId, body?.encodeBase64()))
         seedNodeDtos.upsertRule(dto, groupId) { it.id }?.let(::applySeeds)
     }
 
@@ -645,10 +704,12 @@ class DaemonClient internal constructor(
     private var breakpointNodeDtos: List<DaemonRuleNode<BreakpointRuleDto>> = emptyList()
     private var seedNodeDtos: List<DaemonRuleNode<SeedRuleDto>> = emptyList()
 
+    // A rule arrives described, not carried: every rule here has an empty body and the size and digest
+    // the daemon reported for it (ADR-0086). Anything that needs the bytes calls [readRuleBody].
     private fun applyMapLocal(nodes: List<DaemonRuleNode<MapLocalRuleDto>>) {
         mapLocalNodeDtos = nodes
         _mapLocalNodes.value = nodes.mapRules { it.toDomain() }
-        _mapLocalRules.value = nodes.toHostRules()
+        _mapLocalRules.value = nodes.toHostRules { ByteArray(0) }
     }
 
     private fun applyBreakpoints(nodes: List<DaemonRuleNode<BreakpointRuleDto>>) {
@@ -660,7 +721,7 @@ class DaemonClient internal constructor(
     private fun applySeeds(nodes: List<DaemonRuleNode<SeedRuleDto>>) {
         seedNodeDtos = nodes
         _seedNodes.value = nodes.mapRules { it.toDomain() }
-        _seeds.value = nodes.toHostSeeds()
+        _seeds.value = nodes.toHostSeeds { ByteArray(0) }
     }
 
     private suspend fun pollOnce(): Boolean {
@@ -672,6 +733,7 @@ class DaemonClient internal constructor(
             breakpointHash = breakpointHash,
             seedHash = seedHash,
             holdsHash = holdsHash,
+            captureFilterHash = captureFilterHash,
         )
         val response = rpc.call(
             "poll",
@@ -696,7 +758,8 @@ class DaemonClient internal constructor(
         _capturing.value = response.capturing
         _maxRetained.value = response.maxRetained
         _connectedDevices.value = response.connectedDevices.map(ConnectedDeviceDto::toDomain)
-        _captureFilter.value = response.captureFilterBase64.decodeCaptureFilter()
+        response.captureFilterBase64?.let { _captureFilter.value = it.decodeCaptureFilter() }
+        captureFilterHash = response.captureFilterHash
         _captureFilterEnabled.value = response.captureFilterEnabled
         _bookmarkedHosts.value = response.bookmarkedHosts
         response.holds?.let { _pausedExchanges.value = it.map(PausedExchangeDto::toDomain) }
@@ -1115,6 +1178,18 @@ object DaemonLauncher {
     /** Written once by an agent that found no system tray, so this machine stops being asked. */
     fun menubarUnsupportedPath(): Path = wailoStateDir().resolve("menubar.unsupported")
 }
+
+/**
+ * The bytes a caller put on the rules themselves, which a DTO no longer carries (ADR-0086). Studio
+ * publishes rules read back from the daemon and so contributes nothing here; a headless caller that
+ * built its rules in memory would otherwise have its bodies silently dropped.
+ */
+private fun <T> List<DaemonRuleNode<T>>.carriedBodies(
+    body: (T) -> Pair<String, ByteArray>,
+): Map<String, ByteArray> = flatMap { it.rules }
+    .map(body)
+    .filter { (_, bytes) -> bytes.isNotEmpty() }
+    .toMap()
 
 private fun PairingDto.toPublic() = DaemonPairingState(
     supported = supported,

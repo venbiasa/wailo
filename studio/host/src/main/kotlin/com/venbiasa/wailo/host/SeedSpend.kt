@@ -24,12 +24,14 @@ class HostSeed(
     val statusCode: Int = 200,
     headers: List<Header> = emptyList(),
     body: ByteArray = ByteArray(0),
+    /** The daemon's body described rather than carried, exactly as on `HostMapLocalRule` (ADR-0086). */
+    bodySize: Int = body.size,
+    val bodyHash: String = "",
 ) {
     val headers: List<Header> = headers.toList()
     private val bodyBytes = body.copyOf()
 
-    val bodySize: Int
-        get() = bodyBytes.size
+    val bodySize: Int = bodySize
 
     fun bodyCopy(): ByteArray = bodyBytes.copyOf()
 
