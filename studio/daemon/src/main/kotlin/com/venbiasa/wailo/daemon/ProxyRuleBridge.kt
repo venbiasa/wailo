@@ -3,6 +3,7 @@ package com.venbiasa.wailo.daemon
 import com.venbiasa.wailo.host.HeadlessHost
 import com.venbiasa.wailo.host.HostBreakpointRule
 import com.venbiasa.wailo.host.captureFilterAdmits
+import com.venbiasa.wailo.host.methodPatternMatches
 import com.venbiasa.wailo.host.urlPatternMatches
 import com.venbiasa.wailo.protocol.BreakpointAction
 import com.venbiasa.wailo.protocol.BreakpointDecision
@@ -112,7 +113,7 @@ internal class HostProxyRules(private val host: HeadlessHost) : ProxyRules {
         if (!host.areBreakpointsEnabled()) return null
         return host.breakpointRules.value.firstOrNull { rule ->
             rule.enabled && urlPatternMatches(rule.urlPattern, url) &&
-                (rule.methods.isEmpty() || rule.methods.any { it.equals(method, ignoreCase = true) })
+                methodPatternMatches(rule.method, method)
         }
     }
 
@@ -125,7 +126,7 @@ internal class HostProxyRules(private val host: HeadlessHost) : ProxyRules {
         if (!host.isMapLocalEnabled()) return null
         val rule = host.mapLocalRules.value.firstOrNull { candidate ->
             candidate.enabled && urlPatternMatches(candidate.urlPattern, request.url) &&
-                (candidate.methods.isEmpty() || candidate.methods.any { it.equals(request.method, ignoreCase = true) })
+                methodPatternMatches(candidate.method, request.method)
         } ?: return null
         val provider = host.engine.bodyProvider ?: return null
         val served = runBlocking { provider.serve(rule.id, request.url, request.method) } ?: return null

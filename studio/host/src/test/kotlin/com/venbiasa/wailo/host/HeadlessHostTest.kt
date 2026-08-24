@@ -90,7 +90,7 @@ class HeadlessHostTest {
                 HostMapLocalRule(
                     id = "fixture",
                     urlPattern = "https://api.example.com/*",
-                    methods = listOf("GET"),
+                    method = "GET",
                     statusCode = 201,
                     headers = listOf(Header(name = "Content-Type", value_ = "application/json")),
                     body = """{"ok":true}""".toByteArray(),
@@ -130,7 +130,7 @@ class HeadlessHostTest {
                 HostBreakpointRule(
                     id = "errors",
                     urlPattern = "https://api.example.com/*",
-                    methods = listOf("POST"),
+                    method = "POST",
                     onRequest = true,
                     onResponse = false,
                 ),
@@ -138,6 +138,7 @@ class HeadlessHostTest {
 
             val pushed = engine.breakpointRules.value.rules.single()
             assertEquals("errors", pushed.id)
+            // The wire field stays repeated as a fold target, so one method is a one-element list (ADR-0087).
             assertEquals(listOf("POST"), pushed.methods)
             assertTrue(pushed.on_request)
             assertFalse(pushed.on_response)

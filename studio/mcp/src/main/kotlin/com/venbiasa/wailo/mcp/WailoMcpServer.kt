@@ -193,7 +193,8 @@ internal object WailoMcpTools {
                 "id" to string("Stable rule id"),
                 "name" to string("Author-facing label shown in Studio; not used for matching"),
                 "url_pattern" to string("Full-URL wildcard pattern where * matches any characters"),
-                "methods" to stringArray("HTTP methods; empty or omitted means any"),
+                "method" to string("The one HTTP method to match; blank or omitted means any"),
+                "methods" to legacyMethods(),
                 "enabled" to boolean("Whether this rule is active"),
                 "status_code" to integer("Mock response status", minimum = 100, maximum = 599),
                 "headers" to headers(),
@@ -254,7 +255,8 @@ internal object WailoMcpTools {
             objectSchema(
                 "id" to string("Stable rule id"),
                 "url_pattern" to string("Full-URL wildcard pattern where * matches any characters"),
-                "methods" to stringArray("HTTP methods; empty or omitted means any"),
+                "method" to string("The one HTTP method to match; blank or omitted means any"),
+                "methods" to legacyMethods(),
                 "enabled" to boolean("Whether this rule is active"),
                 "on_request" to boolean("Pause before the request is sent; defaults false"),
                 "on_response" to boolean("Pause before the response reaches the app; defaults true"),
@@ -448,6 +450,15 @@ private fun stringArray(description: String): Map<String, Any> = mapOf(
     "type" to "array",
     "description" to description,
     "items" to mapOf("type" to "string"),
+)
+
+/**
+ * Still described rather than dropped, because these schemas set `additionalProperties: false` — a
+ * validating client would refuse the array before the collapse could happen, so a prompt written against
+ * the old shape has to keep working (ADR-0087).
+ */
+private fun legacyMethods(): Map<String, Any> = stringArray(
+    "Deprecated: use method. A rule matches one method, so only the last entry here is kept.",
 )
 
 private fun ruleFamily(): Map<String, Any> = enumString(

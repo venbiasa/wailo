@@ -7,17 +7,16 @@ class HostBreakpointRule(
     val id: String,
     val enabled: Boolean = true,
     val urlPattern: String,
-    methods: List<String> = emptyList(),
+    /** One method, or blank for any — the same scalar contract Map Local carries (ADR-0087). */
+    val method: String = "",
     val onRequest: Boolean = false,
     val onResponse: Boolean = true,
 ) {
-    val methods: List<String> = methods.toList()
-
     internal fun toProtocolRule() = BreakpointRule(
         id = id,
         enabled = enabled,
         url_pattern = urlPattern,
-        methods = methods,
+        methods = listOfNotNull(method.takeIf { it.isNotBlank() }),
         on_request = onRequest,
         on_response = onResponse,
     )

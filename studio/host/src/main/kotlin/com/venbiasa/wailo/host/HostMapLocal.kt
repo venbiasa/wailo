@@ -17,7 +17,11 @@ class HostMapLocalRule(
     val name: String = "",
     val enabled: Boolean = true,
     val urlPattern: String,
-    methods: List<String> = emptyList(),
+    /**
+     * The one HTTP method this rule matches, or blank for any (ADR-0087). Scalar because every authoring
+     * surface is — a model that could hold two only ever got them silently rewritten.
+     */
+    val method: String = "",
     val statusCode: Int = 200,
     headers: List<Header> = emptyList(),
     body: ByteArray = ByteArray(0),
@@ -30,7 +34,6 @@ class HostMapLocalRule(
     bodySize: Int = body.size,
     val bodyHash: String = "",
 ) {
-    val methods: List<String> = methods.toList()
     val headers: List<Header> = headers.toList()
     private val bodyBytes = body.copyOf()
 
@@ -42,12 +45,14 @@ class HostMapLocalRule(
         id = id,
         enabled = enabled,
         url_pattern = urlPattern,
-        methods = methods,
+        // The wire field stays repeated as a pure fold target (ADR-0087): one method is a one-element
+        // list, any is an empty one. Narrowing it would reach Wire's Swift codegen and both SDKs.
+        methods = listOfNotNull(method.takeIf { it.isNotBlank() }),
     )
 
     internal fun serve(url: String, method: String): ServedBody? {
         if (!enabled || !urlPatternMatches(urlPattern, url)) return null
-        if (methods.isNotEmpty() && methods.none { it.equals(method, ignoreCase = true) }) return null
+        if (!methodPatternMatches(this.method, method)) return null
         return ServedBody(
             code = statusCode,
             headers = normalizedHeaders(headers, bodyBytes.size),

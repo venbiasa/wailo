@@ -256,7 +256,6 @@ class DaemonIntegrationTest {
                                     id = "login",
                                     enabled = true,
                                     urlPattern = "https://example.com/login",
-                                    methods = emptyList(),
                                     statusCode = 200,
                                     headers = emptyList(),
                                     bodyBase64 = body.encodeBase64(),

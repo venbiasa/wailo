@@ -46,7 +46,7 @@ class WailoMcpProtocolTest {
             assertContains(status, """"capture_port":8899""")
 
             clientOutput.sendJson(
-                """{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"set_map_local","arguments":{"id":"fixture","url_pattern":"https://example.com/*","methods":["GET"],"status_code":201,"headers":[{"name":"Content-Type","value":"application/json"}],"body_text":"{\"ok\":true}"}}}""",
+                """{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"set_map_local","arguments":{"id":"fixture","url_pattern":"https://example.com/*","method":"GET","status_code":201,"headers":[{"name":"Content-Type","value":"application/json"}],"body_text":"{\"ok\":true}"}}}""",
             )
             val mutation = reader.readLineWithTimeout()
             assertContains(mutation, """"id":4""")

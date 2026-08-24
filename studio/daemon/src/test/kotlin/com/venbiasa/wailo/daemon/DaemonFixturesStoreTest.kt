@@ -73,6 +73,41 @@ class DaemonFixturesStoreTest {
         }
     }
 
+    /**
+     * A rule persisted before ADR-0087 could name several methods. Collapsing last-wins on load is the
+     * rewrite Studio already performed at the next edit; what must not happen is the field being ignored,
+     * because a GET-only rule read back as "any method" starts answering calls it never matched.
+     */
+    @Test
+    fun aRulePersistedWithSeveralMethodsCollapsesToTheLastOne() {
+        val directory = Files.createTempDirectory("wailo-fixtures-methods")
+        try {
+            Files.writeString(
+                directory.resolve("map-local.json"),
+                """
+                {"enabled":true,"nodes":[{"rules":[{"id":"login","enabled":true,
+                "urlPattern":"https://example.com/login","methods":["GET","POST"],
+                "statusCode":200,"headers":[]}]}]}
+                """.trimIndent(),
+            )
+
+            val loaded = DaemonFixturesStore(directory).loadMapLocal().resolvedNodes()
+            // Narrowed in the copy the daemon holds, not just on the way to the host: a poll carrying a
+            // blank scalar beside a list nobody reads would show up in a frontend as "any method".
+            assertEquals("POST", loaded.single().rules.single().method)
+            assertEquals(null, loaded.single().rules.single().methods)
+            assertEquals("POST", loaded.single().rules.single().toDomain().method)
+
+            // And the next write states the one method and drops the old field for good.
+            DaemonFixturesStore(directory).saveMapLocal(PersistedMapLocal(enabled = true, nodes = loaded))
+            val rewritten = Files.readString(directory.resolve("map-local.json"))
+            assertTrue(rewritten.contains(""""method":"POST""""))
+            assertFalse(rewritten.contains("methods"))
+        } finally {
+            directory.toFile().deleteRecursively()
+        }
+    }
+
     @Test
     fun captureFilterRoundTripsPatternsAndSwitches() {
         val directory = Files.createTempDirectory("wailo-fixtures-filter")

@@ -7,7 +7,7 @@ relations: narrows the authoring contract ADR-0081/0085 gave the daemon; leaves 
 ---
 # ADR-0087 — A rule matches one method, or any
 
-- Status: Accepted, not yet implemented. Decided while auditing what each frontend can author (the same pass that decided a rule-order command and an explicit capture-filter switch).
+- Status: Accepted and implemented. Decided while auditing what each frontend can author (the same pass that decided a rule-order command and an explicit capture-filter switch).
 - Context: a Map Local or breakpoint rule's HTTP method has three different arities depending on where you stand, and only the widest one can express more than a single verb:
   - Studio's editor is a single-select `DropdownMenu` whose options are `["", "GET", "POST", …]` with blank rendering as "Any"; the code says so outright — "A rule matches a single HTTP method" — and the value cannot be free-typed.
   - `shared`'s `MapLocalLayout` / `BreakpointLayout` and the `.wailorules` archive schema each hold one `method: String`. `Main.kt` comma-splits it on publish and re-joins on adoption, which is a bridge to the wider model, not an authoring feature — the picker can never produce a second entry.
@@ -26,7 +26,8 @@ relations: narrows the authoring contract ADR-0081/0085 gave the daemon; leaves 
   - **Keep the list in the model and merely constrain what authoring can write.** Cheapest of all, and rejected because it leaves exactly what caused this: a state the system can represent and hold but no surface can produce or preserve. A model wider than every writer is where silent rewrites live.
   - **Reject more than one method instead of collapsing it.** Right for an API, wrong for a flag — a repeated CLI option that errors breaks the override idiom. The split kept is a documented last-wins collapse in both, made visible in MCP's response where there is a channel to say it.
 - Consequences:
-  - The daemon rule DTOs narrow, so the control protocol bumps again (14 → 15), shared with the rule-order command decided in the same pass if both land together.
+  - The daemon rule DTOs narrow, so the control protocol bumps again (14 → 15) — shared with the rule-order command (ADR-0089), which landed in the same pass.
+  - The collapse has to happen where a persisted file is *read*, not only on the way to the host. A DTO left holding a blank scalar beside a legacy list is reported by a poll as "any method", so a rule that matched GET would start answering everything the moment a frontend redisplayed it. The legacy field stays nullable and unwritten (`explicitNulls = false` omits it) rather than being deleted, because a dropped key parses as nothing and widens the rule just as silently.
   - MCP's `list_map_local` / `get_map_local` / breakpoint output emits `method` where it emitted `methods`. That is breaking for any agent script that indexed the array, which is the one real cost here.
   - `HostMapLocalRule.serve` and the breakpoint match become an equality-or-blank check instead of an any-of scan.
   - The CLI's `--method` help text has to state last-wins; without it a repeated flag looks like it accumulates.

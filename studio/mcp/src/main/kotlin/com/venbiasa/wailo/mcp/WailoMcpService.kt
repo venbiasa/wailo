@@ -285,13 +285,14 @@ internal class WailoMcpService(
         val body = arguments.optionalBody()
         val statusCode = arguments.int("status_code", 200).inRange("status_code", 100..599)
         val groupId = arguments.string("group_id")
+        val method = arguments.method()
         backend.upsertMapLocalRule(
             HostMapLocalRule(
                 id = id,
                 name = arguments.string("name").orEmpty(),
                 enabled = arguments.boolean("enabled", true),
                 urlPattern = pattern,
-                methods = arguments.strings("methods"),
+                method = method.value,
                 statusCode = statusCode,
                 headers = arguments.headers(),
                 body = body ?: ByteArray(0),
@@ -299,13 +300,32 @@ internal class WailoMcpService(
             groupId,
         )
         return success(
-            "Map Local rule $id set",
+            "Map Local rule $id set" + method.note,
             mapOf(
                 "id" to id,
+                "method" to method.value,
                 "body_bytes" to (body?.size ?: 0),
                 "status_code" to statusCode,
                 "group_id" to backend.groupIdByRule(RULE_FAMILY_MAP_LOCAL)[id].orEmpty(),
             ),
+        )
+    }
+
+    /**
+     * The one method this call names (ADR-0087), and what to say if the caller sent more than one. A
+     * legacy `methods` array is still accepted, collapsed last-wins — but an array is not an override the
+     * way a repeated flag is, so the collapse is reported instead of assumed understood.
+     */
+    private class MethodArgument(val value: String, val note: String)
+
+    private fun ToolArguments.method(): MethodArgument {
+        val single = string("method")?.trim().orEmpty()
+        if (single.isNotEmpty()) return MethodArgument(single, "")
+        val legacy = strings("methods").filter { it.isNotBlank() }
+        val kept = legacy.lastOrNull().orEmpty()
+        return MethodArgument(
+            kept,
+            if (legacy.size > 1) " — methods ${legacy.joinToString()} collapsed to $kept" else "",
         )
     }
 
@@ -385,7 +405,7 @@ internal class WailoMcpService(
         "name" to rule.name,
         "enabled" to rule.enabled,
         "url_pattern" to rule.urlPattern,
-        "methods" to rule.methods,
+        "method" to rule.method,
         "status_code" to rule.statusCode,
         "headers" to rule.headers.map(::headerData),
         "body_bytes" to rule.bodySize,
@@ -478,20 +498,25 @@ internal class WailoMcpService(
         val onRequest = arguments.boolean("on_request", false)
         val onResponse = arguments.boolean("on_response", true)
         if (!onRequest && !onResponse) throw ToolFailure("A breakpoint must enable on_request, on_response, or both")
+        val method = arguments.method()
         backend.upsertBreakpointRule(
             HostBreakpointRule(
                 id = id,
                 enabled = arguments.boolean("enabled", true),
                 urlPattern = arguments.requiredString("url_pattern"),
-                methods = arguments.strings("methods"),
+                method = method.value,
                 onRequest = onRequest,
                 onResponse = onResponse,
             ),
             arguments.string("group_id"),
         )
         return success(
-            "Breakpoint $id set",
-            mapOf("id" to id, "group_id" to backend.groupIdByRule(RULE_FAMILY_BREAKPOINTS)[id].orEmpty()),
+            "Breakpoint $id set" + method.note,
+            mapOf(
+                "id" to id,
+                "method" to method.value,
+                "group_id" to backend.groupIdByRule(RULE_FAMILY_BREAKPOINTS)[id].orEmpty(),
+            ),
         )
     }
 
@@ -508,7 +533,7 @@ internal class WailoMcpService(
                 "id" to it.id,
                 "enabled" to it.enabled,
                 "url_pattern" to it.urlPattern,
-                "methods" to it.methods,
+                "method" to it.method,
                 "on_request" to it.onRequest,
                 "on_response" to it.onResponse,
                 "group_id" to groups[it.id].orEmpty(),

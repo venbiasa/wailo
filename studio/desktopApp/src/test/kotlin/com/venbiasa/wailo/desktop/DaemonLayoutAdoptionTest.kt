@@ -133,7 +133,7 @@ class DaemonLayoutAdoptionTest {
                 name = rule.name,
                 enabled = rule.enabled,
                 urlPattern = rule.urlPattern,
-                methods = rule.methods,
+                method = rule.method,
                 statusCode = rule.statusCode,
                 headers = rule.headers + Header(name = "Content-Length", value_ = "4"),
                 bodySize = 4,

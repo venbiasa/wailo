@@ -70,7 +70,7 @@ class WailoMcpServiceTest {
                 mapOf(
                     "id" to "fixture",
                     "url_pattern" to "https://example.com/*",
-                    "methods" to listOf("GET"),
+                    "method" to "GET",
                     "status_code" to 201,
                     "body_text" to """{"ok":true}""",
                 ),
@@ -311,6 +311,47 @@ class WailoMcpServiceTest {
             )
             assertTrue(ordered.isError)
             assertTrue(ordered.text.contains("daemon"))
+        } finally {
+            host.stop()
+        }
+    }
+
+    /**
+     * A rule matches one method (ADR-0087), but a prompt written against the old array has to keep
+     * working — and an array is not an override the way a repeated flag is, so the collapse is said out
+     * loud rather than left to be discovered on the next list.
+     */
+    @Test
+    fun aLegacyMethodsArrayCollapsesToItsLastEntryAndSaysSo() = runBlocking {
+        val engine = WailoEngine()
+        val host = HeadlessHost.wrap(engine)
+        val service = WailoMcpService(host, 8899)
+        try {
+            val two = service.call(
+                "set_map_local",
+                mapOf(
+                    "id" to "fixture",
+                    "url_pattern" to "https://example.com/*",
+                    "methods" to listOf("GET", "POST"),
+                ),
+            )
+            assertFalse(two.isError)
+            assertEquals("POST", two.data["method"])
+            assertTrue(two.text.contains("collapsed to POST"))
+            assertEquals("POST", host.mapLocalRules.value.single().method)
+
+            // The scalar wins outright, and one entry collapses silently — there is nothing to report.
+            val scalar = service.call(
+                "set_map_local",
+                mapOf(
+                    "id" to "fixture",
+                    "url_pattern" to "https://example.com/*",
+                    "method" to "PUT",
+                    "methods" to listOf("GET"),
+                ),
+            )
+            assertEquals("PUT", scalar.data["method"])
+            assertFalse(scalar.text.contains("collapsed"))
         } finally {
             host.stop()
         }

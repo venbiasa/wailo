@@ -299,7 +299,14 @@ internal data class MapLocalRuleDto(
     val id: String,
     val enabled: Boolean,
     val urlPattern: String,
-    val methods: List<String>,
+    val method: String = "",
+    /**
+     * What builds before ADR-0087 wrote, when a rule could name several methods. Read on the way up from
+     * an older `map-local.json` and collapsed last-wins; never written back, since `explicitNulls = false`
+     * omits a null. Dropping the field instead would let an ignored key silently widen a GET-only rule to
+     * every method — the one migration failure that cannot be noticed by looking at the panel.
+     */
+    val methods: List<String>? = null,
     val statusCode: Int,
     val headers: List<HeaderDto>,
     val bodySize: Int = 0,
@@ -319,7 +326,7 @@ internal data class MapLocalRuleDto(
         name = name,
         enabled = enabled,
         urlPattern = urlPattern,
-        methods = methods,
+        method = collapsedMethod(method, methods),
         statusCode = statusCode,
         headers = headers.map(HeaderDto::toDomain),
         body = body,
@@ -335,7 +342,9 @@ internal data class BreakpointRuleDto(
     val id: String,
     val enabled: Boolean,
     val urlPattern: String,
-    val methods: List<String>,
+    val method: String = "",
+    /** Pre-ADR-0087 form, read and collapsed exactly as on [MapLocalRuleDto]. */
+    val methods: List<String>? = null,
     val onRequest: Boolean,
     val onResponse: Boolean,
 ) {
@@ -343,11 +352,30 @@ internal data class BreakpointRuleDto(
         id = id,
         enabled = enabled,
         urlPattern = urlPattern,
-        methods = methods,
+        method = collapsedMethod(method, methods),
         onRequest = onRequest,
         onResponse = onResponse,
     )
 }
+
+/**
+ * One method from either shape, last-wins (ADR-0087). The scalar is authoritative when it says anything;
+ * a legacy list contributes its last entry, which is the same rewrite Studio performed on the next save.
+ */
+private fun collapsedMethod(method: String, legacy: List<String>?): String =
+    method.ifBlank { legacy?.lastOrNull { it.isNotBlank() }.orEmpty() }
+
+/**
+ * The rule with its method narrowed and the legacy list dropped, applied where a persisted file is read
+ * (ADR-0087). Doing it there rather than only on the way to the host is what keeps the wide shape out of
+ * the copy the daemon holds — a poll that reported a blank scalar beside a list nobody looks at would
+ * read in a frontend as "any method", turning a migration into a rule that answers more than it did.
+ */
+internal fun MapLocalRuleDto.collapsingMethod(): MapLocalRuleDto =
+    if (methods == null) this else copy(method = collapsedMethod(method, methods), methods = null)
+
+internal fun BreakpointRuleDto.collapsingMethod(): BreakpointRuleDto =
+    if (methods == null) this else copy(method = collapsedMethod(method, methods), methods = null)
 
 /**
  * A seed names its body the way [MapLocalRuleDto] does. The bytes stay with the daemon rather than the
@@ -672,7 +700,7 @@ internal fun HostMapLocalRule.toDto() = MapLocalRuleDto(
     id = id,
     enabled = enabled,
     urlPattern = urlPattern,
-    methods = methods,
+    method = method,
     statusCode = statusCode,
     headers = headers.map { HeaderDto(it.name, it.value_) },
     // Carried, not recomputed: a frontend publishing a layout holds bytes only for the rules it is
@@ -686,7 +714,7 @@ internal fun HostBreakpointRule.toDto() = BreakpointRuleDto(
     id = id,
     enabled = enabled,
     urlPattern = urlPattern,
-    methods = methods,
+    method = method,
     onRequest = onRequest,
     onResponse = onResponse,
 )

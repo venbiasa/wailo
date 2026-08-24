@@ -172,9 +172,8 @@ internal suspend fun dispatch(host: DaemonClient, args: ParsedArgs): CommandResu
                     "(no Map Local rules)"
                 } else {
                     rules.joinToString("\n") { rule ->
-                        val methods = rule.methods.takeIf { it.isNotEmpty() }?.joinToString(",") ?: "*"
                         val group = groups[rule.id]?.let { "\t[$it]" }.orEmpty()
-                        "${rule.id}\t${if (rule.enabled) "on" else "off"}\t$methods\t${rule.statusCode}\t${rule.bodySize}B\t${rule.urlPattern}$group"
+                        "${rule.id}\t${if (rule.enabled) "on" else "off"}\t${rule.method.ifBlank { "*" }}\t${rule.statusCode}\t${rule.bodySize}B\t${rule.urlPattern}$group"
                     }
                 },
             )
@@ -190,7 +189,7 @@ internal suspend fun dispatch(host: DaemonClient, args: ParsedArgs): CommandResu
                     if (rule.name.isNotBlank()) appendLine("name=${rule.name}")
                     appendLine("enabled=${rule.enabled} map_local_enabled=${host.mapLocalEnabled.value}")
                     appendLine("url_pattern=${rule.urlPattern}")
-                    appendLine("method=${rule.methods.takeIf { it.isNotEmpty() }?.joinToString(",") ?: "*"}")
+                    appendLine("method=${rule.method.ifBlank { "*" }}")
                     appendLine("status=${rule.statusCode}")
                     group?.let { appendLine("group=$it") }
                     rule.headers.forEach { appendLine("  < ${it.name}: ${it.value_}") }
@@ -227,10 +226,9 @@ internal suspend fun dispatch(host: DaemonClient, args: ParsedArgs): CommandResu
                         append("(no breakpoints)")
                     } else {
                         rules.forEach { rule ->
-                            val methods = rule.methods.takeIf { it.isNotEmpty() }?.joinToString(",") ?: "*"
                             val group = groups[rule.id]?.let { "\t[$it]" }.orEmpty()
                             appendLine(
-                                "${rule.id}\t${if (rule.enabled) "on" else "off"}\t$methods\t" +
+                                "${rule.id}\t${if (rule.enabled) "on" else "off"}\t${rule.method.ifBlank { "*" }}\t" +
                                     "${phaseLabel(rule.onRequest, rule.onResponse)}\t${rule.urlPattern}$group",
                             )
                         }
@@ -661,7 +659,7 @@ private suspend fun setMapLocal(host: DaemonClient, args: ParsedArgs): CommandRe
             name = args.name.orEmpty(),
             enabled = args.flag ?: true,
             urlPattern = canned.urlPattern,
-            methods = args.method?.let(::listOf).orEmpty(),
+            method = args.method.orEmpty(),
             statusCode = canned.statusCode,
             headers = canned.headers,
             body = canned.body,
@@ -685,7 +683,7 @@ private suspend fun setBreakpoint(host: DaemonClient, args: ParsedArgs): Command
             id = id,
             enabled = args.flag ?: true,
             urlPattern = pattern,
-            methods = args.method?.let(::listOf).orEmpty(),
+            method = args.method.orEmpty(),
             onRequest = onRequest,
             onResponse = onResponse,
         ),
@@ -1285,6 +1283,9 @@ private fun printUsage() {
         switched off as a unit — no rule in a disabled group matches, and each keeps its own state for
         when the group comes back.         Create a group with set_rule_group before filing rules into it with
         --group-id; removing one keeps its rules unless you pass --with-rules.
+
+        A rule matches one method, or any: --method names the one verb, and omitting it matches every
+        verb. Repeating the flag keeps the last, as with any other override.
 
         Top-to-bottom order is match priority: of two rules that both match, the higher one wins.
         set_rule_order sets it for one container — the rules inside --group-id, or the top level

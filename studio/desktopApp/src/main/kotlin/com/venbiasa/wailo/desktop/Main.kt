@@ -1093,9 +1093,7 @@ private fun MapLocalRuleDef.toHostRule(known: Map<String, HostMapLocalRule>) = H
     name = name,
     enabled = enabled,
     urlPattern = urlPattern,
-    methods = method.split(',')
-        .map(String::trim)
-        .filter(String::isNotEmpty),
+    method = method.trim(),
     statusCode = statusCode,
     headers = headers.map { Header(name = it.name, value_ = it.value) },
     // The daemon's reference, echoed back rather than the bytes it stands for (ADR-0086).
@@ -1115,7 +1113,7 @@ internal fun List<DaemonRuleNode<HostMapLocalRule>>.toMapLocalNodes(): List<MapL
             name = rule.name.ifBlank { rule.id },
             enabled = rule.enabled,
             urlPattern = rule.urlPattern,
-            method = rule.methods.joinToString(","),
+            method = rule.method,
             statusCode = rule.statusCode,
             headers = rule.headers
                 .filterNot { it.name.equals("Content-Length", ignoreCase = true) }
@@ -1137,9 +1135,7 @@ private fun BreakpointRuleDef.toHostRule() = HostBreakpointRule(
     id = id,
     enabled = enabled,
     urlPattern = urlPattern,
-    methods = method.split(',')
-        .map(String::trim)
-        .filter(String::isNotEmpty),
+    method = method.trim(),
     onRequest = onRequest,
     onResponse = onResponse,
 )
@@ -1151,7 +1147,7 @@ internal fun List<DaemonRuleNode<HostBreakpointRule>>.toBreakpointNodes(): List<
                 id = rule.id,
                 enabled = rule.enabled,
                 urlPattern = rule.urlPattern,
-                method = rule.methods.joinToString(","),
+                method = rule.method,
                 onRequest = rule.onRequest,
                 onResponse = rule.onResponse,
             )

@@ -24,6 +24,9 @@ internal data class PersistedMapLocal(
 ) {
     fun resolvedNodes(): List<DaemonRuleNode<MapLocalRuleDto>> =
         nodes.ifEmpty { rules.map { DaemonRuleNode(rules = listOf(it)) } }
+            // A file written before ADR-0087 could name several methods; narrow here so the daemon never
+            // holds the wide shape. The file itself is corrected by the next write.
+            .mapRules { it.collapsingMethod() }
 }
 
 @Serializable
@@ -34,6 +37,7 @@ internal data class PersistedBreakpoints(
 ) {
     fun resolvedNodes(): List<DaemonRuleNode<BreakpointRuleDto>> =
         nodes.ifEmpty { rules.map { DaemonRuleNode(rules = listOf(it)) } }
+            .mapRules { it.collapsingMethod() }
 }
 
 /**
