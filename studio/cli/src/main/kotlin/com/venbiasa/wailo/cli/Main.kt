@@ -3,14 +3,22 @@ package com.venbiasa.wailo.cli
 import com.venbiasa.wailo.daemon.DaemonClient
 import com.venbiasa.wailo.daemon.DaemonRuleGroup
 import com.venbiasa.wailo.daemon.RULE_FAMILIES
+import com.venbiasa.wailo.daemon.RULE_FAMILY_BREAKPOINTS
 import com.venbiasa.wailo.daemon.RULE_FAMILY_MAP_LOCAL
+import com.venbiasa.wailo.daemon.RULE_FAMILY_SEEDS
 import com.venbiasa.wailo.daemon.groupIdByRule
+import com.venbiasa.wailo.engine.PausedExchange
 import com.venbiasa.wailo.engine.WailoEngine
+import com.venbiasa.wailo.host.HostBreakpointRule
 import com.venbiasa.wailo.host.HostMapLocalRule
 import com.venbiasa.wailo.host.HostSeed
 import com.venbiasa.wailo.host.urlPatternMatches
 import com.venbiasa.wailo.host.summarizeExchanges
+import com.venbiasa.wailo.host.withEdits
+import com.venbiasa.wailo.protocol.BreakpointPhase
 import com.venbiasa.wailo.protocol.Header
+import com.venbiasa.wailo.protocol.HttpRequest
+import com.venbiasa.wailo.protocol.HttpResponse
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.system.exitProcess
@@ -93,7 +101,11 @@ private suspend fun runRemote(parsed: ParsedArgs) {
     exitProcess(result.exitCode)
 }
 
-private val BLOCKING_COMMANDS = setOf("wait_exchange", "wait-exchange", "wait_hold", "wait-hold")
+private val BLOCKING_COMMANDS = setOf(
+    "wait_exchange", "wait-exchange",
+    "wait_hold", "wait-hold",
+    "wait_device", "wait-device",
+)
 
 internal data class CommandResult(val message: String, val exitCode: Int = 0)
 
@@ -167,6 +179,25 @@ internal suspend fun dispatch(host: DaemonClient, args: ParsedArgs): CommandResu
                 },
             )
         }
+        "get_map_local", "get-map-local" -> {
+            val id = args.id ?: return CommandResult("get_map_local requires --id", exitCode = 2)
+            val rule = host.mapLocalRules.value.firstOrNull { it.id == id }
+                ?: return CommandResult("Map Local rule not found: $id", exitCode = 1)
+            val group = host.nodesFor(RULE_FAMILY_MAP_LOCAL).groupIdByRule { it }[id]
+            CommandResult(
+                buildString {
+                    appendLine("id=${rule.id}")
+                    if (rule.name.isNotBlank()) appendLine("name=${rule.name}")
+                    appendLine("enabled=${rule.enabled} map_local_enabled=${host.mapLocalEnabled.value}")
+                    appendLine("url_pattern=${rule.urlPattern}")
+                    appendLine("method=${rule.methods.takeIf { it.isNotEmpty() }?.joinToString(",") ?: "*"}")
+                    appendLine("status=${rule.statusCode}")
+                    group?.let { appendLine("group=$it") }
+                    rule.headers.forEach { appendLine("  < ${it.name}: ${it.value_}") }
+                    append(ruleBody(host, RULE_FAMILY_MAP_LOCAL, rule.id, rule.bodySize, args.bodyChars))
+                }.trimEnd(),
+            )
+        }
         "set_rule_group", "set-rule-group" -> setRuleGroup(host, args)
         "remove_rule_group", "remove-rule-group" -> removeRuleGroup(host, args)
         "list_rule_groups", "list-rule-groups" -> listRuleGroups(host, args)
@@ -175,6 +206,42 @@ internal suspend fun dispatch(host: DaemonClient, args: ParsedArgs): CommandResu
                 ?: return CommandResult("set_map_local_enabled requires --on or --off", exitCode = 2)
             host.setMapLocalEnabled(enabled)
             CommandResult("map_local_enabled=$enabled")
+        }
+        "set_breakpoint", "set-breakpoint" -> setBreakpoint(host, args)
+        "remove_breakpoint", "remove-breakpoint" -> {
+            val id = args.id ?: return CommandResult("remove_breakpoint requires --id", exitCode = 2)
+            if (host.removeBreakpointRule(id)) {
+                CommandResult("removed breakpoint $id")
+            } else {
+                CommandResult("breakpoint not found: $id", exitCode = 1)
+            }
+        }
+        "list_breakpoints", "list-breakpoints" -> {
+            val rules = host.breakpointRules.value
+            val groups = host.nodesFor(RULE_FAMILY_BREAKPOINTS).groupIdByRule { it }
+            CommandResult(
+                buildString {
+                    appendLine("breakpoints_enabled=${host.breakpointsEnabled.value}")
+                    if (rules.isEmpty()) {
+                        append("(no breakpoints)")
+                    } else {
+                        rules.forEach { rule ->
+                            val methods = rule.methods.takeIf { it.isNotEmpty() }?.joinToString(",") ?: "*"
+                            val group = groups[rule.id]?.let { "\t[$it]" }.orEmpty()
+                            appendLine(
+                                "${rule.id}\t${if (rule.enabled) "on" else "off"}\t$methods\t" +
+                                    "${phaseLabel(rule.onRequest, rule.onResponse)}\t${rule.urlPattern}$group",
+                            )
+                        }
+                    }
+                }.trimEnd(),
+            )
+        }
+        "set_breakpoints_enabled", "set-breakpoints-enabled" -> {
+            val enabled = args.flag
+                ?: return CommandResult("set_breakpoints_enabled requires --on or --off", exitCode = 2)
+            host.setBreakpointsEnabled(enabled)
+            CommandResult("breakpoints_enabled=$enabled")
         }
         "set_seed", "set-seed" -> setSeed(host, args)
         "remove_seed", "remove-seed" -> {
@@ -208,6 +275,25 @@ internal suspend fun dispatch(host: DaemonClient, args: ParsedArgs): CommandResu
                             )
                         }
                     }
+                }.trimEnd(),
+            )
+        }
+        "get_seed", "get-seed" -> {
+            val id = args.id ?: return CommandResult("get_seed requires --id", exitCode = 2)
+            val seed = host.seeds.value.firstOrNull { it.id == id }
+                ?: return CommandResult("seed not found: $id", exitCode = 1)
+            val group = host.nodesFor(RULE_FAMILY_SEEDS).groupIdByRule { it }[id]
+            CommandResult(
+                buildString {
+                    appendLine("id=${seed.id}")
+                    appendLine("enabled=${seed.enabled} seeds_enabled=${host.seedsEnabled.value}")
+                    appendLine("url_pattern=${seed.urlPattern}")
+                    appendLine("method=${seed.method.takeIf { it.isNotBlank() } ?: "*"}")
+                    appendLine("status=${seed.statusCode}")
+                    appendLine("armed=${host.seedQueue.value.any { it.id == seed.id }}")
+                    group?.let { appendLine("group=$it") }
+                    seed.headers.forEach { appendLine("  < ${it.name}: ${it.value_}") }
+                    append(ruleBody(host, RULE_FAMILY_SEEDS, seed.id, seed.bodySize, args.bodyChars))
                 }.trimEnd(),
             )
         }
@@ -276,20 +362,14 @@ internal suspend fun dispatch(host: DaemonClient, args: ParsedArgs): CommandResu
                 if (holds.isEmpty()) {
                     "(no holds)"
                 } else {
-                    holds.joinToString("\n") {
-                        "${it.correlationId}\t${it.phase.name}\t${it.request?.method}\t${it.request?.url}"
-                    }
+                    // A body per row would bury the list, so the many-holds view stays one line each
+                    // unless --body-chars is asked for by name; wait_hold returns one and shows it.
+                    val bodyChars = if (args.bodyCharsSpecified) args.bodyChars else 0
+                    holds.joinToString("\n") { holdSummary(it, bodyChars) }
                 },
             )
         }
-        "resume_hold", "resume-hold" -> {
-            val id = args.id ?: return CommandResult("resume_hold requires --id (correlation id)", exitCode = 2)
-            if (host.resumeHold(id)) {
-                CommandResult("resumed $id")
-            } else {
-                CommandResult("hold not found: $id", exitCode = 1)
-            }
-        }
+        "resume_hold", "resume-hold" -> resumeHold(host, args)
         "abort_hold", "abort-hold" -> {
             val id = args.id ?: return CommandResult("abort_hold requires --id (correlation id)", exitCode = 2)
             if (host.abortHold(id)) {
@@ -323,9 +403,50 @@ internal suspend fun dispatch(host: DaemonClient, args: ParsedArgs): CommandResu
             CommandResult("${row.exchange.id}\t${row.exchange.request?.method}\t${row.exchange.response?.code}\t${row.exchange.request?.url}")
         }
         "wait_hold", "wait-hold" -> {
-            val hold = host.waitForHold(timeout = args.timeoutSeconds.seconds)
-                ?: return CommandResult("timeout waiting for hold", exitCode = 1)
-            CommandResult("${hold.correlationId}\t${hold.request?.method}\t${hold.request?.url}")
+            val phase = args.phase
+            if (phase != null && phase !in setOf("request", "response")) {
+                return CommandResult("--phase must be request or response", exitCode = 2)
+            }
+            val hold = host.waitForHold(timeout = args.timeoutSeconds.seconds) { candidate ->
+                val request = candidate.request
+                val url = request?.url.orEmpty()
+                val matchesUrl = when {
+                    args.urlPattern != null -> urlPatternMatches(args.urlPattern, url)
+                    args.urlContains != null -> url.contains(args.urlContains, ignoreCase = true)
+                    else -> true
+                }
+                matchesUrl &&
+                    (args.method == null || request?.method.equals(args.method, ignoreCase = true)) &&
+                    (phase == null || phase == candidate.phaseName())
+            } ?: return CommandResult("timeout waiting for hold", exitCode = 1)
+            CommandResult(holdSummary(hold, args.bodyChars))
+        }
+        "wait_device", "wait-device" -> {
+            val device = host.waitForDevice(timeout = args.timeoutSeconds.seconds) { candidate ->
+                (args.appId == null || candidate.appId == args.appId) &&
+                    (args.deviceName == null || candidate.deviceName.contains(args.deviceName, ignoreCase = true))
+            } ?: return CommandResult("timeout waiting for device", exitCode = 1)
+            CommandResult(
+                "${device.connectionId}\t${device.deviceName}\t${device.appId}\t" +
+                    "${device.platform}\t${device.transport}",
+            )
+        }
+        "set_max_retained", "set-max-retained" -> {
+            val value = args.count ?: return CommandResult("set_max_retained requires --count N", exitCode = 2)
+            if (value !in WailoEngine.RETAINED_RANGE) {
+                return CommandResult(
+                    "--count must be between ${WailoEngine.RETAINED_RANGE.first} and " +
+                        "${WailoEngine.RETAINED_RANGE.last}",
+                    exitCode = 2,
+                )
+            }
+            host.setMaxRetained(value)
+            CommandResult("max_retained=$value")
+        }
+        "set_usb_port", "set-usb-port" -> {
+            if (!args.portSpecified) return CommandResult("set_usb_port requires --port N", exitCode = 2)
+            host.setUsbPort(args.port)
+            CommandResult("usb_port=${args.port}")
         }
         "rebind" -> {
             val ok = host.rebind(args.port)
@@ -449,6 +570,48 @@ internal suspend fun dispatch(host: DaemonClient, args: ParsedArgs): CommandResu
                 "bookmarks=${host.bookmarkedHosts.value.size} " +
                 "mcp_access=${host.mcpAccess.value} mcp_redaction=${host.mcpRedactSecrets.value}",
         )
+        // Pairing without a window (ADR-0058): the one-shot half only. Approving an offer is a trust
+        // decision made while looking at a code on a screen, so `begin` stays where that screen is.
+        "set_require_pairing", "set-require-pairing" -> {
+            val enabled = args.flag
+                ?: return CommandResult("set_require_pairing requires --on or --off", exitCode = 2)
+            host.setRequirePairing(enabled)
+            CommandResult("require_pairing=$enabled")
+        }
+        "list_paired", "list-paired" -> host.pairing.value.let { pairing ->
+            CommandResult(
+                buildString {
+                    appendLine("supported=${pairing.supported} require_pairing=${pairing.requirePairing}")
+                    if (pairing.devices.isEmpty()) {
+                        appendLine("(no paired devices)")
+                    } else {
+                        pairing.devices.forEach {
+                            appendLine(
+                                "${it.deviceId}\t${it.name}\t" +
+                                    "${if (it.trustedOnFirstUse) "trusted-on-first-use" else "paired"}\t" +
+                                    "last_seen=${it.lastSeenEpochMs}",
+                            )
+                        }
+                    }
+                    // A refusal is why a device that looks connected sends nothing, so it belongs in the
+                    // answer here too rather than only in the window that happens to be open.
+                    pairing.refusals.forEach { appendLine("refused ${it.deviceId}: ${it.reason}") }
+                }.trimEnd(),
+            )
+        }
+        "forget_device", "forget-device" -> {
+            val id = args.id ?: return CommandResult("forget_device requires --id", exitCode = 2)
+            host.forgetDevice(id)
+            CommandResult("forgot $id")
+        }
+        "forget_all_devices", "forget-all-devices" -> {
+            host.forgetAllDevices()
+            CommandResult("forgot every paired device")
+        }
+        "reset_identity", "reset-identity" -> {
+            host.resetIdentity()
+            CommandResult("identity reset; every device has to pair again")
+        }
         "list_bookmarks", "list-bookmarks" -> host.bookmarkedHosts.value.let { hosts ->
             CommandResult(if (hosts.isEmpty()) "no bookmarked hosts" else hosts.joinToString("\n"))
         }
@@ -474,6 +637,7 @@ private suspend fun setMapLocal(host: DaemonClient, args: ParsedArgs): CommandRe
     host.upsertMapLocalRule(
         HostMapLocalRule(
             id = canned.id,
+            name = args.name.orEmpty(),
             enabled = args.flag ?: true,
             urlPattern = canned.urlPattern,
             methods = args.method?.let(::listOf).orEmpty(),
@@ -484,6 +648,127 @@ private suspend fun setMapLocal(host: DaemonClient, args: ParsedArgs): CommandRe
         args.groupId,
     )
     return CommandResult("Map Local rule ${canned.id} set (${canned.body.size} bytes)")
+}
+
+private suspend fun setBreakpoint(host: DaemonClient, args: ParsedArgs): CommandResult {
+    val id = args.id ?: return CommandResult("set_breakpoint requires --id", exitCode = 2)
+    val pattern = args.urlPattern ?: return CommandResult("set_breakpoint requires --url-pattern", exitCode = 2)
+    if (id.isBlank()) return CommandResult("breakpoint id must not be blank", exitCode = 2)
+    if (pattern.isBlank()) return CommandResult("breakpoint URL pattern must not be blank", exitCode = 2)
+    // Naming neither phase holds the response, which is the one a breakpoint is usually set for. Naming
+    // one holds only that one, so --on-request cannot quietly stop the response as well.
+    val onRequest = args.onRequest ?: false
+    val onResponse = args.onResponse ?: !onRequest
+    host.upsertBreakpointRule(
+        HostBreakpointRule(
+            id = id,
+            enabled = args.flag ?: true,
+            urlPattern = pattern,
+            methods = args.method?.let(::listOf).orEmpty(),
+            onRequest = onRequest,
+            onResponse = onResponse,
+        ),
+        args.groupId,
+    )
+    return CommandResult("breakpoint $id set (${phaseLabel(onRequest, onResponse)})")
+}
+
+/**
+ * Resumes a hold, rewriting what continues when asked (ADR-0067). A flag that does not apply to the phase
+ * the hold is in is refused rather than ignored: a script that believed it replaced a status code has to
+ * hear that the request had not been answered yet.
+ */
+private suspend fun resumeHold(host: DaemonClient, args: ParsedArgs): CommandResult {
+    val id = args.id ?: return CommandResult("resume_hold requires --id (correlation id)", exitCode = 2)
+    val hold = host.findHold(id) ?: return CommandResult("hold not found: $id", exitCode = 1)
+    val body = when {
+        args.bodyFile != null && args.bodyText != null ->
+            return CommandResult("use only one of --body-file or --body-text", exitCode = 2)
+        args.bodyFile != null -> runCatching { Files.readAllBytes(Path.of(args.bodyFile)) }.getOrElse {
+            return CommandResult("could not read body file ${args.bodyFile}: ${it.message}", exitCode = 1)
+        }
+        args.bodyText != null -> args.bodyText.toByteArray(Charsets.UTF_8)
+        else -> null
+    }
+    val headers = if (args.headers.isEmpty()) {
+        null
+    } else {
+        when (val parsed = parseHeaders(args.headers)) {
+            is ParsedHeaders.Rejected -> return parsed.result
+            is ParsedHeaders.Parsed -> parsed.headers
+        }
+    }
+    var editedRequest: HttpRequest? = null
+    var editedResponse: HttpResponse? = null
+    when (hold.phase) {
+        BreakpointPhase.BREAKPOINT_PHASE_REQUEST -> {
+            if (args.statusCode != null) {
+                return CommandResult("--status applies to a response-phase hold", exitCode = 2)
+            }
+            val original = hold.request
+                ?: return CommandResult("request-phase hold carries no request", exitCode = 1)
+            if (args.method != null || args.editedUrl != null || headers != null || body != null) {
+                editedRequest = original.withEdits(args.method, args.editedUrl, headers, body)
+            }
+        }
+        BreakpointPhase.BREAKPOINT_PHASE_RESPONSE -> {
+            if (args.method != null || args.editedUrl != null) {
+                return CommandResult("--method and --set-url apply to a request-phase hold", exitCode = 2)
+            }
+            if (args.statusCode != null && args.statusCode !in 100..599) {
+                return CommandResult("status must be between 100 and 599", exitCode = 2)
+            }
+            if (args.statusCode != null || headers != null || body != null) {
+                editedResponse = (hold.response ?: HttpResponse(code = 200))
+                    .withEdits(args.statusCode, headers, body)
+            }
+        }
+    }
+    if (!host.resumeHold(id, editedRequest, editedResponse)) {
+        return CommandResult("hold no longer exists: $id", exitCode = 1)
+    }
+    val edited = editedRequest != null || editedResponse != null
+    return CommandResult("resumed $id" + if (edited) " (edited)" else "")
+}
+
+/**
+ * The body tail both `get_*` verbs print. Fetched here rather than arriving with the rule (ADR-0086), so
+ * a listing stays cheap and only the fixture actually being read crosses the wire.
+ */
+private suspend fun ruleBody(
+    host: DaemonClient,
+    family: String,
+    id: String,
+    bodySize: Int,
+    limit: Int,
+): String {
+    if (bodySize == 0 || limit <= 0) return ""
+    val bytes = host.readRuleBody(family, id, length = limit)
+    return buildString {
+        appendLine("--- body ($bodySize bytes) ---")
+        append(String(bytes, Charsets.UTF_8))
+        if (bodySize > bytes.size) append("\n… truncated")
+    }
+}
+
+private fun phaseLabel(onRequest: Boolean, onResponse: Boolean): String =
+    listOfNotNull("request".takeIf { onRequest }, "response".takeIf { onResponse }).joinToString("+")
+
+private fun PausedExchange.phaseName(): String =
+    if (phase == BreakpointPhase.BREAKPOINT_PHASE_REQUEST) "request" else "response"
+
+/**
+ * A hold as one line, with the held phase's body under it when [bodyChars] allows. Those bytes are inline,
+ * unlike a captured exchange's: a hold is still in flight and never went through the body store.
+ */
+private fun holdSummary(hold: PausedExchange, bodyChars: Int): String = buildString {
+    append("${hold.correlationId}\t${hold.phaseName()}\t${hold.request?.method}\t${hold.request?.url}")
+    val body = if (hold.phaseName() == "request") hold.request?.body else hold.response?.body
+    if (bodyChars > 0 && body != null && body.size > 0) {
+        appendLine()
+        append(String(body.toByteArray(), 0, minOf(body.size, bodyChars), Charsets.UTF_8))
+        if (body.size > bodyChars) append("\n… truncated")
+    }
 }
 
 /**
@@ -593,14 +878,9 @@ private fun parseCannedResponse(verb: String, label: String, args: ParsedArgs): 
         }
         else -> args.bodyText.orEmpty().toByteArray(Charsets.UTF_8)
     }
-    val headers = mutableListOf<Header>()
-    args.headers.forEach { raw ->
-        val separator = raw.indexOf(':')
-        val name = raw.substring(0, separator.coerceAtLeast(0)).trim()
-        if (separator <= 0 || name.isEmpty()) {
-            return reject("invalid header '$raw'; expected 'Name: value'")
-        }
-        headers += Header(name = name, value_ = raw.substring(separator + 1).trim())
+    val headers = when (val parsed = parseHeaders(args.headers)) {
+        is ParsedHeaders.Rejected -> return CannedResponse.Rejected(parsed.result)
+        is ParsedHeaders.Parsed -> parsed.headers.toMutableList()
     }
     if (headers.none { it.name.equals("Content-Type", ignoreCase = true) } && args.bodyFile != null) {
         contentTypeFor(args.bodyFile)?.let { headers += Header(name = "Content-Type", value_ = it) }
@@ -612,6 +892,28 @@ private fun parseCannedResponse(verb: String, label: String, args: ParsedArgs): 
         headers = headers,
         body = body,
     )
+}
+
+private sealed interface ParsedHeaders {
+    data class Parsed(val headers: List<Header>) : ParsedHeaders
+
+    data class Rejected(val result: CommandResult) : ParsedHeaders
+}
+
+/** `Name: value` pairs as typed on the command line — authoring a rule and editing a hold both take them. */
+private fun parseHeaders(raw: List<String>): ParsedHeaders {
+    val headers = mutableListOf<Header>()
+    raw.forEach { line ->
+        val separator = line.indexOf(':')
+        val name = line.substring(0, separator.coerceAtLeast(0)).trim()
+        if (separator <= 0 || name.isEmpty()) {
+            return ParsedHeaders.Rejected(
+                CommandResult("invalid header '$line'; expected 'Name: value'", exitCode = 2),
+            )
+        }
+        headers += Header(name = name, value_ = line.substring(separator + 1).trim())
+    }
+    return ParsedHeaders.Parsed(headers)
 }
 
 private fun contentTypeFor(path: String): String? = when (path.substringAfterLast('.', "").lowercase()) {
@@ -637,13 +939,19 @@ internal enum class Command(val verb: String) {
     SetMapLocal("set_map_local"),
     RemoveMapLocal("remove_map_local"),
     ListMapLocal("list_map_local"),
+    GetMapLocal("get_map_local"),
     SetMapLocalEnabled("set_map_local_enabled"),
     SetRuleGroup("set_rule_group"),
     RemoveRuleGroup("remove_rule_group"),
     ListRuleGroups("list_rule_groups"),
+    SetBreakpoint("set_breakpoint"),
+    RemoveBreakpoint("remove_breakpoint"),
+    ListBreakpoints("list_breakpoints"),
+    SetBreakpointsEnabled("set_breakpoints_enabled"),
     SetSeed("set_seed"),
     RemoveSeed("remove_seed"),
     ListSeeds("list_seeds"),
+    GetSeed("get_seed"),
     SetSeedsEnabled("set_seeds_enabled"),
     FillSeeds("fill_seeds"),
     ClearSeedQueue("clear_seed_queue"),
@@ -657,9 +965,12 @@ internal enum class Command(val verb: String) {
     AbortHold("abort_hold"),
     ClearCapture("clear_capture"),
     SetCapturing("set_capturing"),
+    SetMaxRetained("set_max_retained"),
     WaitExchange("wait_exchange"),
     WaitHold("wait_hold"),
+    WaitDevice("wait_device"),
     Rebind("rebind"),
+    SetUsbPort("set_usb_port"),
     SetProxy("set_proxy"),
     ProxyStatus("proxy_status"),
     SetProxyLan("set_proxy_lan"),
@@ -670,6 +981,11 @@ internal enum class Command(val verb: String) {
     RemoveProxyCa("remove_proxy_ca"),
     SetMcpAccess("set_mcp_access"),
     SetMcpRedaction("set_mcp_redaction"),
+    SetRequirePairing("set_require_pairing"),
+    ListPaired("list_paired"),
+    ForgetDevice("forget_device"),
+    ForgetAllDevices("forget_all_devices"),
+    ResetIdentity("reset_identity"),
     ListBookmarks("list_bookmarks"),
     SetBookmark("set_bookmark"),
     Status("status"),
@@ -688,6 +1004,7 @@ internal data class ParsedArgs(
     val appId: String? = null,
     val limit: Int = 50,
     val bodyChars: Int = 4_096,
+    val bodyCharsSpecified: Boolean = false,
     val timeoutSeconds: Long = 30,
     val flag: Boolean? = null,
     val headers: List<String> = emptyList(),
@@ -702,6 +1019,14 @@ internal data class ParsedArgs(
     val groupId: String? = null,
     val name: String? = null,
     val withRules: Boolean = false,
+    val deviceName: String? = null,
+    val phase: String? = null,
+    val onRequest: Boolean? = null,
+    val onResponse: Boolean? = null,
+    // The URL an edited hold continues to. Separate from --url, which every search command already reads
+    // as "contains this".
+    val editedUrl: String? = null,
+    val count: Int? = null,
 )
 
 internal fun parseArgs(args: Array<String>): ParsedArgs? {
@@ -717,6 +1042,7 @@ internal fun parseArgs(args: Array<String>): ParsedArgs? {
     var appId: String? = null
     var limit = 50
     var bodyChars = 4_096
+    var bodyCharsSpecified = false
     var timeoutSeconds = 30L
     var flag: Boolean? = null
     val headers = mutableListOf<String>()
@@ -731,6 +1057,12 @@ internal fun parseArgs(args: Array<String>): ParsedArgs? {
     var groupId: String? = null
     var name: String? = null
     var withRules = false
+    var deviceName: String? = null
+    var phase: String? = null
+    var onRequest: Boolean? = null
+    var onResponse: Boolean? = null
+    var editedUrl: String? = null
+    var count: Int? = null
     var i = 1
     while (i < args.size) {
         when (val a = args[i]) {
@@ -745,7 +1077,10 @@ internal fun parseArgs(args: Array<String>): ParsedArgs? {
             "--status" -> statusCode = args.getOrNull(++i)?.toIntOrNull() ?: return null
             "--app" -> appId = args.getOrNull(++i) ?: return null
             "--limit" -> limit = args.getOrNull(++i)?.toIntOrNull() ?: return null
-            "--body-chars" -> bodyChars = args.getOrNull(++i)?.toIntOrNull() ?: return null
+            "--body-chars" -> {
+                bodyChars = args.getOrNull(++i)?.toIntOrNull() ?: return null
+                bodyCharsSpecified = true
+            }
             "--timeout" -> timeoutSeconds = args.getOrNull(++i)?.toLongOrNull() ?: return null
             "--header" -> headers += args.getOrNull(++i) ?: return null
             "--allow" -> allowPatterns += args.getOrNull(++i) ?: return null
@@ -761,6 +1096,12 @@ internal fun parseArgs(args: Array<String>): ParsedArgs? {
             "--group-id" -> groupId = args.getOrNull(++i) ?: return null
             "--name" -> name = args.getOrNull(++i) ?: return null
             "--with-rules" -> withRules = true
+            "--device" -> deviceName = args.getOrNull(++i) ?: return null
+            "--phase" -> phase = args.getOrNull(++i) ?: return null
+            "--on-request" -> onRequest = true
+            "--on-response" -> onResponse = true
+            "--set-url" -> editedUrl = args.getOrNull(++i) ?: return null
+            "--count" -> count = args.getOrNull(++i)?.toIntOrNull() ?: return null
             else -> return null
         }
         i += 1
@@ -779,6 +1120,7 @@ internal fun parseArgs(args: Array<String>): ParsedArgs? {
         appId = appId,
         limit = limit,
         bodyChars = bodyChars,
+        bodyCharsSpecified = bodyCharsSpecified,
         timeoutSeconds = timeoutSeconds,
         flag = flag,
         headers = headers,
@@ -793,6 +1135,12 @@ internal fun parseArgs(args: Array<String>): ParsedArgs? {
         groupId = groupId,
         name = name,
         withRules = withRules,
+        deviceName = deviceName,
+        phase = phase,
+        onRequest = onRequest,
+        onResponse = onResponse,
+        editedUrl = editedUrl,
+        count = count,
     )
 }
 
@@ -807,21 +1155,28 @@ private fun printUsage() {
         wailo-cli list_exchanges [--limit N]
         wailo-cli search_traffic [--url S] [--url-pattern GLOB] [--method M] [--status C] [--app ID]
         wailo-cli get_exchange --id ID
-        wailo-cli set_map_local --id ID --url-pattern GLOB [--method M] [--status C]
+        wailo-cli set_map_local --id ID --url-pattern GLOB [--name TEXT] [--method M] [--status C]
                     [--header "Name: value"]... [--body-file PATH|--body-text TEXT] [--off]
                     [--group-id ID]
         wailo-cli remove_map_local --id ID
         wailo-cli list_map_local
+        wailo-cli get_map_local --id ID [--body-chars N]
         wailo-cli set_map_local_enabled --on|--off
         wailo-cli set_rule_group --family map_local|breakpoints|seeds --group-id ID
                     [--name TEXT] [--on|--off]
         wailo-cli remove_rule_group --family F --group-id ID [--with-rules]
         wailo-cli list_rule_groups --family F
+        wailo-cli set_breakpoint --id ID --url-pattern GLOB [--method M]
+                    [--on-request] [--on-response] [--off] [--group-id ID]
+        wailo-cli remove_breakpoint --id ID
+        wailo-cli list_breakpoints
+        wailo-cli set_breakpoints_enabled --on|--off
         wailo-cli set_seed --id ID --url-pattern GLOB [--method M] [--status C]
                     [--header "Name: value"]... [--body-file PATH|--body-text TEXT] [--off]
                     [--group-id ID]
         wailo-cli remove_seed --id ID
         wailo-cli list_seeds
+        wailo-cli get_seed --id ID [--body-chars N]
         wailo-cli set_seeds_enabled --on|--off
         wailo-cli fill_seeds
         wailo-cli clear_seed_queue
@@ -830,14 +1185,20 @@ private fun printUsage() {
         wailo-cli clear_capture_filter
         wailo-cli list_capture_filter
         wailo-cli list_devices
-        wailo-cli list_holds
+        wailo-cli list_holds [--body-chars N]
         wailo-cli resume_hold --id CORRELATION_ID
+                    [--method M] [--set-url URL] [--status C] [--header "Name: value"]...
+                    [--body-file PATH|--body-text TEXT]
         wailo-cli abort_hold --id CORRELATION_ID
         wailo-cli clear_capture
         wailo-cli set_capturing --on|--off
+        wailo-cli set_max_retained --count N
         wailo-cli wait_exchange [--url S] [--url-pattern GLOB] [--method M] [--status C] [--timeout SEC]
-        wailo-cli wait_hold [--timeout SEC]
+        wailo-cli wait_hold [--url S] [--url-pattern GLOB] [--method M] [--phase request|response]
+                    [--timeout SEC] [--body-chars N]
+        wailo-cli wait_device [--app ID] [--device NAME] [--timeout SEC]
         wailo-cli rebind --port N
+        wailo-cli set_usb_port --port N
         wailo-cli set_proxy --on|--off [--port N]
         wailo-cli proxy_status
         wailo-cli set_proxy_lan --on|--off
@@ -848,6 +1209,11 @@ private fun printUsage() {
         wailo-cli remove_proxy_ca
         wailo-cli set_mcp_access --on|--off
         wailo-cli set_mcp_redaction --on|--off
+        wailo-cli set_require_pairing --on|--off
+        wailo-cli list_paired
+        wailo-cli forget_device --id DEVICE_ID
+        wailo-cli forget_all_devices
+        wailo-cli reset_identity
         wailo-cli list_bookmarks
         wailo-cli set_bookmark --host HOST [--off]
 
@@ -863,6 +1229,18 @@ private fun printUsage() {
         Seeds are canned responses that answer held exchanges in order (ADR-0041). set_seed builds the
         library; fill_seeds arms every enabled one and sweeps the holds already waiting, and each hold it
         answers spends a seed. list_seeds shows which are still armed.
+
+        A breakpoint pauses a matching exchange so something can decide what continues. Naming neither
+        phase holds the response; --on-request holds it before it is sent instead. wait_hold blocks until
+        one appears and prints it, and resume_hold lets it go — optionally rewriting it, with the flags
+        that apply to the phase it stopped in: --method and --set-url before the request goes out, --status
+        after it came back, headers and body either way. Anything else is refused rather than ignored, so a
+        script cannot believe it changed something it did not. abort_hold fails the exchange instead.
+
+        set_require_pairing decides whether an unknown device may connect at all. Approving a specific one
+        happens in Studio, where the code is on screen next to the device asking; here you can require
+        pairing, list what is already trusted, forget one or all of them, and reset this machine's identity
+        so every device has to pair again.
 
         set_proxy starts the bundled HTTP proxy so traffic from anything that can reach this machine — a
         browser, a CLI, a simulator, a phone — is captured without the SDK. It is off until you start it,

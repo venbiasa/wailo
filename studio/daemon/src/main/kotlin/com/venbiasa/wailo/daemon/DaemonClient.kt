@@ -244,6 +244,17 @@ class DaemonClient internal constructor(
         pausedExchanges.first { rows -> rows.any(predicate) }.first(predicate)
     }
 
+    /**
+     * Waits for a device to be attached. Matches one already connected, so a scripted run that starts the
+     * app before it asks does not hang waiting for an arrival that has happened.
+     */
+    suspend fun waitForDevice(
+        timeout: Duration = 30.seconds,
+        predicate: (ConnectedDevice) -> Boolean = { true },
+    ): ConnectedDevice? = withTimeoutOrNull(timeout) {
+        connectedDevices.first { devices -> devices.any(predicate) }.first(predicate)
+    }
+
     suspend fun clear() {
         command("clear")
         _exchanges.value = emptyList()

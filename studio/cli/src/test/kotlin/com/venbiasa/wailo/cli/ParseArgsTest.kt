@@ -126,6 +126,92 @@ class ParseArgsTest {
         assertEquals(false, parseArgs(arrayOf("remove_rule_group", "--family", "seeds", "--group-id", "checkout"))!!.withRules)
     }
 
+    // A Map Local rule's label is the only human-readable handle on a generated id, and the flag was
+    // parsed but dropped on the way to the daemon — so authoring one headlessly lost it silently.
+    @Test
+    fun aMapLocalRuleIsAuthoredWithItsName() {
+        val parsed = parseArgs(
+            arrayOf("set_map_local", "--id", "r1", "--url-pattern", "https://example.com/*", "--name", "Login 500"),
+        )!!
+        assertEquals("Login 500", parsed.name)
+    }
+
+    // Naming a phase is presence-only, so "unset" has to stay distinguishable from "off": that is what
+    // lets set_breakpoint default to the response without --on-request also stopping it.
+    @Test
+    fun breakpointPhasesAreUnsetUntilNamed() {
+        val bare = parseArgs(arrayOf("set_breakpoint", "--id", "b1", "--url-pattern", "https://example.com/*"))!!
+        assertNull(bare.onRequest)
+        assertNull(bare.onResponse)
+
+        val request = parseArgs(
+            arrayOf("set_breakpoint", "--id", "b1", "--url-pattern", "https://example.com/*", "--on-request"),
+        )!!
+        assertEquals(true, request.onRequest)
+        assertNull(request.onResponse)
+
+        val both = parseArgs(
+            arrayOf(
+                "set_breakpoint", "--id", "b1", "--url-pattern", "https://example.com/*",
+                "--on-request", "--on-response", "--off",
+            ),
+        )!!
+        assertEquals(true, both.onRequest)
+        assertEquals(true, both.onResponse)
+        assertEquals(false, both.flag)
+    }
+
+    // The edited URL cannot ride on --url: every search command already reads that as "contains this", so
+    // reusing it would make one command's filter another command's rewrite.
+    @Test
+    fun aHoldEditNamesItsUrlSeparatelyFromTheSearchFilter() {
+        val parsed = parseArgs(
+            arrayOf(
+                "resume_hold",
+                "--id", "c1",
+                "--method", "POST",
+                "--set-url", "https://example.com/v2/login",
+                "--header", "X-Test: yes",
+                "--body-text", """{"ok":true}""",
+            ),
+        )!!
+        assertEquals("c1", parsed.id)
+        assertEquals("POST", parsed.method)
+        assertEquals("https://example.com/v2/login", parsed.editedUrl)
+        assertNull(parsed.urlContains)
+        assertEquals(listOf("X-Test: yes"), parsed.headers)
+    }
+
+    @Test
+    fun parsesHoldAndDeviceWaitFilters() {
+        val hold = parseArgs(
+            arrayOf("wait_hold", "--url-pattern", "https://example.com/*", "--phase", "request", "--timeout", "5"),
+        )!!
+        assertEquals("request", hold.phase)
+        assertEquals(5, hold.timeoutSeconds)
+
+        val device = parseArgs(arrayOf("wait_device", "--app", "com.example", "--device", "Pixel"))!!
+        assertEquals("com.example", device.appId)
+        assertEquals("Pixel", device.deviceName)
+    }
+
+    // list_holds stays one line per hold unless a body budget is asked for by name, so the flag's default
+    // is not enough to know whether the caller wanted bodies.
+    @Test
+    fun aBodyBudgetIsDistinguishableFromItsDefault() {
+        assertEquals(false, parseArgs(arrayOf("list_holds"))!!.bodyCharsSpecified)
+        val asked = parseArgs(arrayOf("list_holds", "--body-chars", "64"))!!
+        assertTrue(asked.bodyCharsSpecified)
+        assertEquals(64, asked.bodyChars)
+    }
+
+    // Retention is a count of exchanges, not the list limit --limit already means.
+    @Test
+    fun retentionIsItsOwnCount() {
+        assertEquals(5_000, parseArgs(arrayOf("set_max_retained", "--count", "5000"))!!.count)
+        assertNull(parseArgs(arrayOf("set_max_retained"))!!.count)
+    }
+
     @Test
     fun commandEnumCoversTier1Surface() {
         val verbs = Command.entries.map { it.verb }.toSet()
@@ -147,6 +233,13 @@ class ParseArgsTest {
                 "set_seed",
                 "list_seeds",
                 "fill_seeds",
+                "get_map_local",
+                "get_seed",
+                "set_breakpoint",
+                "list_breakpoints",
+                "set_max_retained",
+                "wait_device",
+                "list_paired",
             ),
         ))
     }

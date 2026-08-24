@@ -14,6 +14,7 @@ import com.venbiasa.wailo.host.HostBreakpointRule
 import com.venbiasa.wailo.host.HostMapLocalRule
 import com.venbiasa.wailo.host.HostSeed
 import com.venbiasa.wailo.host.urlPatternMatches
+import com.venbiasa.wailo.host.withEdits
 import com.venbiasa.wailo.protocol.BreakpointPhase
 import com.venbiasa.wailo.protocol.Header
 import com.venbiasa.wailo.protocol.HttpRequest
@@ -23,7 +24,6 @@ import kotlin.time.Duration.Companion.seconds
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withTimeoutOrNull
-import okio.ByteString.Companion.toByteString
 
 internal data class McpToolResponse(
     val text: String,
@@ -794,26 +794,21 @@ internal class WailoMcpService(
         arguments: ToolArguments,
         body: ByteArray?,
         headersProvided: Boolean,
-    ) = HttpRequest(
-        method = arguments.string("method") ?: method,
-        url = arguments.string("url") ?: url,
-        headers = if (headersProvided) arguments.headers().restoreRedacted(headers) else headers,
-        body = body?.toByteString() ?: this.body,
-        body_size = body?.size?.toLong() ?: body_size,
-        body_truncated = if (body != null) false else body_truncated,
+    ) = withEdits(
+        method = arguments.string("method"),
+        url = arguments.string("url"),
+        headers = if (headersProvided) arguments.headers().restoreRedacted(headers) else null,
+        body = body,
     )
 
     private fun HttpResponse.editedResponse(
         arguments: ToolArguments,
         body: ByteArray?,
         headersProvided: Boolean,
-    ) = HttpResponse(
-        code = arguments.intOrNull("status_code")?.inRange("status_code", 100..599) ?: code,
-        message = message,
-        headers = if (headersProvided) arguments.headers().restoreRedacted(headers) else headers,
-        body = body?.toByteString() ?: this.body,
-        body_size = body?.size?.toLong() ?: body_size,
-        body_truncated = if (body != null) false else body_truncated,
+    ) = withEdits(
+        statusCode = arguments.intOrNull("status_code")?.inRange("status_code", 100..599),
+        headers = if (headersProvided) arguments.headers().restoreRedacted(headers) else null,
+        body = body,
     )
 
     private fun success(text: String, data: Map<String, Any?>): McpToolResponse = McpToolResponse(text, data)
