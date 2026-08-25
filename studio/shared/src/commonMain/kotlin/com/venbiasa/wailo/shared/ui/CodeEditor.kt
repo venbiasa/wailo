@@ -804,11 +804,14 @@ private fun EditorLineRow(
     val scheme = MaterialTheme.colorScheme
     val lineText = state.lineAt(index)
     val len = lineText.length
-    // Under wrap a physical line spans [rows] visual rows; off wrap it's always one. The row's fixed height
-    // scales with it, and the caret/selection/fold overlays below place themselves on the (row, colInRow)
-    // grid via [caretVisualPos] so they land on the right wrapped row. In a diff it also cannot go below what
-    // the opposite pane needs for this row, which is what lets the two columns wrap and still stay level.
-    val rows = maxOf(visualRowCount(len, wrapCols), minRows)
+    // Under wrap this line's own text spans [textRows] visual rows; off wrap it's always one. [rows] is the
+    // row box's height, which in a diff cannot drop below what the opposite pane needs here — that is what
+    // lets the two columns wrap and still stay level. The rows it adds are filler with no columns of their
+    // own, so slicing or highlighting the text iterates [textRows]; over [rows] it would ask for a slice
+    // starting past the line's end. The caret/selection/fold overlays sit on the (row, colInRow) grid via
+    // [caretVisualPos].
+    val textRows = visualRowCount(len, wrapCols)
+    val rows = maxOf(textRows, minRows)
     val caret = state.caret
     val selection = state.selectionRange()
     val isCaretLine = index == caret.line
@@ -959,12 +962,12 @@ private fun EditorLineRow(
                     // One highlight box per visual row: the slice of [startCol, endCol] that falls on that row.
                     // A half-cell of slack past a fully-covered line's end (its last row) shows the trailing
                     // newline is inside the range.
-                    for (r in 0 until rows) {
+                    for (r in 0 until textRows) {
                         val rowStart = if (wrapCols == null) 0 else r * wrapCols
                         val rowEnd = if (wrapCols == null) len else minOf((r + 1) * wrapCols, len)
                         val segStart = maxOf(startCol, rowStart)
                         val segEnd = minOf(endCol, rowEnd)
-                        val slack = if (r == rows - 1 && index != selection.second.line) charWidthDp * 0.5f else 0.dp
+                        val slack = if (r == textRows - 1 && index != selection.second.line) charWidthDp * 0.5f else 0.dp
                         if (segEnd > segStart || slack > 0.dp) {
                             Box(
                                 Modifier.offset(x = charWidthDp * (segStart - rowStart), y = lineHeightDp * r)
@@ -994,7 +997,7 @@ private fun EditorLineRow(
                     // One Text per visual row, sliced on the exact column boundaries the caret/selection math
                     // uses — so glyphs stay locked to the grid (Compose's own word-wrap would break elsewhere).
                     Column {
-                        for (r in 0 until rows) {
+                        for (r in 0 until textRows) {
                             val s = r * wrapCols
                             val e = minOf(s + wrapCols, len)
                             Text(annotated.subSequence(s, e), style = textStyle, softWrap = false, maxLines = 1)
