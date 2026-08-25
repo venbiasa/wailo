@@ -12,15 +12,18 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.semantics.getOrNull
+import androidx.compose.ui.test.ComposeUiTest
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.getUnclippedBoundsInRoot
 import androidx.compose.ui.test.hasSetTextAction
 import androidx.compose.ui.test.isFocused
 import androidx.compose.ui.test.onAllNodesWithContentDescription
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performKeyInput
+import androidx.compose.ui.test.performMouseInput
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.pressKey
 import androidx.compose.ui.test.runComposeUiTest
@@ -49,6 +52,39 @@ private val FLAT = """
       "c": 2
     }
 """.trimIndent()
+
+// Long enough that walking the caret down it carries both `{` and the array's opener off the top.
+private const val ARRAY_OPENER = """  "items": ["""
+private const val FIRST_ELEMENT = "    0,"
+private val LONG_ARRAY = buildString {
+    appendLine("{")
+    appendLine(ARRAY_OPENER)
+    repeat(60) { appendLine("    $it,") }
+    appendLine("  ]")
+    append("}")
+}
+
+// The plain (non-diff) editor the sticky band is drawn over.
+@OptIn(ExperimentalTestApi::class)
+private fun ComposeUiTest.setArrayEditor() {
+    setContent {
+        WailoTheme(darkTheme = false) {
+            val state = rememberCodeEditorState(LONG_ARRAY)
+            Box(Modifier.size(640.dp, 400.dp)) {
+                CodeEditor(state, CodeLanguage.Json, readOnly = true, Modifier.fillMaxSize())
+            }
+        }
+    }
+}
+
+// Walks the caret down the array until its opening line has left the top of the viewport.
+@OptIn(ExperimentalTestApi::class)
+private fun ComposeUiTest.scrollPastTheArrayOpener() {
+    onNodeWithText(FIRST_ELEMENT).performClick()
+    onNode(isFocused()).performKeyInput { repeat(40) { pressKey(Key.DirectionDown) } }
+    waitForIdle()
+    assertEquals(0, onAllNodesWithText(FIRST_ELEMENT).fetchSemanticsNodes().size, "the body scrolled past")
+}
 
 /** Behavior of the [CodeEditor] composable itself; the document model is covered by `CodeEditorFindTest`. */
 class CodeEditorSurfaceTest {
@@ -107,6 +143,99 @@ class CodeEditorSurfaceTest {
         val query = onNode(hasSetTextAction()).fetchSemanticsNode()
             .config.getOrNull(SemanticsProperties.EditableText)?.text
         assertEquals("", query)
+    }
+
+    /**
+     * The point of the sticky header: the key an array belongs to is still readable once the array is long
+     * enough to have pushed its own opening line off the top.
+     */
+    @OptIn(ExperimentalTestApi::class)
+    @Test
+    fun parentLinesStayPinnedOnceTheyScrollAway() = runComposeUiTest {
+        setArrayEditor()
+        scrollPastTheArrayOpener()
+
+        val opener = onNodeWithText(ARRAY_OPENER).getUnclippedBoundsInRoot()
+        // The band's only row here, the root `{` being left out of it, so the opener sits at the very top of
+        // the editor — nowhere near line 2's own place in a document scrolled forty lines on.
+        assertTrue(opener.top < opener.height * 2, "the opener should be pinned at the top, was ${opener.top}")
+    }
+
+    /**
+     * Clicking a pinned line goes back to it — and it has to *stay* there. The band deliberately doesn't take
+     * focus off the editor, because the caret-follow effect would then fire and drag the list straight back
+     * to wherever the caret was left.
+     */
+    @OptIn(ExperimentalTestApi::class)
+    @Test
+    fun clickingAPinnedLineScrollsBackToIt() = runComposeUiTest {
+        setArrayEditor()
+        scrollPastTheArrayOpener()
+
+        onNodeWithText(ARRAY_OPENER).performClick()
+        waitForIdle()
+        assertEquals(1, onAllNodesWithText(FIRST_ELEMENT).fetchSemanticsNodes().size, "back at the array")
+    }
+
+    /**
+     * The band is opaque and sits over the list, so it is hit before the rows underneath it are: it has to
+     * hand the wheel on, or scrolling would die across the whole top of the editor.
+     */
+    @OptIn(ExperimentalTestApi::class)
+    @Test
+    fun theBandDoesNotSwallowTheWheel() = runComposeUiTest {
+        setArrayEditor()
+        scrollPastTheArrayOpener()
+
+        // Far enough back to reach the top whatever a wheel notch is worth here; over-scroll just clamps.
+        onNodeWithText(ARRAY_OPENER).performMouseInput { scroll(-100f) }
+        waitForIdle()
+        assertEquals(1, onAllNodesWithText(FIRST_ELEMENT).fetchSemanticsNodes().size, "the wheel reached the list")
+    }
+
+    /**
+     * A diff pane is excluded on purpose: its rows are the pair's grid rather than one document's, and a
+     * pinned copy would sit over the row tint that says what changed.
+     */
+    @OptIn(ExperimentalTestApi::class)
+    @Test
+    fun aDiffPaneNeverPinsParentLines() = runComposeUiTest {
+        setContent {
+            WailoTheme(darkTheme = false) {
+                val state = rememberCodeEditorState(LONG_ARRAY)
+                val folds = remember(state) { computeFoldRegions(state) }
+                val listState = rememberLazyListState()
+                val hScroll = rememberScrollState()
+                Box(Modifier.size(640.dp, 400.dp)) {
+                    CodeEditor(
+                        state = state,
+                        language = CodeLanguage.Json,
+                        readOnly = true,
+                        modifier = Modifier.fillMaxSize(),
+                        decor = CodeEditorDecor(
+                            listState = listState,
+                            hScroll = hScroll,
+                            wrap = true,
+                            lineNumber = { it + 1 },
+                            otherLength = { 0 },
+                            otherMaxLength = 0,
+                            rowTint = { null },
+                            spanRange = { null },
+                            spanTint = Color.Transparent,
+                            verticalScrollbar = true,
+                            foldSpans = folds,
+                            foldArrows = folds.mapValues { it.value.closeChar },
+                            foldedRows = emptySet(),
+                            onToggleFold = {},
+                        ),
+                    )
+                }
+            }
+        }
+
+        scrollPastTheArrayOpener()
+
+        assertEquals(0, onAllNodesWithText(ARRAY_OPENER).fetchSemanticsNodes().size)
     }
 
     /**

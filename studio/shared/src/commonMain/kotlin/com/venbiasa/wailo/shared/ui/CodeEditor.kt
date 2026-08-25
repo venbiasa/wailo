@@ -5,8 +5,11 @@ import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
+import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.drag
+import androidx.compose.foundation.gestures.scrollable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -33,9 +36,12 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -69,6 +75,7 @@ import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.LineHeightStyle
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.venbiasa.wailo.shared.format.JsonToken
@@ -85,6 +92,7 @@ import com.venbiasa.wailo.shared.theme.LocalWailoColors
 import kotlin.math.abs
 import kotlin.math.floor
 import kotlin.math.roundToInt
+import kotlinx.coroutines.launch
 import org.jetbrains.compose.resources.DrawableResource
 import org.jetbrains.compose.resources.vectorResource
 
@@ -111,6 +119,11 @@ private const val DOTS_CELLS = 3
 // is never reached; with wrap off it only ever bounds the pathological case (the far tail of such a line just
 // isn't horizontally reachable) and stays far past any real viewport, so normal scrolling is untouched.
 private const val MAX_CONTENT_WIDTH_PX = 200_000f
+
+// How many parent lines the sticky header may pin at once — past this the band costs more viewport than the
+// context is worth. Which end of the chain survives the cut is `ScopeNesting.ancestorsOf`'s call, and it is
+// the one that keeps the band from flickering rather than the one that reads best on a single frame.
+private const val MAX_STICKY_ROWS = 5
 
 /**
  * What one pane of a side-by-side diff needs the editor to do differently — and nothing else, so a plain
@@ -236,6 +249,7 @@ internal fun CodeEditor(
     // `findOpen` is what makes a second Cmd+F re-focus a bar that's already open.
     var findFocusRequests by remember { mutableStateOf(0) }
     var viewportWidthPx by remember { mutableStateOf(0) }
+    var viewportHeightPx by remember { mutableStateOf(0) }
     // Soft wrap on by default: long lines reflow onto extra visual rows at the viewport edge instead of
     // scrolling sideways. Held per editor instance (not persisted) and flipped by the corner toggle — except
     // in a diff, where both panes must wrap identically or the columns drift, so the pair decides.
@@ -294,6 +308,17 @@ internal fun CodeEditor(
         else (0 until lineCount).filter { it !in hidden }
     }
 
+    // Sticky parent lines, over the same regions the fold arrows use. JSON only — the band's whole claim is
+    // that an indented line belongs to the key above it, which plain text doesn't make. A diff pane is
+    // excluded too: its rows are the pair's grid rather than one document's, and a pinned copy would sit on
+    // top of the row tint that says what changed. Never let the band eat more than half the viewport — five
+    // rows over a short slot (a rule body editor docked small) would leave nothing underneath them.
+    val stickyScopes = language == CodeLanguage.Json && decor == null
+    val stickyNesting = remember(stickyScopes, foldRegions) {
+        if (stickyScopes) ScopeNesting.from(foldRegions) else ScopeNesting.Empty
+    }
+    val maxStickyRows = if (lineHeightPx <= 0) 0 else minOf(MAX_STICKY_ROWS, viewportHeightPx / lineHeightPx / 2)
+
     // A solid caret while typing that then blinks; reset to solid on every caret/edit so motion never hides it.
     var caretOn by remember { mutableStateOf(true) }
     LaunchedEffect(caret, state.version, readOnly) {
@@ -319,8 +344,14 @@ internal fun CodeEditor(
         } else {
             visibleLines.indexOf(caret.line).let { if (it >= 0) it else visibleLines.indexOfLast { l -> l <= caret.line } }
         }.coerceAtLeast(0)
-        if (listState.layoutInfo.visibleItemsInfo.none { it.index == targetIndex }) {
-            listState.scrollToItem(targetIndex)
+        // The sticky band paints over the top of the list, so the caret has to stay that many rows clear of
+        // it: without this, a scroll that "revealed" the caret parks it behind the band and the keystrokes
+        // that follow are typed blind. Counted in rows rather than pixels because a wrapped row is never
+        // shorter than one line, which makes the clearance hold under wrap too.
+        val clearRows = if (stickyScopes) maxStickyRows else 0
+        val onScreen = listState.layoutInfo.visibleItemsInfo.any { it.index == targetIndex }
+        if (!onScreen || targetIndex - listState.firstVisibleItemIndex < clearRows) {
+            listState.scrollToItem((targetIndex - clearRows).coerceAtLeast(0))
         }
         // Wrapped lines never overflow horizontally, so there's no sideways follow — just park the scroll at 0.
         if (wrapCols != null) {
@@ -648,7 +679,10 @@ internal fun CodeEditor(
         }
         Box(
             Modifier.weight(1f).fillMaxWidth()
-                .onSizeChanged { viewportWidthPx = it.width }
+                .onSizeChanged {
+                    viewportWidthPx = it.width
+                    viewportHeightPx = it.height
+                }
                 .onFocusChanged { focused = it.isFocused }
                 .focusRequester(focusRequester)
                 .focusable()
@@ -710,6 +744,23 @@ internal fun CodeEditor(
                     )
                 }
             }
+            if (stickyScopes && maxStickyRows > 0) {
+                StickyScopes(
+                    state = state,
+                    nesting = stickyNesting,
+                    maxRows = maxStickyRows,
+                    foldRegions = foldRegions,
+                    listState = listState,
+                    visibleLines = visibleLines,
+                    hScroll = hScroll,
+                    language = language,
+                    textStyle = textStyle,
+                    highlight = highlight,
+                    lineHeightPx = lineHeightPx,
+                    lineHeightDp = lineHeightDp,
+                    gutterWidthDp = gutterWidthDp,
+                )
+            }
             // Self-hiding desktop scrollbars: they paint a thumb only while the body overflows. The
             // horizontal one exists only off wrap — wrapped lines never overflow sideways.
             if (decor == null || decor.verticalScrollbar) {
@@ -766,6 +817,146 @@ private fun WrapToggle(enabled: Boolean, onToggle: () -> Unit, modifier: Modifie
                     modifier = Modifier.size(16.dp),
                 )
             }
+        }
+    }
+}
+
+/**
+ * The blocks still open above the top of the viewport, pinned over it — so the key an object belongs to
+ * stays on screen while its children scroll past. Each row is a real document line, highlighted and numbered
+ * exactly as it is in place, and clicking one scrolls back to it.
+ *
+ * The deepest row is placed from its block's *closing* row rather than from its own slot, so it slides up
+ * behind the row above as the block ends instead of disappearing the instant the chain shortens. JSON needs
+ * that more than code does: a block here is often three lines, so the pop would fire on every array element.
+ * That placement is read in the layout phase rather than in composition, so scrolling re-places the band
+ * without recomposing it and only a change of *which* lines are pinned costs a recomposition.
+ */
+@Composable
+private fun StickyScopes(
+    state: CodeEditorState,
+    nesting: ScopeNesting,
+    maxRows: Int,
+    foldRegions: Map<Int, Fold>,
+    listState: LazyListState,
+    visibleLines: List<Int>?,
+    hScroll: ScrollState,
+    language: CodeLanguage,
+    textStyle: TextStyle,
+    highlight: HighlightColors,
+    lineHeightPx: Int,
+    lineHeightDp: Dp,
+    gutterWidthDp: Dp,
+) {
+    // Where a line sits in the list once folds have taken its neighbours out of it.
+    fun rowOf(line: Int): Int? =
+        if (visibleLines == null) line else visibleLines.binarySearch(line).takeIf { it >= 0 }
+
+    val topRow = listState.firstVisibleItemIndex
+    val topLine = visibleLines?.getOrNull(topRow) ?: topRow
+    val lines = remember(nesting, topLine, maxRows) { nesting.stickyAncestorsOf(topLine, maxRows) }
+    if (lines.isEmpty()) return
+
+    val scheme = MaterialTheme.colorScheme
+    val scope = rememberCoroutineScope()
+    val closeRow = foldRegions[lines.last()]?.endLine?.let { rowOf(it) }
+    val lastSlotPx = (lines.size - 1) * lineHeightPx
+
+    fun lastTopPx(): Int {
+        val closeTop = closeRow
+            ?.let { row -> listState.layoutInfo.visibleItemsInfo.firstOrNull { it.index == row }?.offset }
+            ?: return lastSlotPx
+        // Ride just above the closing bracket once it has climbed into the band, and stop against the row
+        // above: by the time the two fully overlap the block has left the chain, so the hand-off is seamless.
+        return (closeTop - lineHeightPx).coerceIn(lastSlotPx - lineHeightPx, lastSlotPx)
+    }
+
+    Box(
+        Modifier.fillMaxWidth()
+            .height(lineHeightDp * lines.size + 1.dp)
+            .clipToBounds()
+            // The band is opaque and sits over the list, so without this it would swallow the wheel across
+            // the whole top of the editor. Reversed for the reason a LazyColumn reverses it.
+            .scrollable(state = listState, orientation = Orientation.Vertical, reverseDirection = true),
+    ) {
+        Box(
+            Modifier.offset { IntOffset(0, lastTopPx() + lineHeightPx) }
+                .fillMaxWidth()
+                .height(1.dp)
+                .background(scheme.outlineVariant),
+        )
+        // Outermost composed last, so it paints over the deeper rows sliding up behind it.
+        for (i in lines.indices.reversed()) {
+            val line = lines[i]
+            key(line) {
+                StickyScopeRow(
+                    text = state.lineAt(line),
+                    number = line + 1,
+                    language = language,
+                    textStyle = textStyle,
+                    highlight = highlight,
+                    lineHeightDp = lineHeightDp,
+                    gutterWidthDp = gutterWidthDp,
+                    hScroll = hScroll,
+                    top = { if (i == lines.lastIndex) lastTopPx() else i * lineHeightPx },
+                    // Land the line under the band rather than at the top of the list, where the band that
+                    // is left once it stops being an ancestor would cover the very row that was clicked.
+                    // [maxRows] is the band's ceiling, so the clearance holds whatever ends up pinned.
+                    onClick = {
+                        rowOf(line)?.let { row ->
+                            scope.launch { listState.scrollToItem((row - maxRows).coerceAtLeast(0)) }
+                        }
+                    },
+                )
+            }
+        }
+    }
+}
+
+// One pinned line. It is a label with a single gesture — click to go back to it — so the fold column is
+// drawn empty rather than carrying an arrow that wouldn't fold anything.
+@Composable
+private fun StickyScopeRow(
+    text: String,
+    number: Int,
+    language: CodeLanguage,
+    textStyle: TextStyle,
+    highlight: HighlightColors,
+    lineHeightDp: Dp,
+    gutterWidthDp: Dp,
+    hScroll: ScrollState,
+    top: () -> Int,
+    onClick: () -> Unit,
+) {
+    val scheme = MaterialTheme.colorScheme
+    val annotated = remember(text, language, highlight) { annotateLine(text, language, highlight) }
+    val click by rememberUpdatedState(onClick)
+    Row(
+        Modifier.offset { IntOffset(0, top()) }
+            .fillMaxWidth()
+            .height(lineHeightDp)
+            .background(scheme.surface)
+            // A raw tap rather than `clickable`, which is a focus target: pulling focus off the editor would
+            // fire its caret-follow effect, which scrolls straight back to wherever the caret was left.
+            .pointerInput(Unit) { detectTapGestures { click() } },
+    ) {
+        Box(
+            Modifier.width(gutterWidthDp).fillMaxHeight()
+                .background(scheme.surfaceContainer)
+                .padding(end = 8.dp),
+            contentAlignment = Alignment.CenterEnd,
+        ) {
+            Text(number.toString(), style = textStyle.copy(color = scheme.onSurfaceVariant), maxLines = 1)
+        }
+        Box(Modifier.width(FOLD_COL_WIDTH).fillMaxHeight().background(scheme.surfaceContainer))
+        Box(Modifier.weight(1f).fillMaxHeight().clipToBounds()) {
+            Text(
+                annotated,
+                modifier = Modifier.offset { IntOffset(-hScroll.value, 0) },
+                style = textStyle,
+                softWrap = false,
+                maxLines = 1,
+            )
         }
     }
 }
