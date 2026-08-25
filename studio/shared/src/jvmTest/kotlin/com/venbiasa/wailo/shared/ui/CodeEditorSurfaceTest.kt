@@ -64,6 +64,10 @@ private val LONG_ARRAY = buildString {
     append("}")
 }
 
+// An element far enough down that array to only ever be on screen because something scrolled there.
+private const val DEEP_QUERY = "57"
+private const val DEEP_ELEMENT = "    $DEEP_QUERY,"
+
 // The plain (non-diff) editor the sticky band is drawn over.
 @OptIn(ExperimentalTestApi::class)
 private fun ComposeUiTest.setArrayEditor() {
@@ -72,6 +76,44 @@ private fun ComposeUiTest.setArrayEditor() {
             val state = rememberCodeEditorState(LONG_ARRAY)
             Box(Modifier.size(640.dp, 400.dp)) {
                 CodeEditor(state, CodeLanguage.Json, readOnly = true, Modifier.fillMaxSize())
+            }
+        }
+    }
+}
+
+// One pane of a side-by-side diff over the same array: a decorated editor, so it takes the pair's scroll,
+// wrap and fold rules instead of its own.
+@OptIn(ExperimentalTestApi::class)
+private fun ComposeUiTest.setDiffPane() {
+    setContent {
+        WailoTheme(darkTheme = false) {
+            val state = rememberCodeEditorState(LONG_ARRAY)
+            val folds = remember(state) { computeFoldRegions(state) }
+            val listState = rememberLazyListState()
+            val hScroll = rememberScrollState()
+            Box(Modifier.size(640.dp, 400.dp)) {
+                CodeEditor(
+                    state = state,
+                    language = CodeLanguage.Json,
+                    readOnly = true,
+                    modifier = Modifier.fillMaxSize(),
+                    decor = CodeEditorDecor(
+                        listState = listState,
+                        hScroll = hScroll,
+                        wrap = true,
+                        lineNumber = { it + 1 },
+                        otherLength = { 0 },
+                        otherMaxLength = 0,
+                        rowTint = { null },
+                        spanRange = { null },
+                        spanTint = Color.Transparent,
+                        verticalScrollbar = true,
+                        foldSpans = folds,
+                        foldArrows = folds.mapValues { it.value.closeChar },
+                        foldedRows = emptySet(),
+                        onToggleFold = {},
+                    ),
+                )
             }
         }
     }
@@ -200,42 +242,31 @@ class CodeEditorSurfaceTest {
     @OptIn(ExperimentalTestApi::class)
     @Test
     fun aDiffPaneNeverPinsParentLines() = runComposeUiTest {
-        setContent {
-            WailoTheme(darkTheme = false) {
-                val state = rememberCodeEditorState(LONG_ARRAY)
-                val folds = remember(state) { computeFoldRegions(state) }
-                val listState = rememberLazyListState()
-                val hScroll = rememberScrollState()
-                Box(Modifier.size(640.dp, 400.dp)) {
-                    CodeEditor(
-                        state = state,
-                        language = CodeLanguage.Json,
-                        readOnly = true,
-                        modifier = Modifier.fillMaxSize(),
-                        decor = CodeEditorDecor(
-                            listState = listState,
-                            hScroll = hScroll,
-                            wrap = true,
-                            lineNumber = { it + 1 },
-                            otherLength = { 0 },
-                            otherMaxLength = 0,
-                            rowTint = { null },
-                            spanRange = { null },
-                            spanTint = Color.Transparent,
-                            verticalScrollbar = true,
-                            foldSpans = folds,
-                            foldArrows = folds.mapValues { it.value.closeChar },
-                            foldedRows = emptySet(),
-                            onToggleFold = {},
-                        ),
-                    )
-                }
-            }
-        }
-
+        setDiffPane()
         scrollPastTheArrayOpener()
 
         assertEquals(0, onAllNodesWithText(ARRAY_OPENER).fetchSemanticsNodes().size)
+    }
+
+    /**
+     * Find has to reach its hit in a diff pane too. The bar keeps focus in its query field, and an unfocused
+     * pane is barred from chasing its caret — that guard is what stops the idle side of a diff from dragging
+     * the shared scroll position back to its own document's top, and it used to swallow this scroll as well:
+     * the match was selected forty rows below the viewport, so the bar read as if it had found nothing.
+     */
+    @OptIn(ExperimentalTestApi::class)
+    @Test
+    fun findInADiffPaneScrollsToItsMatch() = runComposeUiTest {
+        setDiffPane()
+
+        // Cmd/Ctrl+F is an editor shortcut, so a click on a line is how the pane gets focus first.
+        onNodeWithText(FIRST_ELEMENT).performClick()
+        onNode(isFocused()).performKeyInput { withKeyDown(Key.CtrlLeft) { pressKey(Key.F) } }
+        onNode(hasSetTextAction()).performTextInput(DEEP_QUERY)
+        onNode(isFocused()).performKeyInput { pressKey(Key.Enter) }
+        waitForIdle()
+
+        assertEquals(1, onAllNodesWithText(DEEP_ELEMENT).fetchSemanticsNodes().size, "the hit is on screen")
     }
 
     /**

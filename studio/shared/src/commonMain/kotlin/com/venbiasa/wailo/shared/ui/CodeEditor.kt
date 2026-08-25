@@ -248,6 +248,9 @@ internal fun CodeEditor(
     // attached yet (the bar hasn't composed), which silently does nothing. Keying on a counter rather than
     // `findOpen` is what makes a second Cmd+F re-focus a bar that's already open.
     var findFocusRequests by remember { mutableStateOf(0) }
+    // Bumped by every find that landed on a match, so a diff pane can put the hit on screen even though the
+    // query field — not the pane — holds focus. See the reveal effect below.
+    var findReveals by remember { mutableStateOf(0) }
     var viewportWidthPx by remember { mutableStateOf(0) }
     var viewportHeightPx by remember { mutableStateOf(0) }
     // Soft wrap on by default: long lines reflow onto extra visual rows at the viewport edge instead of
@@ -333,12 +336,9 @@ internal fun CodeEditor(
     // caret *position* but must stop drawing it, so two fields don't look focused at once.
     var focused by remember { mutableStateOf(false) }
 
-    // Keep the caret line composed (so its row and this frame's edits stay live) and on-screen both ways.
-    // With folds active the list index is the caret's position in `visibleLines`, not its raw line number.
-    // A diff's panes share one scroll position, so only the focused pane may chase its caret: the idle one's
-    // caret sits at the top of its document and would otherwise drag the pair back there on every fold.
-    LaunchedEffect(caret, viewportWidthPx, visibleLines, wrapCols, focused) {
-        if (decor != null && !focused) return@LaunchedEffect
+    // Brings the caret line on screen both ways. With folds active the list index is the caret's position in
+    // `visibleLines`, not its raw line number.
+    suspend fun revealCaret() {
         val targetIndex = if (visibleLines == null) {
             caret.line
         } else {
@@ -356,7 +356,7 @@ internal fun CodeEditor(
         // Wrapped lines never overflow horizontally, so there's no sideways follow — just park the scroll at 0.
         if (wrapCols != null) {
             if (hScroll.value != 0) hScroll.scrollTo(0)
-            return@LaunchedEffect
+            return
         }
         val contentViewport = (viewportWidthPx - gutterAndFoldPx).coerceAtLeast(1f)
         val caretX = caret.col * charWidthPx
@@ -366,6 +366,24 @@ internal fun CodeEditor(
             else -> null
         }
         target?.let { hScroll.scrollTo(it.roundToInt().coerceIn(0, hScroll.maxValue)) }
+    }
+
+    // Keep the caret line composed (so its row and this frame's edits stay live) and on-screen. A diff's panes
+    // share one scroll position, so only the focused pane may chase its caret: the idle one's caret sits at the
+    // top of its document and would otherwise drag the pair back there on every fold.
+    LaunchedEffect(caret, viewportWidthPx, visibleLines, wrapCols, focused) {
+        if (decor != null && !focused) return@LaunchedEffect
+        revealCaret()
+    }
+
+    // Find hands focus to its query field and keeps it there, so a diff pane is never focused while searching
+    // and the guard above would swallow the very scroll that puts the hit on screen — leaving the match
+    // selected off-screen and the bar looking dead. A reveal the pane asks for explicitly is exempt: only the
+    // pane whose bar found something bumps this, so the idle side still can't drag the pair to its own top.
+    // Keyed on the count rather than the caret so a later fold or focus change cannot replay it. A plain
+    // editor needs none of this — nothing bars its caret follow.
+    LaunchedEffect(findReveals) {
+        if (decor != null && findReveals > 0) revealCaret()
     }
 
     // The selection to actually copy/cut. When it ends right at a collapsed opener's fold point (that line's
@@ -429,7 +447,7 @@ internal fun CodeEditor(
     // Selects the next/previous match, deliberately leaving focus where it is: the find bar keeps it, so a
     // run of Enters walks the document instead of the first one throwing the user back into the text (where
     // the second Enter would insert a newline). The match still shows — the selection highlight doesn't
-    // depend on the editor being focused — and the caret effect above scrolls it into view.
+    // depend on the editor being focused — and the reveal effects above scroll it into view.
     // [fromMatchStart] re-tests the current match in place, so flipping Match case updates the highlight
     // rather than skipping past the hit sitting under it.
     fun runFind(forward: Boolean, fromMatchStart: Boolean = false) {
@@ -449,6 +467,7 @@ internal fun CodeEditor(
             if (decor == null) foldedStarts.removeAll(covering.toSet()) else covering.forEach(decor.onToggleFold)
         }
         state.setSelection(match.first, match.second)
+        findReveals++
     }
 
     // Rewrites the highlighted match and steps to the next one, which is what makes repeated Replace sweep
