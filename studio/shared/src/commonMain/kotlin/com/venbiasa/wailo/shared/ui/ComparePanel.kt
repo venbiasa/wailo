@@ -71,6 +71,9 @@ import com.venbiasa.wailo.shared.resources.ic_swap_horiz
 import com.venbiasa.wailo.shared.resources.ic_swap_vert
 import com.venbiasa.wailo.shared.resources.ic_wrap_text
 import com.venbiasa.wailo.shared.theme.LocalWailoColors
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import okio.ByteString
 import org.jetbrains.compose.resources.DrawableResource
@@ -197,18 +200,12 @@ internal fun ComparePanel(
     // delta a gesture is asking for and hands it to the list that measures next, which zeroes it; a second
     // list reading the same state therefore never moves at all. So the two keep their own and copy each
     // other's position instead. Every row is the same height on both sides, so an index and an offset name
-    // exactly the same place in either pane, and the copy is skipped when the target is already there —
-    // which is what kills the echo before it can bounce back as a loop.
+    // exactly the same place in either pane. What stops the two copies driving each other — and, less
+    // obviously, ending each other — is in [matchScroll].
     val leftList = rememberLazyListState()
     val rightList = rememberLazyListState()
-    LaunchedEffect(leftList, rightList) {
-        snapshotFlow { leftList.firstVisibleItemIndex to leftList.firstVisibleItemScrollOffset }
-            .collect { (index, offset) -> rightList.matchScroll(index, offset) }
-    }
-    LaunchedEffect(leftList, rightList) {
-        snapshotFlow { rightList.firstVisibleItemIndex to rightList.firstVisibleItemScrollOffset }
-            .collect { (index, offset) -> leftList.matchScroll(index, offset) }
-    }
+    LaunchedEffect(leftList, rightList) { mirrorScroll(leftList, rightList) }
+    LaunchedEffect(leftList, rightList) { mirrorScroll(rightList, leftList) }
 
     val scope = rememberCoroutineScope()
     var hunkAt by remember(rows) { mutableStateOf(-1) }
@@ -721,13 +718,42 @@ private fun DiffPanes(
 }
 
 /**
- * Puts this pane at the other's scroll position, unless it is already there. The guard is what makes a pair
- * of mirrors safe: the copy moves the target, the target's own watcher sees the move and copies back, and
- * that second copy is a no-op — so the two settle instead of driving each other.
+ * Holds [target] at [source]'s scroll position for as long as this runs — one direction of the pair's mirror,
+ * of which the panel runs two.
+ */
+internal suspend fun mirrorScroll(source: LazyListState, target: LazyListState) {
+    snapshotFlow { source.firstVisibleItemIndex to source.firstVisibleItemScrollOffset }
+        .collect { (index, offset) -> target.matchScroll(index, offset) }
+}
+
+/**
+ * Puts this pane at the other's scroll position, unless it is already there or already being driven.
+ *
+ * Being there is what makes a pair of mirrors safe: the copy moves the target, the target's own watcher sees
+ * the move and copies back, and that second copy is a no-op — so the two settle instead of driving each other.
+ * It only holds once they *have* settled, though; mid-gesture the source has moved on by the time the copy
+ * comes back, which makes the return trip a real write aimed at the pane under the user's hand.
+ *
+ * Which is why it must also yield to whoever is already scrolling that pane, and why losing anyway must not be
+ * fatal. `scrollToItem` is a Default-priority mutation: it loses the list's mutex to the gesture holding it (or
+ * to `stepHunk`'s animation) and is cancelled — and a `CancellationException` reaching the collector ends a
+ * watcher for good, since the effect running it is keyed on the two list states and so nothing ever restarts
+ * it. That is how one drag of one pane used to leave the panel mirroring in a single direction, looking for all
+ * the world like the other pane's wheel had stopped working. `ensureActive` keeps a real cancellation of the
+ * watcher itself propagating.
+ *
+ * A declined follow is dropped rather than retried, so scrolling both panes in quick alternation can leave them
+ * slightly out of step until the next scroll. Re-running it once the target went idle is worse: the position it
+ * carries is stale by then, so it pulls the pane back from where the user has just put it.
  */
 private suspend fun LazyListState.matchScroll(index: Int, offset: Int) {
     if (firstVisibleItemIndex == index && firstVisibleItemScrollOffset == offset) return
-    scrollToItem(index, offset)
+    if (isScrollInProgress) return
+    try {
+        scrollToItem(index, offset)
+    } catch (_: CancellationException) {
+        currentCoroutineContext().ensureActive()
+    }
 }
 
 private fun CompareSection.bodyHandle(entry: FlowEntry): BodyHandle? = when (this) {
