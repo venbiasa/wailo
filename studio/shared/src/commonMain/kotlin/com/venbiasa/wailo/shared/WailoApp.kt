@@ -85,10 +85,11 @@ import com.venbiasa.wailo.shared.ui.WailoViewer
  * [toolPanelWidthRatio] is the host-owned, persisted width of that docked panel expressed as a
  * fraction of the window (so it scales with the window rather than pinning to a fixed dp);
  * [onToolPanelWidthRatioChange] hands back a new fraction as the user drags the panel's resize handle.
- * [compareIds] is the (A, B) pair currently being diffed in the host's compare window
- * ([WailoCompareWindowContent], ADR-0079), which the traffic list marks; [onCompareChange] asks the host
- * to start a comparison or (with null) to end one. It lives with the host for the same reason the
- * breakpoint window's open state does: only the host can own an OS window.
+ * [comparedIds] is every row taking part in a comparison the host has open ([WailoCompareWindowContent],
+ * ADR-0079), which the traffic list marks; [onCompare] asks the host to open one for an (A, B) pair.
+ * Ending a comparison is its window's own close control, so there is nothing to report upward for it.
+ * Both live with the host for the same reason the breakpoint window's open state does: only the host can
+ * own an OS window.
  */
 @Composable
 fun WailoApp(
@@ -160,8 +161,8 @@ fun WailoApp(
     onProxySetupAction: (ProxySetupAction) -> Unit = {},
     toolPanelWidthRatio: Float = ToolPanelLayout.DefaultWidthRatio,
     onToolPanelWidthRatioChange: (Float) -> Unit = {},
-    compareIds: Pair<String, String>? = null,
-    onCompareChange: (Pair<String, String>?) -> Unit = {},
+    comparedIds: Set<String> = emptySet(),
+    onCompare: (Pair<String, String>) -> Unit = {},
     /**
      * How a body view gets its bytes. Rows arrive without them (ADR-0069), so this is what turns a
      * [FlowEntry]'s handle into something to render. Defaults to reading nothing, which is what a
@@ -238,8 +239,8 @@ fun WailoApp(
                 onProxySetupAction = onProxySetupAction,
                 toolPanelWidthRatio = toolPanelWidthRatio,
                 onToolPanelWidthRatioChange = onToolPanelWidthRatioChange,
-                compareIds = compareIds,
-                onCompareChange = onCompareChange,
+                comparedIds = comparedIds,
+                onCompare = onCompare,
             )
         }
     }
@@ -308,8 +309,9 @@ fun WailoBreakpointWindowContent(
  * the change — so this is a window rather than a mode of the detail panel.
  *
  * The pair is pinned: the host holds the two ids the window opened with, so clicking through the list
- * behind it leaves the comparison alone. [onSwap] trades the sides; closing is the window's own title bar,
- * since a second close control inside the panel duplicates it.
+ * behind it — or starting another comparison, which opens a window of its own — leaves this one alone.
+ * [onSwap] trades the sides; closing is the window's own title bar, since a second close control inside
+ * the panel duplicates it.
  *
  * Like [WailoBreakpointWindowContent] it carries its own theme, since Compose provides no CompositionLocal
  * across windows: [darkTheme] mirrors the host's choice and [textScale] rides on `fontScale` so Cmd +/-

@@ -85,8 +85,8 @@ internal fun TrafficList(
     entries: List<FlowEntry>,
     selectedId: String?,
     onSelect: (String) -> Unit,
-    compareIds: Pair<String, String>?,
-    onToggleCompare: (String) -> Unit,
+    comparedIds: Set<String>,
+    onCompare: (String) -> Unit,
     zoneOffsetMillis: Int,
     bookmarks: List<String>,
     onAddBookmark: (String) -> Unit,
@@ -178,12 +178,11 @@ internal fun TrafficList(
                             widths = widths,
                             hScroll = hScroll,
                             selected = entry.id == selectedId,
-                            comparing = entry.id == compareIds?.second,
-                            inComparison = entry.id == compareIds?.first || entry.id == compareIds?.second,
+                            inComparison = entry.id in comparedIds,
                             // A row can only be compared against something: with nothing selected there is
                             // no other side, and a row can't be compared with itself.
                             comparable = selectedId != null && selectedId != entry.id,
-                            onToggleCompare = { onToggleCompare(entry.id) },
+                            onCompare = { onCompare(entry.id) },
                             onClick = {
                                 onSelect(entry.id)
                                 // Clicking a row hands keyboard focus to the list so Up/Down can take over.
@@ -293,10 +292,9 @@ private fun TrafficRow(
     widths: SnapshotStateMap<TrafficColumn, Dp>,
     hScroll: ScrollState,
     selected: Boolean,
-    comparing: Boolean,
     inComparison: Boolean,
     comparable: Boolean,
-    onToggleCompare: () -> Unit,
+    onCompare: () -> Unit,
     onClick: () -> Unit,
     zoneOffsetMillis: Int,
     bookmarks: List<String>,
@@ -350,9 +348,10 @@ private fun TrafficRow(
             )
         }
         // The selected row is the left ("A") side of a comparison, so this row only offers to become the
-        // right one. Checked while it already is, which is also how the comparison is called off.
+        // right one. Never ticked: each comparison is a window of its own, so this row may be in several at
+        // once and none of them is ended from here — that is what the window's own close control is for.
         if (comparable) {
-            add(ContextMenuAction("Compare with selection", checked = comparing, onSelect = onToggleCompare))
+            add(ContextMenuAction("Compare with selection", onSelect = onCompare))
         }
         if (host.isNotEmpty()) {
             add(

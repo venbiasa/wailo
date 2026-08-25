@@ -157,8 +157,8 @@ internal fun WailoViewer(
     onProxySetupAction: (ProxySetupAction) -> Unit,
     toolPanelWidthRatio: Float,
     onToolPanelWidthRatioChange: (Float) -> Unit,
-    compareIds: Pair<String, String>?,
-    onCompareChange: (Pair<String, String>?) -> Unit,
+    comparedIds: Set<String>,
+    onCompare: (Pair<String, String>) -> Unit,
 ) {
     // Transient view state (not persisted): nothing is selected when the app opens.
     var selectedId by remember { mutableStateOf<String?>(null) }
@@ -346,16 +346,11 @@ internal fun WailoViewer(
                                 entries = visibleEntries,
                                 selectedId = selectedId,
                                 onSelect = { selectedId = it },
-                                compareIds = compareIds,
-                                // A row already being compared against turns the comparison off; any other
-                                // row starts one between the selection (A) and it (B). The pair then belongs
-                                // to the window, so moving the selection afterwards leaves it alone.
-                                onToggleCompare = { id ->
-                                    onCompareChange(
-                                        if (compareIds?.second == id) null
-                                        else selectedId?.let { it to id },
-                                    )
-                                },
+                                comparedIds = comparedIds,
+                                // A row starts a comparison between the selection (A) and it (B). The pair
+                                // then belongs to its window, so moving the selection afterwards leaves it
+                                // alone — and so does starting a second comparison.
+                                onCompare = { id -> selectedId?.let { onCompare(it to id) } },
                                 zoneOffsetMillis = zoneOffsetMillis,
                                 bookmarks = bookmarks,
                                 onAddBookmark = onAddBookmark,

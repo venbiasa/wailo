@@ -6,6 +6,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -24,6 +25,7 @@ import androidx.compose.ui.input.key.type
 import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.WindowPlacement
+import androidx.compose.ui.window.WindowPosition
 import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
@@ -152,6 +154,12 @@ private val MinBreakpointWindowSize = DpSize(560.dp, 420.dp)
 // narrowest at which both panes still show a useful span of each line.
 private val DefaultCompareWindowSize = DpSize(1120.dp, 720.dp)
 private val MinCompareWindowSize = DpSize(640.dp, 400.dp)
+
+// Comparisons opened while another is already up cascade off the remembered origin instead of landing
+// exactly on it: a diff that opens covering its predecessor is indistinguishable from having replaced it,
+// which is the one thing a second window exists to avoid. Capped so a long run of them stays on screen.
+private val CompareCascadeStep = 28.dp
+private const val MaxCompareCascade = 6
 
 // debounce (used below to coalesce window resize/move writes) is still a coroutines preview API.
 @OptIn(FlowPreview::class)
@@ -639,16 +647,19 @@ private fun runWailo(engine: DaemonClient) = application {
         if (pausedFlows.any { it.correlationId in triagedHolds }) breakpointWindowOpen = true
     }
 
-    // The two rows being diffed in the compare window (ADR-0079), as (A, B) ids. Held here rather than in
-    // the viewer because only the host can own an OS window — and pinning the pair is what lets the list
-    // behind it stay fully usable: clicking through rows while the diff is open changes the selection, not
-    // the comparison. Resolved against the live list, so clearing the capture closes the window.
-    var comparePair by remember { mutableStateOf<Pair<String, String>?>(null) }
-    var raiseCompareWindow by remember { mutableStateOf(0) }
-    val compareLeft = remember(entries, comparePair) { entries.firstOrNull { it.id == comparePair?.first } }
-    val compareRight = remember(entries, comparePair) { entries.firstOrNull { it.id == comparePair?.second } }
-    LaunchedEffect(compareLeft, compareRight) {
-        if (compareLeft == null || compareRight == null) comparePair = null
+    // Every comparison the user has open, each getting a window of its own below (ADR-0091). Held here
+    // rather than in the viewer because only the host can own an OS window — and pinning each pair is what
+    // lets the list behind it stay fully usable: clicking through rows changes the selection, not any
+    // comparison. Kept to rows that still exist, so clearing the capture closes their windows.
+    var comparisons by remember { mutableStateOf<List<Comparison>>(emptyList()) }
+    LaunchedEffect(entries) {
+        comparisons = comparisons.withOnlyLive(entries.mapTo(mutableSetOf()) { it.id })
+    }
+    // One raise counter per comparison: re-issuing a pair is a no-op on the list above, so without this the
+    // menu item would look dead once that window is buried — and it must be *that* window that comes up.
+    val raiseComparison = remember { mutableStateMapOf<String, Int>() }
+    val comparedIds = remember(comparisons) {
+        comparisons.flatMapTo(mutableSetOf()) { listOf(it.left, it.right) }
     }
 
     // Fill arms the daemon's enabled library in order and spends it against whatever is already waiting.
@@ -875,12 +886,11 @@ private fun runWailo(engine: DaemonClient) = application {
             onProxySetupAction = proxySetupAction,
             toolPanelWidthRatio = toolPanelWidthRatio,
             onToolPanelWidthRatioChange = { toolPanelWidthRatio = it },
-            compareIds = comparePair,
-            onCompareChange = { pair ->
-                comparePair = pair
-                // Comparing the same two rows again is a no-op on the pair above, so a window already open
-                // (and quite possibly buried behind this one) would look like a menu item that does nothing.
-                if (pair != null) raiseCompareWindow += 1
+            comparedIds = comparedIds,
+            onCompare = { (a, b) ->
+                val comparison = Comparison(a, b)
+                comparisons = comparisons.withOpened(comparison)
+                raiseComparison[comparison.key] = (raiseComparison[comparison.key] ?: 0) + 1
             },
         )
     }
@@ -961,50 +971,86 @@ private fun runWailo(engine: DaemonClient) = application {
     // The diff is its own OS window (ADR-0079) rather than a mode of the detail panel: two monospace
     // columns under the traffic list had room to prove the feature worked and none to actually read it.
     // Detached, it also stops competing with the list for the same vertical space — the point of comparing
-    // two rows is usually to keep hunting through the rest of them.
-    if (compareLeft != null && compareRight != null) {
-        val compareWindowState = rememberWindowState(
-            size = WindowStateStore.Compare.loadSize(DefaultCompareWindowSize),
-            position = WindowStateStore.Compare.loadPosition(),
-        )
-        LaunchedEffect(compareWindowState) {
-            snapshotFlow { Triple(compareWindowState.size, compareWindowState.position, compareWindowState.placement) }
-                .filter { (_, _, placement) -> placement == WindowPlacement.Floating }
-                .debounce(300.milliseconds)
-                .collect { (size, position, _) -> WindowStateStore.Compare.save(size, position) }
-        }
-        DisposableEffect(Unit) {
-            onDispose {
-                if (compareWindowState.placement == WindowPlacement.Floating) {
-                    WindowStateStore.Compare.save(compareWindowState.size, compareWindowState.position)
+    // two rows is usually to keep hunting through the rest of them. One window per comparison (ADR-0091),
+    // so reading a third row against a fourth keeps the diff that prompted it instead of spending it.
+    comparisons.forEach { comparison ->
+        key(comparison.key) {
+            val left = entries.firstOrNull { it.id == comparison.left }
+            val right = entries.firstOrNull { it.id == comparison.right }
+            // A comparison whose rows have just gone is dropped by the prune above, which runs after this
+            // composition — so skip the frame in between rather than opening a window on nothing.
+            if (left != null && right != null) {
+                // How far this one opened from the remembered origin, fixed for its lifetime: recomputing it
+                // as siblings close would slide a window the user had already placed.
+                val cascade = remember {
+                    comparisons.indexOfFirst { it.key == comparison.key }.coerceIn(0, MaxCompareCascade)
+                }
+                val compareWindowState = rememberWindowState(
+                    size = WindowStateStore.Compare.loadSize(DefaultCompareWindowSize),
+                    // With nothing saved the position stays PlatformDefault, where the OS does its own
+                    // cascading, so the offset is only ever applied to a real remembered origin.
+                    position = when (val saved = WindowStateStore.Compare.loadPosition()) {
+                        is WindowPosition.Absolute -> WindowPosition.Absolute(
+                            saved.x + CompareCascadeStep * cascade,
+                            saved.y + CompareCascadeStep * cascade,
+                        )
+                        else -> saved
+                    },
+                )
+                // Only the window that opened at the origin writes geometry back. The others opened offset
+                // from it, and saving that would walk the remembered origin down the screen, one comparison
+                // at a time, until a diff opened off the edge of it.
+                if (cascade == 0) {
+                    LaunchedEffect(compareWindowState) {
+                        snapshotFlow {
+                            Triple(
+                                compareWindowState.size,
+                                compareWindowState.position,
+                                compareWindowState.placement,
+                            )
+                        }
+                            .filter { (_, _, placement) -> placement == WindowPlacement.Floating }
+                            .debounce(300.milliseconds)
+                            .collect { (size, position, _) -> WindowStateStore.Compare.save(size, position) }
+                    }
+                    DisposableEffect(Unit) {
+                        onDispose {
+                            if (compareWindowState.placement == WindowPlacement.Floating) {
+                                WindowStateStore.Compare.save(compareWindowState.size, compareWindowState.position)
+                            }
+                        }
+                    }
+                }
+                Window(
+                    onCloseRequest = {
+                        comparisons = comparisons.withClosed(comparison.key)
+                        raiseComparison.remove(comparison.key)
+                    },
+                    state = compareWindowState,
+                    title = "Compare",
+                    icon = appIconPainter,
+                    onPreviewKeyEvent = onScaleKeyEvent,
+                ) {
+                    LaunchedEffect(Unit) {
+                        window.minimumSize = Dimension(
+                            MinCompareWindowSize.width.value.toInt(),
+                            MinCompareWindowSize.height.value.toInt(),
+                        )
+                    }
+                    LaunchedEffect(raiseComparison[comparison.key]) {
+                        window.toFront()
+                        window.requestFocus()
+                    }
+                    WailoCompareWindowContent(
+                        left = left,
+                        right = right,
+                        onSwap = { comparisons = comparisons.withSidesSwapped(comparison.key) },
+                        darkTheme = darkTheme,
+                        textScale = textScale,
+                        bodyLoader = bodyLoader,
+                    )
                 }
             }
-        }
-        Window(
-            onCloseRequest = { comparePair = null },
-            state = compareWindowState,
-            title = "Compare",
-            icon = appIconPainter,
-            onPreviewKeyEvent = onScaleKeyEvent,
-        ) {
-            LaunchedEffect(Unit) {
-                window.minimumSize = Dimension(
-                    MinCompareWindowSize.width.value.toInt(),
-                    MinCompareWindowSize.height.value.toInt(),
-                )
-            }
-            LaunchedEffect(raiseCompareWindow) {
-                window.toFront()
-                window.requestFocus()
-            }
-            WailoCompareWindowContent(
-                left = compareLeft,
-                right = compareRight,
-                onSwap = { comparePair = comparePair?.let { (a, b) -> b to a } },
-                darkTheme = darkTheme,
-                textScale = textScale,
-                bodyLoader = bodyLoader,
-            )
         }
     }
 }
