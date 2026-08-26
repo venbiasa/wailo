@@ -68,6 +68,22 @@ private val LONG_ARRAY = buildString {
 private const val DEEP_QUERY = "57"
 private const val DEEP_ELEMENT = "    $DEEP_QUERY,"
 
+// Foldable blocks all the way down, unlike LONG_ARRAY's two openers at the very top: a fold-triggered jump
+// only shows up where an arrow can be clicked with the document's first line far off screen.
+private const val OBJECTS = 40
+private const val FIRST_ID = """      "id": 0"""
+private val OBJECT_LIST = buildString {
+    appendLine("{")
+    appendLine("""  "items": [""")
+    repeat(OBJECTS) {
+        appendLine("    {")
+        appendLine("""      "id": $it""")
+        appendLine("    },")
+    }
+    appendLine("  ]")
+    append("}")
+}
+
 // The plain (non-diff) editor the sticky band is drawn over.
 @OptIn(ExperimentalTestApi::class)
 private fun ComposeUiTest.setArrayEditor() {
@@ -185,6 +201,47 @@ class CodeEditorSurfaceTest {
         val query = onNode(hasSetTextAction()).fetchSemanticsNode()
             .config.getOrNull(SemanticsProperties.EditableText)?.text
         assertEquals("", query)
+    }
+
+    /**
+     * A fold leaves the reader where they were. The caret-follow effect used to be keyed on the fold set and
+     * on focus, and clicking an arrow changes both without moving the caret — so every collapse chased a caret
+     * still at line 0 of a body nobody had typed in, and the viewport snapped back to the top of the document.
+     */
+    @OptIn(ExperimentalTestApi::class)
+    @Test
+    fun collapsingABlockKeepsTheScrollPosition() = runComposeUiTest {
+        setContent {
+            WailoTheme(darkTheme = false) {
+                val state = rememberCodeEditorState(OBJECT_LIST)
+                Box(Modifier.size(640.dp, 400.dp)) {
+                    CodeEditor(state, CodeLanguage.Json, readOnly = true, Modifier.fillMaxSize())
+                }
+            }
+        }
+
+        // Which objects are on screen, top-down: enough to say both that the viewport held still and that the
+        // click did fold something.
+        fun visibleIds(): List<Int> =
+            (0 until OBJECTS).filter { onAllNodesWithText("""      "id": $it""").fetchSemanticsNodes().isNotEmpty() }
+
+        // The wheel rather than the keyboard: walking the caret down would scroll the list legitimately, which
+        // is the one thing this test must not do. Over-scroll just clamps at the end of the document.
+        onNodeWithText(FIRST_ID).performMouseInput { scroll(20f) }
+        waitForIdle()
+        val top = visibleIds().first()
+        assertTrue(top > 0, "the top of the document scrolled away, was at object $top")
+
+        // Mid-viewport, not the topmost arrow: the sticky band paints over the first rows of the list, so a
+        // click up there lands on a pinned line and scrolls back to it — the band's own behavior, not a fold.
+        val arrows = onAllNodesWithContentDescription("Collapse block")
+        arrows[arrows.fetchSemanticsNodes().size / 2].performClick()
+        waitForIdle()
+
+        assertEquals(top, visibleIds().first(), "the fold left the viewport where it was")
+        // Guards the assertion above against passing on a click that did nothing at all: the folded opener
+        // now offers the other arrow, and it is only on screen because the viewport stayed put.
+        assertEquals(1, onAllNodesWithContentDescription("Expand block").fetchSemanticsNodes().size, "it folded")
     }
 
     /**

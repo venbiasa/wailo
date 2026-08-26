@@ -368,10 +368,14 @@ internal fun CodeEditor(
         target?.let { hScroll.scrollTo(it.roundToInt().coerceIn(0, hScroll.maxValue)) }
     }
 
-    // Keep the caret line composed (so its row and this frame's edits stay live) and on-screen. A diff's panes
-    // share one scroll position, so only the focused pane may chase its caret: the idle one's caret sits at the
-    // top of its document and would otherwise drag the pair back there on every fold.
-    LaunchedEffect(caret, viewportWidthPx, visibleLines, wrapCols, focused) {
+    // Keep the caret line composed (so its row and this frame's edits stay live) and on-screen. Keyed only on
+    // what moves the caret relative to the viewport — deliberately not on the fold set or on focus, neither of
+    // which moves it. Collapsing a block changes both (the arrow takes focus first), so keying on them made
+    // every fold chase a caret still sitting at line 0 of a body nobody had clicked in, snapping the reader to
+    // the top of the document. A fold that swallows the caret pulls it onto the opener, which *is* a caret move
+    // and so still reveals. A diff's panes share one scroll position, so only the focused pane may chase its
+    // caret: the idle one's caret sits at the top of its document and would otherwise drag the pair back there.
+    LaunchedEffect(caret, viewportWidthPx, wrapCols) {
         if (decor != null && !focused) return@LaunchedEffect
         revealCaret()
     }
