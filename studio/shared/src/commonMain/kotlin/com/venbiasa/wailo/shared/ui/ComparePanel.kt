@@ -145,8 +145,13 @@ internal fun ComparePanel(
 
     val leftBodyHandle = section.bodyHandle(left)
     val rightBodyHandle = section.bodyHandle(right)
-    val leftBytes = rememberBodyBytes(leftBodyHandle)
-    val rightBytes = rememberBodyBytes(rightBodyHandle)
+    val leftFetched = rememberBodyBytes(leftBodyHandle)
+    val rightFetched = rememberBodyBytes(rightBodyHandle)
+    // A body still being read is not an empty one, and here that difference is the whole verdict: diffing
+    // two blanks reports the pair identical, which is the one answer a diff must never get wrong.
+    val fetching = leftFetched == null || rightFetched == null
+    val leftBytes = leftFetched ?: ByteString.EMPTY
+    val rightBytes = rightFetched ?: ByteString.EMPTY
 
     // Whether this section is really JSON, sniffed from the bodies themselves — not assumed from "it is a
     // body tab". Key sorting and JSON syntax color are both meaningless on HTML, XML, or plain text, and
@@ -193,7 +198,7 @@ internal fun ComparePanel(
     // The diff is over whatever prefix was fetched, not the whole payload (ADR-0069). Saying so matters more
     // here than anywhere else: two bodies that agree for their first few megabytes and diverge after would
     // otherwise read as identical.
-    val clipped = section.isBody &&
+    val clipped = !fetching && section.isBody &&
         ((leftBodyHandle?.size ?: 0L) > leftBytes.size || (rightBodyHandle?.size ?: 0L) > rightBytes.size)
 
     // A scroll position each, mirrored — *not* one state shared by both panes. A `LazyListState` holds the
@@ -259,7 +264,7 @@ internal fun ComparePanel(
                 onSelect = { section = it },
                 modifier = Modifier.weight(1f),
             )
-            ChangeCount(hunks.size, hunkAt)
+            ChangeCount(hunks.size, hunkAt, pending = fetching)
             RotatedIconButton(
                 icon = Res.drawable.ic_keyboard_arrow_down,
                 label = "Previous change",
@@ -311,6 +316,10 @@ internal fun ComparePanel(
         }
         Box(Modifier.weight(1f).fillMaxWidth()) {
             when {
+                fetching ->
+                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        BodyLoadingNotice("Loading bodies…")
+                    }
                 leftLines.isEmpty() && rightLines.isEmpty() ->
                     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         MutedText("Nothing to compare in ${section.label}.")
@@ -451,8 +460,10 @@ private fun hiddenUnder(spans: Map<Int, Fold>, folded: List<Int>): Set<Int> {
 // "3 / 12" while stepping, the bare total before the first step, and the one state worth its own words:
 // a diff with nothing in it, which an empty counter would leave the user hunting for.
 @Composable
-private fun ChangeCount(total: Int, at: Int) {
+private fun ChangeCount(total: Int, at: Int, pending: Boolean) {
     val label = when {
+        // "identical" is what a zero count means, and it is not yet known to be true.
+        pending -> "…"
         total == 0 -> "identical"
         at < 0 -> "$total ${if (total == 1) "change" else "changes"}"
         else -> "${at + 1} / $total"

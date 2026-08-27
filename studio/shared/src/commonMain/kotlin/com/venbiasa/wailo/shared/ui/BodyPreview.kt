@@ -41,6 +41,7 @@ import com.venbiasa.wailo.shared.format.formatBytes
 import com.venbiasa.wailo.shared.format.hexDumpLine
 import com.venbiasa.wailo.shared.format.parseFormUrlEncoded
 import com.venbiasa.wailo.shared.format.prettyPrintJson
+import kotlinx.coroutines.delay
 import okio.ByteString
 import org.jetbrains.compose.resources.decodeToImageBitmap
 
@@ -56,15 +57,42 @@ internal const val PreviewByteLimit = 2 * 1024 * 1024
  * Fetch the part of a captured body a previewer can actually show, and recompose when it lands.
  *
  * A prefix, not the payload: a body is bounded by the disk it was spooled to (ADR-0069), and every
- * previewer below already refuses to render more than a couple of megabytes anyway. A null handle — no
- * body, or a tab that is not showing one — reads as empty and starts no fetch.
+ * previewer below already refuses to render more than a couple of megabytes anyway.
+ *
+ * Null is "the read has not landed yet", which is a different claim from an empty body and must stay
+ * distinguishable: bytes arrive from the daemon's spool a beat after the row that names them, so a
+ * viewer that collapses the two announces that a response carried nothing and then contradicts itself.
+ * A handle with nothing behind it — no body, or a tab not showing one — starts no fetch, so it resolves
+ * to empty here rather than waiting on a read that will never run.
  */
 @Composable
-internal fun rememberBodyBytes(handle: BodyHandle?, limit: Int = PreviewByteLimit): ByteString {
+internal fun rememberBodyBytes(handle: BodyHandle?, limit: Int = PreviewByteLimit): ByteString? {
     val loader = LocalBodyLoader.current
-    var bytes by remember(handle) { mutableStateOf(ByteString.EMPTY) }
-    LaunchedEffect(handle, limit) { bytes = loader.prefix(handle, limit) }
+    val nothingToFetch = handle == null || handle.size <= 0L || limit <= 0
+    var bytes by remember(handle, limit) {
+        mutableStateOf<ByteString?>(if (nothingToFetch) ByteString.EMPTY else null)
+    }
+    LaunchedEffect(handle, limit) {
+        if (!nothingToFetch) bytes = loader.prefix(handle, limit)
+    }
     return bytes
+}
+
+// A body read is a loopback socket and a decrypt, so most land within a frame or two — long enough to
+// leave a pane blank, too short to read a message in. Withholding the notice for that window keeps the
+// common case from flashing copy nobody could finish, while a genuinely large payload still says what it
+// is waiting on instead of looking like an empty response.
+private const val LoadingNoticeDelayMillis = 150L
+
+/** The stand-in a body view shows while its bytes are still being read (see [rememberBodyBytes]). */
+@Composable
+internal fun BodyLoadingNotice(text: String = "Loading body…", modifier: Modifier = Modifier) {
+    var visible by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        delay(LoadingNoticeDelayMillis)
+        visible = true
+    }
+    if (visible) MutedText(text, modifier)
 }
 
 /**
@@ -75,17 +103,23 @@ internal fun rememberBodyBytes(handle: BodyHandle?, limit: Int = PreviewByteLimi
  *
  * [body] is the prefix that was fetched and [capturedSize] is how long the body actually is; they differ
  * once a payload is larger than a viewer should hold (ADR-0069), and the difference is shown rather than
- * hidden — "the rest is missing" and "the rest is not on screen yet" are not the same claim.
+ * hidden — "the rest is missing" and "the rest is not on screen yet" are not the same claim. A null
+ * [body] is that same distinction one step earlier: nothing has been read yet, so the pane says so
+ * instead of reporting the body absent.
  */
 @Composable
 internal fun BodyPreview(
-    body: ByteString,
+    body: ByteString?,
     capturedSize: Long,
     contentType: String?,
     declaredSize: Long,
     truncated: Boolean,
     modifier: Modifier = Modifier,
 ) {
+    if (body == null) {
+        Box(modifier.padding(16.dp)) { BodyLoadingNotice() }
+        return
+    }
     val analysis = remember(body, contentType, truncated) { analyzeBody(body, contentType, truncated) }
     if (analysis.isEmpty) {
         Box(modifier.padding(16.dp)) { MutedText("No body") }

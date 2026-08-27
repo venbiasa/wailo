@@ -638,8 +638,8 @@ private fun SeedDetail(
     onTabChange: (PausedTab) -> Unit,
     onLoadBody: suspend (SeedRuleDef) -> ByteArray,
 ) {
-    // The body lives in a host file, so it's read asynchronously; null is "not read yet", which shows as
-    // an empty pane for the frame or two the read takes rather than flashing a wrong "No body".
+    // The body lives in a host file, so it's read asynchronously; null is "not read yet", which the
+    // previewer reports as such rather than flashing a wrong "No body".
     var body by remember(seed.id) { mutableStateOf<ByteString?>(null) }
     LaunchedEffect(seed.id) { body = onLoadBody(seed).toByteString() }
     val contentType = seed.headers.firstOrNull { it.name.equals("Content-Type", ignoreCase = true) }?.value
@@ -699,16 +699,14 @@ private fun SeedDetail(
                 // than as mojibake — a seed can serve any payload Map Local can.
                 // A seed's body is authored here, so it is entirely in memory: what was fetched and what
                 // exists are the same number.
-                PausedTab.Body -> body?.let { bytes ->
-                    BodyPreview(
-                        body = bytes,
-                        capturedSize = bytes.size.toLong(),
-                        contentType = contentType,
-                        declaredSize = bytes.size.toLong(),
-                        truncated = false,
-                        modifier = Modifier.fillMaxSize().padding(vertical = 8.dp),
-                    )
-                }
+                PausedTab.Body -> BodyPreview(
+                    body = body,
+                    capturedSize = body?.size?.toLong() ?: 0L,
+                    contentType = contentType,
+                    declaredSize = body?.size?.toLong() ?: 0L,
+                    truncated = false,
+                    modifier = Modifier.fillMaxSize().padding(vertical = 8.dp),
+                )
             }
         }
     }

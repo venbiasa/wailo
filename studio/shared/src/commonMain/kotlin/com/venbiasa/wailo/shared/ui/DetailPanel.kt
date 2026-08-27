@@ -478,7 +478,7 @@ private fun AuthContent(headers: List<Header>) {
 private fun RawContent(
     startLine: String,
     headers: List<Header>,
-    body: ByteString,
+    body: ByteString?,
     capturedSize: Long,
     declaredSize: Long,
     truncated: Boolean,
@@ -488,8 +488,8 @@ private fun RawContent(
         buildString {
             if (startLine.isNotBlank()) appendLine(startLine)
             headers.forEach { appendLine("${it.name}: ${it.value_}") }
-            when (val content = bodyContent(body, contentType)) {
-                BodyContent.Empty -> Unit
+            when (val content = body?.let { bodyContent(it, contentType) }) {
+                null, BodyContent.Empty -> Unit
                 is BodyContent.Binary -> {
                     appendLine()
                     append("⟨ binary • ${formatBytes(content.size.toLong())} ⟩")
@@ -501,11 +501,17 @@ private fun RawContent(
             }
         }
     }
+    // The start line and headers are already in hand and render immediately, so the notice has to name
+    // which half of the document is still outstanding.
+    if (body == null) {
+        BodyLoadingNotice()
+        Spacer(Modifier.height(4.dp))
+    }
     if (truncated) {
         MutedText("(truncated during capture • declared ${formatBytes(declaredSize)})")
         Spacer(Modifier.height(4.dp))
     }
-    if (capturedSize > body.size) {
+    if (body != null && capturedSize > body.size) {
         MutedText("(showing the first ${formatBytes(body.size.toLong())} of ${formatBytes(capturedSize)})")
         Spacer(Modifier.height(4.dp))
     }
