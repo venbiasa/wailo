@@ -23,8 +23,10 @@ import com.venbiasa.wailo.shared.MapLocalNode
 import com.venbiasa.wailo.shared.MapLocalRuleDef
 import com.venbiasa.wailo.shared.PickedFile
 import com.venbiasa.wailo.shared.ResponseHeader
+import com.venbiasa.wailo.shared.duplicateRuleName
 import com.venbiasa.wailo.shared.findRule
 import com.venbiasa.wailo.shared.groupOf
+import com.venbiasa.wailo.shared.insertRuleAfter
 import com.venbiasa.wailo.shared.setRuleEnabled
 import com.venbiasa.wailo.shared.upsertRule
 import kotlinx.coroutines.delay
@@ -122,7 +124,7 @@ fun MapLocalManager(
     // Export/import report one line and nothing else, so the result stays here instead of crossing the
     // host boundary as state: the host does the file work and returns what to say, blank if cancelled.
     var archiveNotice by remember { mutableStateOf("") }
-    val archiveScope = rememberCoroutineScope()
+    val panelScope = rememberCoroutineScope()
     LaunchedEffect(archiveNotice) {
         if (archiveNotice.isNotBlank()) {
             delay(ArchiveNoticeMillis)
@@ -156,6 +158,20 @@ fun MapLocalManager(
                             },
                             onEditRule = { openEditor(it) },
                             onNodesChange = onLayoutChange,
+                            onDuplicateRule = { rule ->
+                                val copy = rule.copy(
+                                    id = MapLocalRuleDef.newId(),
+                                    name = duplicateRuleName(rule.name),
+                                )
+                                // The source's bytes are the host's, so the copy is a fetch: stage them
+                                // before the layout goes out (the editor's Save order, ADR-0086), and
+                                // re-read the layout after that round-trip rather than committing the
+                                // one this was composed with.
+                                panelScope.launch {
+                                    onSaveBody(copy, onLoadBody(rule))
+                                    onLayoutChange(liveNodes.value.insertRuleAfter(rule.id, copy))
+                                }
+                            },
                             onSeedFromRule = onSeedFromRule,
                             collapsedGroupIds = collapsedGroups,
                             onClose = onClose,
@@ -164,10 +180,10 @@ fun MapLocalManager(
                                 // "all rules" because the file carries every authored tool, not just this
                                 // panel's — one backup rather than four to keep track of.
                                 ContextMenuAction("Export all rules\u2026") {
-                                    archiveScope.launch { archiveNotice = onExportRules() }
+                                    panelScope.launch { archiveNotice = onExportRules() }
                                 },
                                 ContextMenuAction("Import rules\u2026") {
-                                    archiveScope.launch { archiveNotice = onImportRules() }
+                                    panelScope.launch { archiveNotice = onImportRules() }
                                 },
                             ),
                         )

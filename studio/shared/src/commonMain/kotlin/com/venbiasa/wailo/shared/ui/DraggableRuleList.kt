@@ -121,8 +121,8 @@ private const val AutoScrollMaxPxPerSecond = 1500f
  * group-gating. [onEditRule] opens a rule (the caller navigates to its editor); a rule isn't committed
  * until that editor saves. [ruleContent] renders the middle of a rule row (the clickable label area) —
  * the only per-feature difference; the drag handle, enabled switch, and delete affordance are shared.
- * [rowActions] optionally gives a rule row a right-click menu (Map Local's "Seed…", ADR-0041); returning
- * an empty list — the default — leaves the row without one.
+ * [rowActions] optionally gives a rule row a right-click menu (Duplicate, plus Map Local's "Seed…",
+ * ADR-0041); returning an empty list — the default — leaves the row without one.
  *
  * [reorderable] drops the drag handles when a feature's order carries no meaning — every matching
  * breakpoint rule fires, so ordering them is a control that does nothing (Map Local and Seed keep it,

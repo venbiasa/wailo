@@ -38,3 +38,10 @@ data class MapLocalRuleDef(
         fun newId(): String = "rule-" + Random.nextLong().toULong().toString(16).padStart(16, '0')
     }
 }
+
+/**
+ * The name a copy of [name] carries: "Copy of Login". Deliberately not uniqued with a counter — a rule
+ * named "Copy of Login 4" asks the author to keep count of something they were never tracking, and a
+ * copy is about to be renamed in the editor anyway.
+ */
+fun duplicateRuleName(name: String): String = "Copy of " + name.ifBlank { "Untitled" }

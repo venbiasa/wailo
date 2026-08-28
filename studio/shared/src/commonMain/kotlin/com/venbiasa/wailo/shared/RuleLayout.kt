@@ -130,6 +130,25 @@ fun <T : LayoutRule<T>> List<LayoutNode<T>>.upsertRule(rule: T): List<LayoutNode
     }
 }
 
+/**
+ * Insert [rule] directly below [afterRuleId] — inside that rule's group when it is grouped, at the top
+ * level otherwise; appended loose when [afterRuleId] isn't in the layout. Backs a row's "Duplicate":
+ * landing beside its source is what gives the copy the same group gating, and keeps it next in match
+ * priority rather than last behind everything already authored.
+ */
+fun <T : LayoutRule<T>> List<LayoutNode<T>>.insertRuleAfter(afterRuleId: String, rule: T): List<LayoutNode<T>> {
+    forEachIndexed { index, node ->
+        when (node) {
+            is RuleNode -> if (node.rule.id == afterRuleId) return insertRule(rule, TopLevelAt(index + 1))
+            is GroupNode -> {
+                val child = node.rules.indexOfFirst { it.id == afterRuleId }
+                if (child >= 0) return insertRule(rule, InGroupAt(node.group.id, child + 1))
+            }
+        }
+    }
+    return this + RuleNode(rule)
+}
+
 /** Remove a rule by id from wherever it lives; a now-empty group is kept (empty groups are allowed). */
 fun <T : LayoutRule<T>> List<LayoutNode<T>>.removeRule(ruleId: String): List<LayoutNode<T>> = map { node ->
     when (node) {

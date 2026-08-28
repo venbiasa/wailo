@@ -63,6 +63,31 @@ class MapLocalLayoutTest {
     }
 
     @Test
+    fun insertRuleAfterLandsBesideItsSourceAndInheritsThatSourcesGroup() {
+        val inGroup = sample().insertRuleAfter("r2", rule("copy"))
+        assertEquals(listOf("r2", "copy", "r3"), inGroup.groupNode("g1")!!.rules.map { it.id })
+
+        // Beside a loose rule is the top level, never the group that happens to follow it.
+        val loose = sample().insertRuleAfter("r1", rule("copy"))
+        assertEquals(listOf("r1", "copy", "g1", "r4"), loose.map { it.id })
+        assertNull(loose.groupOf("copy"))
+
+        // Nothing to sit beside: appended rather than dropped.
+        val orphaned = sample().insertRuleAfter("missing", rule("copy"))
+        assertEquals("copy", orphaned.last().id)
+        assertNull(orphaned.groupOf("copy"))
+    }
+
+    @Test
+    fun duplicateNameIsPrefixedAndNeverNumbered() {
+        assertEquals("Copy of Login", duplicateRuleName("Login"))
+        // Repeat copies are allowed to collide rather than growing a counter, but a copy of a copy still
+        // reads as one; a nameless rule borrows the label the list shows it under.
+        assertEquals("Copy of Copy of Login", duplicateRuleName("Copy of Login"))
+        assertEquals("Copy of Untitled", duplicateRuleName(""))
+    }
+
+    @Test
     fun removeRuleLeavesAnEmptyGroupBehind() {
         val nodes = sample().removeRule("r2").removeRule("r3")
         val g = nodes.groupNode("g1")!!

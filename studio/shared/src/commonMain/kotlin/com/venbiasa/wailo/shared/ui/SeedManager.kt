@@ -12,6 +12,8 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
@@ -21,10 +23,12 @@ import com.venbiasa.wailo.shared.SeedNode
 import com.venbiasa.wailo.shared.SeedRuleDef
 import com.venbiasa.wailo.shared.findRule
 import com.venbiasa.wailo.shared.groupOf
+import com.venbiasa.wailo.shared.insertRuleAfter
 import com.venbiasa.wailo.shared.resources.Res
 import com.venbiasa.wailo.shared.resources.ic_note_add
 import com.venbiasa.wailo.shared.setRuleEnabled
 import com.venbiasa.wailo.shared.upsertRule
+import kotlinx.coroutines.launch
 
 /**
  * The Seed panel: the canned responses that answer held exchanges in the breakpoint window (ADR-0041).
@@ -68,6 +72,10 @@ internal fun SeedManager(
     // Captured bytes to open a draft's body on, keyed by rule id so a seed can't inherit another's:
     // only a row-seeded draft has an entry, and anything else falls through to its persisted body.
     val bodySeeds = remember { mutableStateMapOf<String, ByteArray?>() }
+    // Duplicate is the only action here that publishes *after* a suspend (it fetches the source's body
+    // first), so it re-reads the layout instead of committing the one it was composed with.
+    val liveNodes by rememberUpdatedState(nodes)
+    val panelScope = rememberCoroutineScope()
 
     // A row's "Seed…" hands over a fresh draft, possibly while the panel already shows another page;
     // load it so the panel lands on the editor, leaving Back pointing at the seed list.
@@ -101,6 +109,20 @@ internal fun SeedManager(
                 onEditRule = { editing = it },
                 onNodesChange = onLayoutChange,
                 onClose = onClose,
+                rowActions = { rule ->
+                    listOf(
+                        ContextMenuAction("Duplicate") {
+                            val copy = rule.copy(id = SeedRuleDef.newId())
+                            // Body before layout, the order Save uses, so a seed is never listed naming
+                            // a body nothing has sent (ADR-0086). Below its source is also its turn in
+                            // the queue: duplicating a seed is how one URL gets two answers.
+                            panelScope.launch {
+                                onSaveBody(copy, onLoadBody(rule))
+                                onLayoutChange(liveNodes.insertRuleAfter(rule.id, copy))
+                            }
+                        },
+                    )
+                },
             ) { rule -> SeedRuleContent(rule) }
         } else {
             val persisted = nodes.findRule(target.id)
