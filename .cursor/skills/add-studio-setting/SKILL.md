@@ -132,6 +132,14 @@ val applyMaxRetained: (Int) -> Unit = { next ->
 Only the host can attempt something that can fail (a bind), so it reports the verdict back through
 the error param rather than `shared` predicting which values work.
 
+The chain above delivers the *row*. When the thing the value governs sits several panels below the panel —
+a `CodeEditor` deep inside a body preview — deliver the value itself through a CompositionLocal provided at
+each window root in `WailoApp.kt` (`LocalStickyScopeRows`, next to `LocalBodyLoader`), and thread only
+value/error/`onApply` down to the row. Threading the value too would put a settings parameter on ten
+signatures that have no opinion about it. Remember the *other* window roots: `WailoBreakpointWindowContent`
+and `WailoCompareWindowContent` provide their own locals, so a value only added to `WailoApp` silently
+reverts to its default in those windows.
+
 ## Copy rules
 
 Match the existing rows or the panel reads as two different products.
@@ -174,6 +182,7 @@ Match the existing rows or the panel reads as two different products.
 | Capture server port | `engine.port` + `rebind` | `PortStore` | on Apply, rebinds live |
 | USB device port | `UsbDeviceManager.devicePort` | `UsbPortStore` | on Apply, re-dials |
 | Requests kept in memory | `engine.maxRetained` | `MaxRetainedStore` | on Apply, trims held |
+| Pinned parent lines | host state → `LocalStickyScopeRows` | `StickyScopeRowsStore` | on Apply, next frame |
 | Allow only paired devices | `engine.requirePairing` | `RequirePairingStore` | on flip |
 | This Studio's identity | `engine.pairings` | Keychain | on confirm |
 

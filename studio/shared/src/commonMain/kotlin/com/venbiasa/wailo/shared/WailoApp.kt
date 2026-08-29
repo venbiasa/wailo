@@ -15,6 +15,8 @@ import com.venbiasa.wailo.shared.theme.TextScale
 import com.venbiasa.wailo.shared.theme.WailoTheme
 import com.venbiasa.wailo.shared.ui.BreakpointInspector
 import com.venbiasa.wailo.shared.ui.ComparePanel
+import com.venbiasa.wailo.shared.ui.LocalStickyScopeRows
+import com.venbiasa.wailo.shared.ui.StickyScopeRows
 import com.venbiasa.wailo.shared.ui.ToolPanelLayout
 import com.venbiasa.wailo.shared.ui.WailoViewer
 
@@ -47,7 +49,11 @@ import com.venbiasa.wailo.shared.ui.WailoViewer
  * [maxRetained] is how many captured exchanges the engine holds before the
  * oldest fall off, and [onApplyMaxRetained] moves that cap (out-of-range values come back through
  * [maxRetainedError]); lowering it discards traffic, which is why it is applied on commit and not per
- * keystroke. [mcpAccess] is whether AI tools may reach the capture at all and [mcpRedactSecrets] whether
+ * keystroke. [stickyScopeRows] is how deep a JSON body's sticky header may pin the parent lines the
+ * reader has scrolled past, and [onApplyStickyScopeRows] changes it (a refused depth comes back through
+ * [stickyScopeRowsError]); it reaches the editors through a CompositionLocal rather than down this tree,
+ * since none of the panels in between has an opinion about it.
+ * [mcpAccess] is whether AI tools may reach the capture at all and [mcpRedactSecrets] whether
  * what they read has its credentials stripped (ADR-0059); both belong to the daemon rather than to this
  * window, so [onMcpAccessChange]/[onMcpRedactSecretsChange] report a flip and the value comes back from
  * there. [pairing] and [onPairingAction] drive the Wi-Fi trust surface (ADR-0039):
@@ -114,6 +120,9 @@ fun WailoApp(
     maxRetained: Int = 0,
     maxRetainedError: String? = null,
     onApplyMaxRetained: (Int) -> Unit = {},
+    stickyScopeRows: Int = StickyScopeRows.Default,
+    stickyScopeRowsError: String? = null,
+    onApplyStickyScopeRows: (Int) -> Unit = {},
     mcpAccess: Boolean = true,
     onMcpAccessChange: (Boolean) -> Unit = {},
     mcpRedactSecrets: Boolean = true,
@@ -175,6 +184,7 @@ fun WailoApp(
         CompositionLocalProvider(
             LocalDensity provides Density(density.density, density.fontScale * textScale),
             LocalBodyLoader provides bodyLoader,
+            LocalStickyScopeRows provides StickyScopeRows.coerce(stickyScopeRows),
         ) {
             WailoViewer(
                 entries = entries,
@@ -197,6 +207,9 @@ fun WailoApp(
                 maxRetained = maxRetained,
                 maxRetainedError = maxRetainedError,
                 onApplyMaxRetained = onApplyMaxRetained,
+                stickyScopeRows = stickyScopeRows,
+                stickyScopeRowsError = stickyScopeRowsError,
+                onApplyStickyScopeRows = onApplyStickyScopeRows,
                 mcpAccess = mcpAccess,
                 onMcpAccessChange = onMcpAccessChange,
                 mcpRedactSecrets = mcpRedactSecrets,
@@ -255,7 +268,9 @@ fun WailoApp(
  *
  * It carries its own theme so it matches the main window's appearance: [darkTheme] mirrors the host's
  * choice and [textScale] rides on `fontScale` exactly as in [WailoApp], so Cmd +/- resizes this window's
- * text too. [onResumeBreakpoint]/[onAbortBreakpoint] resolve a hold by correlation id (Resume applies the
+ * text too. [stickyScopeRows] crosses for the same reason — a paused body is an ordinary JSON editor, so
+ * without it the band here would pin to a depth this window alone disagreed with.
+ * [onResumeBreakpoint]/[onAbortBreakpoint] resolve a hold by correlation id (Resume applies the
  * edits or proceeds unchanged; Abort fails the app's call). Concurrent holds are shown as a queue the
  * user resolves in any order.
  *
@@ -278,6 +293,7 @@ fun WailoBreakpointWindowContent(
     onBringToFront: () -> Unit = {},
     darkTheme: Boolean = isSystemInDarkTheme(),
     textScale: Float = TextScale.Default,
+    stickyScopeRows: Int = StickyScopeRows.Default,
     onResumeBreakpoint: (String, HttpRequest?, HttpResponse?) -> Unit = { _, _, _ -> },
     onAbortBreakpoint: (String) -> Unit = {},
 ) {
@@ -285,6 +301,7 @@ fun WailoBreakpointWindowContent(
         val density = LocalDensity.current
         CompositionLocalProvider(
             LocalDensity provides Density(density.density, density.fontScale * textScale),
+            LocalStickyScopeRows provides StickyScopeRows.coerce(stickyScopeRows),
         ) {
             Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
                 BreakpointInspector(

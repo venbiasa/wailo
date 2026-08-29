@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
@@ -86,12 +87,14 @@ private val OBJECT_LIST = buildString {
 
 // The plain (non-diff) editor the sticky band is drawn over.
 @OptIn(ExperimentalTestApi::class)
-private fun ComposeUiTest.setArrayEditor() {
+private fun ComposeUiTest.setArrayEditor(stickyRows: Int = StickyScopeRows.Default) {
     setContent {
         WailoTheme(darkTheme = false) {
             val state = rememberCodeEditorState(LONG_ARRAY)
-            Box(Modifier.size(640.dp, 400.dp)) {
-                CodeEditor(state, CodeLanguage.Json, readOnly = true, Modifier.fillMaxSize())
+            CompositionLocalProvider(LocalStickyScopeRows provides stickyRows) {
+                Box(Modifier.size(640.dp, 400.dp)) {
+                    CodeEditor(state, CodeLanguage.Json, readOnly = true, Modifier.fillMaxSize())
+                }
             }
         }
     }
@@ -290,6 +293,19 @@ class CodeEditorSurfaceTest {
         onNodeWithText(ARRAY_OPENER).performMouseInput { scroll(-100f) }
         waitForIdle()
         assertEquals(1, onAllNodesWithText(FIRST_ELEMENT).fetchSemanticsNodes().size, "the wheel reached the list")
+    }
+
+    /**
+     * Zero is a real setting, not a degenerate one: the band trades rows of the body for context, and a
+     * reader who does not want that trade turns it off rather than avoiding deep bodies.
+     */
+    @OptIn(ExperimentalTestApi::class)
+    @Test
+    fun aDepthOfZeroPinsNothing() = runComposeUiTest {
+        setArrayEditor(stickyRows = StickyScopeRows.Min)
+        scrollPastTheArrayOpener()
+
+        assertEquals(0, onAllNodesWithText(ARRAY_OPENER).fetchSemanticsNodes().size)
     }
 
     /**

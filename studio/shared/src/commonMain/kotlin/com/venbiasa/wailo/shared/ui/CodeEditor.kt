@@ -120,11 +120,6 @@ private const val DOTS_CELLS = 3
 // isn't horizontally reachable) and stays far past any real viewport, so normal scrolling is untouched.
 private const val MAX_CONTENT_WIDTH_PX = 200_000f
 
-// How many parent lines the sticky header may pin at once — past this the band costs more viewport than the
-// context is worth. Which end of the chain survives the cut is `ScopeNesting.ancestorsOf`'s call, and it is
-// the one that keeps the band from flickering rather than the one that reads best on a single frame.
-private const val MAX_STICKY_ROWS = 5
-
 /**
  * What one pane of a side-by-side diff needs the editor to do differently — and nothing else, so a plain
  * editor passes null and behaves exactly as it always has.
@@ -314,13 +309,15 @@ internal fun CodeEditor(
     // Sticky parent lines, over the same regions the fold arrows use. JSON only — the band's whole claim is
     // that an indented line belongs to the key above it, which plain text doesn't make. A diff pane is
     // excluded too: its rows are the pair's grid rather than one document's, and a pinned copy would sit on
-    // top of the row tint that says what changed. Never let the band eat more than half the viewport — five
-    // rows over a short slot (a rule body editor docked small) would leave nothing underneath them.
+    // top of the row tint that says what changed. The user's depth is a ceiling, not the depth: never let
+    // the band eat more than half the viewport, or a band sized for a full window would leave nothing
+    // underneath it in a rule body editor docked small.
     val stickyScopes = language == CodeLanguage.Json && decor == null
     val stickyNesting = remember(stickyScopes, foldRegions) {
         if (stickyScopes) ScopeNesting.from(foldRegions) else ScopeNesting.Empty
     }
-    val maxStickyRows = if (lineHeightPx <= 0) 0 else minOf(MAX_STICKY_ROWS, viewportHeightPx / lineHeightPx / 2)
+    val stickyRowLimit = LocalStickyScopeRows.current
+    val maxStickyRows = if (lineHeightPx <= 0) 0 else minOf(stickyRowLimit, viewportHeightPx / lineHeightPx / 2)
 
     // A solid caret while typing that then blinks; reset to solid on every caret/edit so motion never hides it.
     var caretOn by remember { mutableStateOf(true) }

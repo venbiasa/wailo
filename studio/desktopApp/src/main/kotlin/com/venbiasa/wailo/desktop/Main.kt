@@ -85,6 +85,7 @@ import com.venbiasa.wailo.shared.WailoBreakpointWindowContent
 import com.venbiasa.wailo.shared.WailoCompareWindowContent
 import com.venbiasa.wailo.shared.allRules
 import com.venbiasa.wailo.shared.theme.TextScale
+import com.venbiasa.wailo.shared.ui.StickyScopeRows
 import com.venbiasa.wailo.desktop.pairing.PairingQr
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
@@ -231,6 +232,21 @@ private fun runWailo(engine: DaemonClient) = application {
         } else {
             maxRetainedError = "Must be between ${WailoEngine.RETAINED_RANGE.first} and " +
                 "${WailoEngine.RETAINED_RANGE.last} requests."
+        }
+    }
+
+    // How deep the editors' sticky header pins. Held here rather than in the engine because nothing about
+    // capture depends on it, and range is all there is to validate. Every open editor reads it from a
+    // CompositionLocal, so a new depth lands in all of them on the next frame rather than on the next body.
+    var stickyScopeRows by remember { mutableStateOf(StickyScopeRowsStore.load()) }
+    var stickyScopeRowsError by remember { mutableStateOf<String?>(null) }
+    val applyStickyScopeRows: (Int) -> Unit = { next ->
+        if (next in StickyScopeRows.Min..StickyScopeRows.Max) {
+            stickyScopeRowsError = null
+            stickyScopeRows = next
+            StickyScopeRowsStore.save(next)
+        } else {
+            stickyScopeRowsError = "Must be between ${StickyScopeRows.Min} and ${StickyScopeRows.Max} lines."
         }
     }
 
@@ -840,6 +856,9 @@ private fun runWailo(engine: DaemonClient) = application {
             maxRetained = maxRetained,
             maxRetainedError = maxRetainedError,
             onApplyMaxRetained = applyMaxRetained,
+            stickyScopeRows = stickyScopeRows,
+            stickyScopeRowsError = stickyScopeRowsError,
+            onApplyStickyScopeRows = applyStickyScopeRows,
             mcpAccess = mcpAccess,
             onMcpAccessChange = { scope.launch { engine.setMcpAccess(it) } },
             mcpRedactSecrets = mcpRedactSecrets,
@@ -958,6 +977,7 @@ private fun runWailo(engine: DaemonClient) = application {
                 onBringToFront = { raiseBreakpointWindow += 1 },
                 darkTheme = darkTheme,
                 textScale = textScale,
+                stickyScopeRows = stickyScopeRows,
                 onResumeBreakpoint = { correlationId, editedRequest, editedResponse ->
                     scope.launch { engine.resumeHold(correlationId, editedRequest, editedResponse) }
                 },

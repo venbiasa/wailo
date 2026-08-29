@@ -43,6 +43,9 @@ private const val MaxPortDigits = 5
 // Six digits covers the host's retention ceiling — same idea as the port cap above.
 private const val MaxRetainedDigits = 6
 
+// Two digits is already past StickyScopeRows.Max, so the field can't hold a number the band could never be.
+private const val StickyScopeRowsDigits = 2
+
 /**
  * The settings panel: the two ports a device can arrive on, how much captured traffic Studio keeps, what
  * AI tools are allowed to do with it, and the local network trust surface.
@@ -75,6 +78,9 @@ internal fun SettingsManager(
     retainedCount: Int,
     maxRetainedError: String?,
     onApplyMaxRetained: (Int) -> Unit,
+    stickyScopeRows: Int,
+    stickyScopeRowsError: String?,
+    onApplyStickyScopeRows: (Int) -> Unit,
     mcpAccess: Boolean = true,
     onMcpAccessChange: (Boolean) -> Unit = {},
     mcpRedactSecrets: Boolean = true,
@@ -216,6 +222,26 @@ internal fun SettingsManager(
                     help = "A bigger number keeps more history and costs more disk, since every kept " +
                         "request's body is spooled beside it. Lowering it drops the oldest right away — " +
                         "that traffic is gone, not hidden.",
+                )
+
+                SectionHeader("Editor")
+                NumberField(
+                    label = "Parent keys pinned while scrolling",
+                    value = stickyScopeRows,
+                    maxDigits = StickyScopeRowsDigits,
+                    placeholder = StickyScopeRows.Default.toString(),
+                    error = stickyScopeRowsError,
+                    canReapplyUnchanged = false,
+                    onApply = onApplyStickyScopeRows,
+                    // The second cap is said here because it is what a user who sets 8 and counts 4 is
+                    // otherwise left to guess at.
+                    status = if (stickyScopeRows == StickyScopeRows.Min) {
+                        "Nothing is pinned"
+                    } else {
+                        "Up to $stickyScopeRows lines, never past half the pane"
+                    },
+                    help = "Each pinned line covers a line of the body under it, and jumping to the " +
+                        "cursor scrolls that much further to clear the band. 0 turns it off.",
                 )
 
                 SectionHeader("AI tool access")
