@@ -29,6 +29,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -51,6 +52,7 @@ import com.venbiasa.wailo.shared.resources.Res
 import com.venbiasa.wailo.shared.resources.ic_add
 import com.venbiasa.wailo.shared.resources.ic_arrow_back
 import com.venbiasa.wailo.shared.resources.ic_arrow_drop_down
+import com.venbiasa.wailo.shared.resources.ic_check
 import com.venbiasa.wailo.shared.resources.ic_delete
 import com.venbiasa.wailo.shared.theme.LocalWailoColors
 import kotlinx.coroutines.Dispatchers
@@ -85,13 +87,20 @@ internal data class ResponseDraft(
  * off. [bodySeed] pre-fills the body for a rule seeded from captured traffic; otherwise [onLoadBody]
  * supplies the persisted bytes, and [onPickFile] fills it from a file on disk. Everything commits through
  * [onSave] in one call — name, response fields, and body bytes together — so each feature owns the order
- * in which it writes its own body file and layout; [onSaved] then dismisses the page.
+ * in which it writes its own body file and layout.
+ *
+ * Saving leaves the page open and reports itself in the footer rather than dismissing it: a rule is
+ * usually saved to *try* it, and closing the editor takes the body's undo history with it — so an
+ * experiment that turned out wrong could only be walked back by retyping it. [onBack] is the way out.
+ * [persisted] says whether the rule is already in the layout, which is what tells a form that opened
+ * matching the store (nothing to commit) from a new or row-seeded draft (everything to commit).
  */
 @Composable
 internal fun ResponseRuleEditor(
     title: String,
     initial: ResponseDraft,
     initialName: String?,
+    persisted: Boolean,
     enabled: Boolean,
     enabledToggleable: Boolean,
     onToggleEnabled: (Boolean) -> Unit,
@@ -99,7 +108,6 @@ internal fun ResponseRuleEditor(
     onLoadBody: suspend () -> ByteArray,
     onPickFile: suspend () -> PickedFile?,
     onSave: suspend (name: String, draft: ResponseDraft, body: ByteArray) -> Unit,
-    onSaved: () -> Unit,
     onBack: () -> Unit,
     onClose: () -> Unit,
 ) {
@@ -141,6 +149,36 @@ internal fun ResponseRuleEditor(
 
     val editorState = rememberCodeEditorState("")
 
+    // Whether the form opened already matching the store: a rule that is in the layout and is showing the
+    // body stored for it. Captured once, because it describes the opening — a save later fills [saved] in
+    // and makes it moot. Captured bytes are precisely what has *not* been written, so a row-seeded draft
+    // is not clean however it was addressed.
+    val openedClean = remember { persisted && bodySeed == null }
+
+    // What is currently in the store, in the form's own terms — the rule as it opened, or as the last save
+    // left it. Both the footer verdict and Save's enablement are a comparison against this.
+    var saved by remember { mutableStateOf<SavedRule?>(null) }
+    val saveState by remember {
+        derivedStateOf {
+            val last = saved
+                // The body's revision isn't settled until the seed lands, so answer from the opening
+                // condition until it does — the same answer each case settles on, so nothing flickers.
+                ?: return@derivedStateOf if (openedClean) SaveState.Saved else SaveState.Fresh
+            val differs = name != last.name || urlPattern != last.urlPattern || method != last.method ||
+                statusCode != last.statusCode ||
+                // Copied out before comparing, never compared in place: SnapshotStateList implements
+                // MutableList without AbstractList's structural equals, so holding one up against a stored
+                // copy is an identity check that can never hold.
+                headers.toList() != last.headers ||
+                // The body is compared by edit count, never by text: re-reading a multi-megabyte document
+                // on every keystroke is the cost the debounced validation below exists to dodge, and this
+                // is read on every one. So an undo back to the saved text still reads as unsaved — wrong
+                // in the direction that only ever costs a redundant save.
+                editorState.revision != last.bodyRevision || imageBytes !== last.imageBytes
+            if (differs) SaveState.Unsaved else SaveState.Saved
+        }
+    }
+
     fun setContentType(value: String) {
         val idx = headers.indexOfFirst { it.name.equals("Content-Type", ignoreCase = true) }
         if (idx >= 0) headers[idx] = headers[idx].copy(value = value)
@@ -166,6 +204,22 @@ internal fun ResponseRuleEditor(
             fillEditor(bodySeed ?: onLoadBody())
         }
         editorState.touch()
+        // Recorded here rather than at first composition because the body's revision is only settled once
+        // the seed lands; [openedClean] is what decides whether there is a baseline to record at all. The
+        // non-body fields come from the parameters, never from the live state: the load is a host round-trip
+        // the user can type across, and reading the fields now would file that edit as already stored —
+        // "Saved" over an unsaved change, behind a Save the edit itself just disabled.
+        if (openedClean) {
+            saved = SavedRule(
+                name = initialName.orEmpty(),
+                urlPattern = initial.urlPattern,
+                method = initial.method,
+                statusCode = initial.statusCode.toString(),
+                headers = initial.headers,
+                bodyRevision = editorState.revision,
+                imageBytes = imageBytes,
+            )
+        }
     }
 
     // Author the body from a file the host picks (any rule): adopt the file's Content-Type — which drives
@@ -220,19 +274,34 @@ internal fun ResponseRuleEditor(
         // Snapshot the body source now (off-composition reads in the coroutine would be stale/illegal).
         val imageMode = isImage
         val bodyImage = imageBytes
+        // The fields as typed, not the draft's trimmed copies, so the baseline compares like with like and
+        // a trailing space doesn't read straight back as an unsaved change.
+        val typedName = name
+        val typedUrl = urlPattern
+        val typedMethod = method
+        val typedStatus = statusCode
+        val typedHeaders = headers.toList()
         scope.launch {
-            val bytes = if (imageMode) {
-                bodyImage ?: ByteArray(0)
-            } else {
-                // Pretty-print JSON on the way out; a body that won't parse is saved verbatim rather than
-                // blocking the save, and an over-large body skips formatting entirely.
-                val raw = editorState.currentText()
-                withContext(Dispatchers.Default) {
-                    (if (raw.length <= MAX_FORMAT_CHARS) prettyPrintJson(raw) ?: raw else raw).encodeToByteArray()
+            try {
+                // Read ahead of the text, so a keystroke that races the save leaves the editor unsaved
+                // rather than claiming bytes it didn't write.
+                val bodyRevision = editorState.revision
+                val bytes = if (imageMode) {
+                    bodyImage ?: ByteArray(0)
+                } else {
+                    // Pretty-print JSON on the way out; a body that won't parse is saved verbatim rather
+                    // than blocking the save, and an over-large body skips formatting entirely.
+                    val raw = editorState.currentText()
+                    withContext(Dispatchers.Default) {
+                        (if (raw.length <= MAX_FORMAT_CHARS) prettyPrintJson(raw) ?: raw else raw).encodeToByteArray()
+                    }
                 }
+                onSave(typedName.trim(), draft, bytes)
+                saved = SavedRule(typedName, typedUrl, typedMethod, typedStatus, typedHeaders, bodyRevision, bodyImage)
+            } finally {
+                // The page outlives the save, so a failed one has to hand the button back.
+                saving = false
             }
-            onSave(name.trim(), draft, bytes)
-            onSaved()
         }
     }
 
@@ -363,9 +432,10 @@ internal fun ResponseRuleEditor(
             // header's arrow, so the footer carries just the commit action. An image body has no JSON to
             // judge, so the verdict is suppressed then.
             BodyVerdict(if (isImage) BodyValidity.None else validity, Modifier.weight(1f))
+            SaveVerdict(saveState)
             Button(
                 onClick = { save() },
-                enabled = !saving,
+                enabled = !saving && saveState != SaveState.Saved,
             ) {
                 Text("Save")
             }
@@ -378,6 +448,53 @@ internal fun ResponseRuleEditor(
 // format/parse beyond it.
 private const val MAX_FORMAT_CHARS = 10_000_000
 private const val MAX_LIVE_VALIDATE_CHARS = 2_000_000
+
+/** The form as the store holds it — the baseline both the footer verdict and Save's enablement compare against. */
+private class SavedRule(
+    val name: String,
+    val urlPattern: String,
+    val method: String,
+    val statusCode: String,
+    val headers: List<ResponseHeader>,
+    val bodyRevision: Int,
+    val imageBytes: ByteArray?,
+)
+
+/**
+ * How the form stands against the store: [Fresh] for a draft nothing has written yet, [Saved] when the two
+ * match, [Unsaved] when they don't. Drives both the footer verdict and whether Save has anything to do.
+ */
+private enum class SaveState { Fresh, Saved, Unsaved }
+
+/**
+ * Says which of [SaveState] the form is in, beside the Save button it explains: a greyed-out Save with no
+ * caption is indistinguishable from a broken one. A [SaveState.Fresh] draft says nothing — the live Save
+ * button already does.
+ */
+@Composable
+private fun SaveVerdict(state: SaveState) {
+    when (state) {
+        SaveState.Fresh -> Unit
+        SaveState.Unsaved -> Text(
+            "Unsaved changes",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        SaveState.Saved -> {
+            val success = LocalWailoColors.current.success
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    vectorResource(Res.drawable.ic_check),
+                    contentDescription = null,
+                    tint = success,
+                    modifier = Modifier.size(16.dp),
+                )
+                Spacer(Modifier.width(4.dp))
+                Text("Saved", style = MaterialTheme.typography.labelMedium, color = success)
+            }
+        }
+    }
+}
 
 /** Body validity for the footer verdict: no body, valid JSON, a parse error, or too large to check live. */
 private sealed interface BodyValidity {

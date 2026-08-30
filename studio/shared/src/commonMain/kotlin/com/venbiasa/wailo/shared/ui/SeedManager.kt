@@ -141,6 +141,7 @@ internal fun SeedManager(
                     ),
                     // A seed is identified by what it matches, so there is no name to author.
                     initialName = null,
+                    persisted = persisted != null,
                     enabled = ruleEnabled,
                     enabledToggleable = enabled && groupEnabled,
                     onToggleEnabled = { next ->
@@ -169,7 +170,6 @@ internal fun SeedManager(
                         // the row happened to carry.
                         bodySeeds.remove(rule.id)
                     },
-                    onSaved = { editing = null },
                     onBack = { editing = null },
                     onClose = onClose,
                 )

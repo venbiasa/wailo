@@ -216,6 +216,7 @@ fun MapLocalManager(
                                     headers = initial.headers,
                                 ),
                                 initialName = initial.name,
+                                persisted = persisted != null,
                                 enabled = ruleEnabled,
                                 enabledToggleable = liveEnabled.value && groupEnabled,
                                 onToggleEnabled = { next ->
@@ -246,7 +247,6 @@ fun MapLocalManager(
                                     onSaveBody(rule, bytes)
                                     onLayoutChange(liveNodes.value.upsertRule(rule))
                                 },
-                                onSaved = { if (backStack.size > 1) backStack.removeLastOrNull() },
                                 onBack = { if (backStack.size > 1) backStack.removeLastOrNull() },
                                 onClose = onClose,
                             )
