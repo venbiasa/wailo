@@ -160,6 +160,8 @@ internal fun WailoViewer(
     onProxySetupAction: (ProxySetupAction) -> Unit,
     toolPanelWidthRatio: Float,
     onToolPanelWidthRatioChange: (Float) -> Unit,
+    trafficColumnWidths: Map<String, Float>,
+    onTrafficColumnWidthsChange: (Map<String, Float>) -> Unit,
     comparedIds: Set<String>,
     onCompare: (Pair<String, String>) -> Unit,
 ) {
@@ -347,6 +349,8 @@ internal fun WailoViewer(
                         Box(Modifier.weight(1f).fillMaxWidth()) {
                             TrafficList(
                                 entries = visibleEntries,
+                                columnWidths = trafficColumnWidths,
+                                onColumnWidthsChange = onTrafficColumnWidthsChange,
                                 selectedId = selectedId,
                                 onSelect = { selectedId = it },
                                 comparedIds = comparedIds,

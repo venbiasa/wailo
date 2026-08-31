@@ -38,7 +38,6 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.snapshots.SnapshotStateMap
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
@@ -83,6 +82,8 @@ private val ResizeHandleWidth = 12.dp
 @Composable
 internal fun TrafficList(
     entries: List<FlowEntry>,
+    columnWidths: Map<String, Float>,
+    onColumnWidthsChange: (Map<String, Float>) -> Unit,
     selectedId: String?,
     onSelect: (String) -> Unit,
     comparedIds: Set<String>,
@@ -104,7 +105,6 @@ internal fun TrafficList(
     // One scroll state shared by the header and every row keeps the columns locked together as the
     // table scrolls sideways when the columns are wider than the viewport.
     val hScroll = rememberScrollState()
-    val widths = rememberColumnWidths()
     val density = LocalDensity.current
     val focusRequester = remember { FocusRequester() }
 
@@ -161,12 +161,15 @@ internal fun TrafficList(
         // rather than an empty placeholder.
         Column(Modifier.fillMaxSize()) {
             TableHeader(
-                widths = widths,
+                widths = columnWidths,
                 hScroll = hScroll,
+                // Applied against the host's value and handed straight back, so the width being dragged
+                // is the width being persisted — no second copy here to fall out of step with it.
                 onResize = { column, deltaPx ->
-                    val current = widths[column] ?: column.defaultWidth
-                    val next = with(density) { current + deltaPx.toDp() }
-                    widths[column] = next.coerceAtLeast(column.minWidth)
+                    val next = with(density) { columnWidths.widthOf(column) + deltaPx.toDp() }
+                    onColumnWidthsChange(
+                        columnWidths + (column.name to next.coerceAtLeast(column.minWidth).value),
+                    )
                 },
             )
             RowDivider()
@@ -175,7 +178,7 @@ internal fun TrafficList(
                     items(entries, key = { it.id }) { entry ->
                         TrafficRow(
                             entry = entry,
-                            widths = widths,
+                            widths = columnWidths,
                             hScroll = hScroll,
                             selected = entry.id == selectedId,
                             inComparison = entry.id in comparedIds,
@@ -230,7 +233,7 @@ internal fun TrafficList(
 
 @Composable
 private fun TableHeader(
-    widths: SnapshotStateMap<TrafficColumn, Dp>,
+    widths: Map<String, Float>,
     hScroll: ScrollState,
     onResize: (TrafficColumn, Float) -> Unit,
 ) {
@@ -241,7 +244,7 @@ private fun TableHeader(
                 // trailing divider/handle — otherwise that gap reads as a phantom empty column.
                 HeaderCell(
                     column = column,
-                    width = widths[column] ?: column.defaultWidth,
+                    width = widths.widthOf(column),
                     onResize = onResize,
                     resizable = column != TrafficColumn.entries.last(),
                 )
@@ -289,7 +292,7 @@ private fun HeaderCell(
 @Composable
 private fun TrafficRow(
     entry: FlowEntry,
-    widths: SnapshotStateMap<TrafficColumn, Dp>,
+    widths: Map<String, Float>,
     hScroll: ScrollState,
     selected: Boolean,
     inComparison: Boolean,
@@ -482,11 +485,11 @@ private fun TrafficRow(
 @Composable
 private fun Cell(
     column: TrafficColumn,
-    widths: SnapshotStateMap<TrafficColumn, Dp>,
+    widths: Map<String, Float>,
     content: @Composable BoxScope.() -> Unit,
 ) {
     Box(
-        Modifier.width(widths[column] ?: column.defaultWidth)
+        Modifier.width(widths.widthOf(column))
             .padding(horizontal = CellHPad, vertical = RowVPad),
         contentAlignment = Alignment.CenterStart,
         content = content,

@@ -37,11 +37,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.snapshots.SnapshotStateMap
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -69,8 +67,8 @@ import org.jetbrains.compose.resources.vectorResource
 /**
  * The traffic table's columns, in display order, all left-aligned. [defaultWidth] is a compile-time
  * starting size chosen for each column's expected content; the user can then drag columns wider or
- * narrower down to [minWidth] ([rememberColumnWidths]). The header and every row read the same width
- * map, so they stay aligned.
+ * narrower down to [minWidth], and the host persists what they dragged ([TrafficColumnLayout]). The
+ * header and every row read the same width map, so they stay aligned.
  */
 internal enum class TrafficColumn(
     val title: String,
@@ -88,14 +86,6 @@ internal enum class TrafficColumn(
     Response("Response", 104.dp, 76.dp),
     Edited("Edited", 76.dp, 60.dp),
     Proxy("Proxy", 72.dp, 60.dp),
-}
-
-/** Live per-column widths, seeded from [TrafficColumn.defaultWidth] and mutated in place as the user drags. */
-@Composable
-internal fun rememberColumnWidths(): SnapshotStateMap<TrafficColumn, Dp> = remember {
-    mutableStateMapOf<TrafficColumn, Dp>().apply {
-        TrafficColumn.entries.forEach { put(it, it.defaultWidth) }
-    }
 }
 
 // Shared height for every docked surface's top bar, so the main viewer, Map Local, and the capture

@@ -698,6 +698,16 @@ private fun runWailo(engine: DaemonClient) = application {
             .collect { PanelWidthStore.save(it) }
     }
 
+    // The traffic table's column widths, host-owned and persisted the same way — a column dragged wide to
+    // read long URLs is a layout set up once, not one to redo every launch. Stored as plain dp per column
+    // and clamped by the table, which owns the floors, so this side never has to know them.
+    var trafficColumnWidths by remember { mutableStateOf(ColumnWidthStore.load()) }
+    LaunchedEffect(Unit) {
+        snapshotFlow { trafficColumnWidths }
+            .debounce(300.milliseconds)
+            .collect { ColumnWidthStore.save(it) }
+    }
+
     // The app icon: one bitmap drives the Compose window/taskbar icon and — because macOS surfaces the
     // Dock icon through AWT's Taskbar rather than the window icon — the Dock too, so the dev run shows
     // the real mark. A packaged app takes its icon from nativeDistributions instead (build.gradle.kts).
@@ -905,6 +915,8 @@ private fun runWailo(engine: DaemonClient) = application {
             onProxySetupAction = proxySetupAction,
             toolPanelWidthRatio = toolPanelWidthRatio,
             onToolPanelWidthRatioChange = { toolPanelWidthRatio = it },
+            trafficColumnWidths = trafficColumnWidths,
+            onTrafficColumnWidthsChange = { trafficColumnWidths = it },
             comparedIds = comparedIds,
             onCompare = { (a, b) ->
                 val comparison = Comparison(a, b)

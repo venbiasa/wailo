@@ -91,6 +91,10 @@ import com.venbiasa.wailo.shared.ui.WailoViewer
  * [toolPanelWidthRatio] is the host-owned, persisted width of that docked panel expressed as a
  * fraction of the window (so it scales with the window rather than pinning to a fixed dp);
  * [onToolPanelWidthRatioChange] hands back a new fraction as the user drags the panel's resize handle.
+ * [trafficColumnWidths] are the traffic table's dragged column widths in dp, host-owned and persisted
+ * the same way, keyed by column ([com.venbiasa.wailo.shared.ui.TrafficColumnLayout]); a column the map
+ * doesn't mention keeps its built-in width, so an empty map is the untouched table.
+ * [onTrafficColumnWidthsChange] hands back the whole map as a column header's handle is dragged.
  * [comparedIds] is every row taking part in a comparison the host has open ([WailoCompareWindowContent],
  * ADR-0079), which the traffic list marks; [onCompare] asks the host to open one for an (A, B) pair.
  * Ending a comparison is its window's own close control, so there is nothing to report upward for it.
@@ -170,6 +174,8 @@ fun WailoApp(
     onProxySetupAction: (ProxySetupAction) -> Unit = {},
     toolPanelWidthRatio: Float = ToolPanelLayout.DefaultWidthRatio,
     onToolPanelWidthRatioChange: (Float) -> Unit = {},
+    trafficColumnWidths: Map<String, Float> = emptyMap(),
+    onTrafficColumnWidthsChange: (Map<String, Float>) -> Unit = {},
     comparedIds: Set<String> = emptySet(),
     onCompare: (Pair<String, String>) -> Unit = {},
     /**
@@ -252,6 +258,8 @@ fun WailoApp(
                 onProxySetupAction = onProxySetupAction,
                 toolPanelWidthRatio = toolPanelWidthRatio,
                 onToolPanelWidthRatioChange = onToolPanelWidthRatioChange,
+                trafficColumnWidths = trafficColumnWidths,
+                onTrafficColumnWidthsChange = onTrafficColumnWidthsChange,
                 comparedIds = comparedIds,
                 onCompare = onCompare,
             )
