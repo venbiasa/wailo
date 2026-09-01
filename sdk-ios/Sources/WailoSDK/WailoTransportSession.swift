@@ -23,6 +23,34 @@ enum WailoSessionSecurity {
     case guarded(() -> WailoHandshake)
 }
 
+// A newer bind must outrank late frames from a transport that is still retiring.
+final class WailoSnapshotOwner: @unchecked Sendable {
+
+    private final class Counter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: UInt64 = 0
+
+        func increment() -> UInt64 {
+            lock.lock()
+            defer { lock.unlock() }
+            value += 1
+            return value
+        }
+    }
+
+    private static let counter = Counter()
+
+    let generation: UInt64
+
+    private init(generation: UInt64) {
+        self.generation = generation
+    }
+
+    static func next() -> WailoSnapshotOwner {
+        WailoSnapshotOwner(generation: counter.increment())
+    }
+}
+
 final class WailoTransportSession: CaptureSink, WailoBodyFetcher, WailoBreakpointGate, @unchecked Sendable {
 
     private let hello: Hello
@@ -34,6 +62,7 @@ final class WailoTransportSession: CaptureSink, WailoBodyFetcher, WailoBreakpoin
     private let queueKey = DispatchSpecificKey<Void>()
 
     private weak var link: WailoTransportLink?
+    private var snapshotOwner: WailoSnapshotOwner?
     private var buffer: [HttpExchange] = []
     private var pending: [String: (WailoMappedResponse?) -> Void] = [:]
     private var pendingBreakpoints: [String: (BreakpointDecision?) -> Void] = [:]
@@ -157,6 +186,7 @@ final class WailoTransportSession: CaptureSink, WailoBodyFetcher, WailoBreakpoin
 
     private func bindLocked(to link: WailoTransportLink) {
         unbindLocked()
+        snapshotOwner = .next()
         generation += 1
         let gen = generation
         self.link = link
@@ -307,17 +337,18 @@ final class WailoTransportSession: CaptureSink, WailoBodyFetcher, WailoBreakpoin
     }
 
     private func handleIncoming(_ envelope: Envelope) {
+        guard let snapshotOwner else { return }
         switch envelope.message {
         case let .rule_set(ruleSet)?:
-            WailoRuleStore.shared.replace(ruleSet.rules)
+            WailoRuleStore.shared.replace(ruleSet.rules, owner: snapshotOwner)
             sendControl(Envelope { $0.message = .rule_ack(RuleAck(epoch: ruleSet.epoch)) })
         case let .capture_filter(filter)?:
-            WailoCaptureFilterStore.shared.replace(filter)
+            WailoCaptureFilterStore.shared.replace(filter, owner: snapshotOwner)
             sendControl(Envelope { $0.message = .capture_filter_ack(CaptureFilterAck(epoch: filter.epoch)) })
         case let .body_response(response)?:
             resolvePending(response)
         case let .breakpoint_rules(rules)?:
-            WailoBreakpointStore.shared.replace(rules.rules)
+            WailoBreakpointStore.shared.replace(rules.rules, owner: snapshotOwner)
             sendControl(Envelope { $0.message = .breakpoint_rules_ack(BreakpointRulesAck(epoch: rules.epoch)) })
         case let .breakpoint_decision(decision)?:
             resolveBreakpoint(decision)
@@ -329,9 +360,11 @@ final class WailoTransportSession: CaptureSink, WailoBodyFetcher, WailoBreakpoin
     }
 
     private func dropCachedRules() {
-        WailoRuleStore.shared.replace([])
-        WailoCaptureFilterStore.shared.reset()
-        WailoBreakpointStore.shared.replace([])
+        guard let snapshotOwner else { return }
+        WailoRuleStore.shared.reset(owner: snapshotOwner)
+        WailoCaptureFilterStore.shared.reset(owner: snapshotOwner)
+        WailoBreakpointStore.shared.reset(owner: snapshotOwner)
+        self.snapshotOwner = nil
     }
 
     private func resolvePending(_ response: BodyResponse) {

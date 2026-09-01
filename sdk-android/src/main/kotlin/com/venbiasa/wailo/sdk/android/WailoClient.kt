@@ -64,11 +64,11 @@ import java.util.concurrent.TimeUnit
  *
  * Inbound frames the desktop pushes are applied to the process-global stores ([WailoRuleStore],
  * [WailoCaptureFilterStore], [WailoBreakpointStore]) and acknowledged by epoch so a lost push
- * self-repairs (anti-entropy, mirroring the engine). The cached snapshots are dropped on every
- * disconnect so the desktop stays the single source of truth. As the [WailoBodyFetcher] and
- * [WailoBreakpointGate] it answers the interceptor's on-match calls: a Map Local match fetches the body
- * (bounded by a timeout), a breakpoint hit holds indefinitely for a decision; both fail open when the
- * link is (or goes) down, so a desktop that quits can never wedge the host app.
+ * self-repairs (anti-entropy, mirroring the engine). The cached snapshots are dropped when their owning
+ * connection goes away, without letting a retired client clear its replacement's newer snapshot. As the
+ * [WailoBodyFetcher] and [WailoBreakpointGate] it answers the interceptor's on-match calls: a Map Local
+ * match fetches the body (bounded by a timeout), a breakpoint hit holds indefinitely for a decision;
+ * both fail open when the link is (or goes) down, so a desktop that quits can never wedge the host app.
  *
  * The Kotlin analog of the iOS `WailoClient` + `WailoCoordinator`.
  */
@@ -82,6 +82,7 @@ class WailoClient(
 ) : CaptureSink, WailoBodyFetcher, WailoBreakpointGate, AutoCloseable {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val snapshotOwner = Any()
 
     // The live connection's exchange channel, or null while disconnected. Swapped in on connect and
     // cleared on disconnect, so an exchange captured while down is dropped (a live tap) rather than
@@ -136,8 +137,7 @@ class WailoClient(
     private var discovery: WailoDiscovery? = null
 
     // Process-global rather than per-client, because the panel that reads it is a separate artifact
-    // with no handle on this instance. One client is active at a time (`Wailo.active`), so there is
-    // nothing to reconcile.
+    // with no handle on this instance. Only `Wailo.active` may publish shared status and snapshots.
     private val _status get() = Wailo.mutableStatus
 
     /** Everything the on-device panel binds to. Updated from the connect loop and the control methods. */
@@ -166,9 +166,11 @@ class WailoClient(
     fun start() {
         // Become the process-wide control authority so the interceptor can reach the desktop for Map
         // Local body fetches and breakpoint decisions. Mirrors iOS `Wailo.start` wiring the globals.
-        WailoControlChannel.bodyFetcher = this
-        WailoControlChannel.breakpointGate = this
-        Wailo.active = this
+        synchronized(activeClientLock) {
+            WailoControlChannel.bodyFetcher = this
+            WailoControlChannel.breakpointGate = this
+            Wailo.active = this
+        }
         startDiscovery()
         refreshSettings()
         scope.launch { connectLoop() }
@@ -180,10 +182,13 @@ class WailoClient(
     }
 
     fun stop() {
-        if (WailoControlChannel.bodyFetcher === this) WailoControlChannel.bodyFetcher = null
-        if (WailoControlChannel.breakpointGate === this) WailoControlChannel.breakpointGate = null
-        val wasActive = Wailo.active === this
-        if (wasActive) Wailo.active = null
+        val wasActive = synchronized(activeClientLock) {
+            if (WailoControlChannel.bodyFetcher === this) WailoControlChannel.bodyFetcher = null
+            if (WailoControlChannel.breakpointGate === this) WailoControlChannel.breakpointGate = null
+            val active = Wailo.active === this
+            if (active) Wailo.active = null
+            active
+        }
         control = null
         discovery?.stop()
         discovery = null
@@ -843,26 +848,29 @@ class WailoClient(
      * BreakpointDecision resolves the matching in-flight hold. Runs on the socket coroutine.
      */
     private fun handleIncoming(envelope: Envelope) {
-        envelope.rule_set?.let { ruleSet ->
-            WailoRuleStore.replace(ruleSet.rules)
-            control?.trySend(Envelope(rule_ack = RuleAck(epoch = ruleSet.epoch)))
-        }
-        envelope.capture_filter?.let { filter ->
-            WailoCaptureFilterStore.replace(filter)
-            control?.trySend(Envelope(capture_filter_ack = CaptureFilterAck(epoch = filter.epoch)))
-        }
-        envelope.breakpoint_rules?.let { rules ->
-            WailoBreakpointStore.replace(rules.rules)
-            control?.trySend(Envelope(breakpoint_rules_ack = BreakpointRulesAck(epoch = rules.epoch)))
-        }
-        envelope.body_response?.let { response ->
-            pending.remove(response.correlation_id)?.complete(response)
-        }
-        envelope.breakpoint_decision?.let { decision ->
-            pendingBreakpoints.remove(decision.correlation_id)?.complete(decision)
-        }
-        envelope.revoke_device_ack?.let { ack ->
-            pendingRevocations.remove(ack.request_id)?.invoke()
+        synchronized(activeClientLock) {
+            if (Wailo.active !== this) return
+            envelope.rule_set?.let { ruleSet ->
+                WailoRuleStore.replace(ruleSet.rules, snapshotOwner)
+                control?.trySend(Envelope(rule_ack = RuleAck(epoch = ruleSet.epoch)))
+            }
+            envelope.capture_filter?.let { filter ->
+                WailoCaptureFilterStore.replace(filter, snapshotOwner)
+                control?.trySend(Envelope(capture_filter_ack = CaptureFilterAck(epoch = filter.epoch)))
+            }
+            envelope.breakpoint_rules?.let { rules ->
+                WailoBreakpointStore.replace(rules.rules, snapshotOwner)
+                control?.trySend(Envelope(breakpoint_rules_ack = BreakpointRulesAck(epoch = rules.epoch)))
+            }
+            envelope.body_response?.let { response ->
+                pending.remove(response.correlation_id)?.complete(response)
+            }
+            envelope.breakpoint_decision?.let { decision ->
+                pendingBreakpoints.remove(decision.correlation_id)?.complete(decision)
+            }
+            envelope.revoke_device_ack?.let { ack ->
+                pendingRevocations.remove(ack.request_id)?.invoke()
+            }
         }
     }
 
@@ -913,9 +921,9 @@ class WailoClient(
      * Idempotent — every failed reconnect lands here.
      */
     private fun dropCachedRules() {
-        WailoRuleStore.replace(emptyList())
-        WailoCaptureFilterStore.reset()
-        WailoBreakpointStore.replace(emptyList())
+        WailoRuleStore.reset(snapshotOwner)
+        WailoCaptureFilterStore.reset(snapshotOwner)
+        WailoBreakpointStore.reset(snapshotOwner)
     }
 
     /** Fail open every in-flight body fetch: with the socket gone there is no authority to answer. */
@@ -933,6 +941,7 @@ class WailoClient(
     }
 
     companion object {
+        private val activeClientLock = Any()
         const val DEFAULT_PORT: Int = 8899
         private const val DEFAULT_BUFFER: Int = 512
         private const val DEFAULT_BODY_TIMEOUT_MS: Long = 10_000L

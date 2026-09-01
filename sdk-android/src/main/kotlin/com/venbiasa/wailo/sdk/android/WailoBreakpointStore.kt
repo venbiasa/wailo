@@ -10,6 +10,11 @@ import com.venbiasa.wailo.protocol.BreakpointRule
  */
 object WailoBreakpointStore {
 
+    private data class Snapshot(
+        val owner: Any?,
+        val rules: List<BreakpointRule>,
+    )
+
     /** The first matching rule's id and which phases it pauses on. */
     data class Match(
         val ruleId: String,
@@ -17,12 +22,28 @@ object WailoBreakpointStore {
         val onResponse: Boolean,
     )
 
+    private val lock = Any()
+
     @Volatile
-    private var rules: List<BreakpointRule> = emptyList()
+    private var snapshot = Snapshot(owner = null, rules = emptyList())
 
     /** Replace the whole rule set with the latest snapshot from the desktop. */
     fun replace(rules: List<BreakpointRule>) {
-        this.rules = rules
+        synchronized(lock) {
+            snapshot = Snapshot(owner = null, rules = rules)
+        }
+    }
+
+    internal fun replace(rules: List<BreakpointRule>, owner: Any) {
+        synchronized(lock) {
+            snapshot = Snapshot(owner = owner, rules = rules)
+        }
+    }
+
+    internal fun reset(owner: Any) {
+        synchronized(lock) {
+            if (snapshot.owner === owner) snapshot = Snapshot(owner = null, rules = emptyList())
+        }
     }
 
     /**
@@ -30,7 +51,7 @@ object WailoBreakpointStore {
      * both match, or null if none do.
      */
     fun match(url: String, method: String): Match? {
-        val rule = rules.firstOrNull { rule ->
+        val rule = snapshot.rules.firstOrNull { rule ->
             rule.enabled &&
                 (rule.on_request || rule.on_response) &&
                 methodMatches(rule.methods, method) &&

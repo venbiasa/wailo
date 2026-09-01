@@ -20,18 +20,35 @@ final class WailoCaptureFilterStore: @unchecked Sendable {
 
     private let lock = NSLock()
     private var filter = CaptureFilter(allowlist_enabled: false, blocklist_enabled: false, epoch: 0)
+    private var snapshotOwner: WailoSnapshotOwner?
+    private var snapshotGeneration: UInt64 = 0
 
     /// Replace the filter with the latest snapshot from the desktop.
-    func replace(_ filter: CaptureFilter) {
+    func replace(_ filter: CaptureFilter, owner: WailoSnapshotOwner? = nil) {
         lock.lock()
+        defer { lock.unlock() }
+        if let owner {
+            guard owner.generation >= snapshotGeneration else { return }
+            snapshotGeneration = owner.generation
+        } else {
+            snapshotGeneration = 0
+        }
+        snapshotOwner = owner
         self.filter = filter
-        lock.unlock()
     }
 
     /// Forget the pushed filter on disconnect: fall back to capture-everything until the desktop
     /// re-pushes. The desktop is the source of truth, so no user-authored list outlives the connection.
-    func reset() {
-        replace(CaptureFilter(allowlist_enabled: false, blocklist_enabled: false, epoch: 0))
+    func reset(owner: WailoSnapshotOwner? = nil) {
+        lock.lock()
+        defer { lock.unlock() }
+        if let owner {
+            guard snapshotOwner === owner else { return }
+        } else {
+            snapshotGeneration = 0
+        }
+        snapshotOwner = nil
+        filter = CaptureFilter(allowlist_enabled: false, blocklist_enabled: false, epoch: 0)
     }
 
     /// Whether [host]'s exchange should be captured and streamed. An enabled allowlist requires a match;

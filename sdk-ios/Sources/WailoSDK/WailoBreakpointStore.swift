@@ -19,12 +19,33 @@ final class WailoBreakpointStore: @unchecked Sendable {
 
     private let lock = NSLock()
     private var rules: [BreakpointRule] = []
+    private var snapshotOwner: WailoSnapshotOwner?
+    private var snapshotGeneration: UInt64 = 0
 
     /// Replace the whole rule set with the latest snapshot from the desktop.
-    func replace(_ rules: [BreakpointRule]) {
+    func replace(_ rules: [BreakpointRule], owner: WailoSnapshotOwner? = nil) {
         lock.lock()
+        defer { lock.unlock() }
+        if let owner {
+            guard owner.generation >= snapshotGeneration else { return }
+            snapshotGeneration = owner.generation
+        } else {
+            snapshotGeneration = 0
+        }
+        snapshotOwner = owner
         self.rules = rules
-        lock.unlock()
+    }
+
+    func reset(owner: WailoSnapshotOwner? = nil) {
+        lock.lock()
+        defer { lock.unlock() }
+        if let owner {
+            guard snapshotOwner === owner else { return }
+        } else {
+            snapshotGeneration = 0
+        }
+        snapshotOwner = nil
+        rules = []
     }
 
     /// The first enabled rule that can pause at least one phase and whose method filter and URL wildcard

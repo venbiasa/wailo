@@ -16,17 +16,40 @@ import com.venbiasa.wailo.protocol.CaptureFilter
  */
 object WailoCaptureFilterStore {
 
+    private data class Snapshot(
+        val owner: Any?,
+        val filter: CaptureFilter,
+    )
+
+    private val lock = Any()
+
     @Volatile
-    private var filter: CaptureFilter = CaptureFilter()
+    private var snapshot = Snapshot(owner = null, filter = CaptureFilter())
 
     /** Replace the filter with the latest snapshot from the desktop. */
     fun replace(filter: CaptureFilter) {
-        this.filter = filter
+        synchronized(lock) {
+            snapshot = Snapshot(owner = null, filter = filter)
+        }
+    }
+
+    internal fun replace(filter: CaptureFilter, owner: Any) {
+        synchronized(lock) {
+            snapshot = Snapshot(owner = owner, filter = filter)
+        }
     }
 
     /** Forget the pushed filter on disconnect: fall back to capture-everything until the desktop re-pushes. */
     fun reset() {
-        this.filter = CaptureFilter()
+        synchronized(lock) {
+            snapshot = Snapshot(owner = null, filter = CaptureFilter())
+        }
+    }
+
+    internal fun reset(owner: Any) {
+        synchronized(lock) {
+            if (snapshot.owner === owner) snapshot = Snapshot(owner = null, filter = CaptureFilter())
+        }
     }
 
     /**
@@ -37,7 +60,7 @@ object WailoCaptureFilterStore {
      * nothing. A null/empty host only fails an enabled allowlist (it can't match a real pattern).
      */
     fun shouldCapture(host: String?): Boolean {
-        val filter = this.filter
+        val filter = snapshot.filter
         val target = host ?: ""
         if (filter.allowlist_enabled && filter.allow_patterns.none { hostWildcardMatches(it, target) }) {
             return false

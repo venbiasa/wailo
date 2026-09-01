@@ -33,6 +33,7 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -95,6 +96,39 @@ class WailoClientControlTest {
         } finally {
             client.stop()
             server.stop(0, 0)
+        }
+    }
+
+    @Test
+    fun stoppingReplacedClientCannotClearActiveSnapshots() = runBlocking {
+        val retiredServer = snapshotServer(port = 18995, id = "retired")
+        val activeServer = snapshotServer(port = 18996, id = "active")
+        val retired = WailoClient(hello = hello(), host = "localhost", port = 18995).also { it.start() }
+        var active: WailoClient? = null
+        try {
+            awaitSnapshots("retired")
+            val replacement = WailoClient(hello = hello(), host = "localhost", port = 18996).also { it.start() }
+            active = replacement
+            awaitSnapshots("active")
+
+            retired.stop()
+            delay(250)
+
+            assertEquals("active", WailoRuleStore.match("https://active.test/x", "GET")?.id)
+            assertTrue(WailoCaptureFilterStore.shouldCapture("active.test"))
+            assertFalse(WailoCaptureFilterStore.shouldCapture("other.test"))
+            assertEquals("active", WailoBreakpointStore.match("https://active.test/x", "GET")?.ruleId)
+
+            replacement.stop()
+            active = null
+            assertNull(WailoRuleStore.match("https://active.test/x", "GET"))
+            assertTrue(WailoCaptureFilterStore.shouldCapture("other.test"))
+            assertNull(WailoBreakpointStore.match("https://active.test/x", "GET"))
+        } finally {
+            active?.stop()
+            retired.stop()
+            activeServer.stop(0, 0)
+            retiredServer.stop(0, 0)
         }
     }
 
@@ -238,6 +272,75 @@ class WailoClientControlTest {
         } finally {
             client.stop()
             server.stop(0, 0)
+        }
+    }
+
+    private fun snapshotServer(port: Int, id: String) = embeddedServer(CIO, port = port) {
+        install(WebSockets)
+        routing {
+            webSocket("/") {
+                send(
+                    Frame.Binary(
+                        true,
+                        Envelope(
+                            rule_set = RuleSet(
+                                rules = listOf(
+                                    MapLocalRule(
+                                        id = id,
+                                        enabled = true,
+                                        url_pattern = "https://$id.test/*",
+                                    ),
+                                ),
+                                epoch = 1L,
+                            ),
+                        ).encode(),
+                    ),
+                )
+                send(
+                    Frame.Binary(
+                        true,
+                        Envelope(
+                            capture_filter = CaptureFilter(
+                                allowlist_enabled = true,
+                                allow_patterns = listOf("$id.test"),
+                                epoch = 1L,
+                            ),
+                        ).encode(),
+                    ),
+                )
+                send(
+                    Frame.Binary(
+                        true,
+                        Envelope(
+                            breakpoint_rules = BreakpointRules(
+                                rules = listOf(
+                                    BreakpointRule(
+                                        id = id,
+                                        enabled = true,
+                                        url_pattern = "https://$id.test/*",
+                                        on_request = true,
+                                    ),
+                                ),
+                                epoch = 1L,
+                            ),
+                        ).encode(),
+                    ),
+                )
+                for (frame in incoming) {
+                    if (frame is Frame.Binary) Envelope.ADAPTER.decode(frame.readBytes())
+                }
+            }
+        }
+    }.also { it.start(wait = false) }
+
+    private suspend fun awaitSnapshots(id: String) {
+        withTimeout(10_000) {
+            while (
+                WailoRuleStore.match("https://$id.test/x", "GET")?.id != id ||
+                WailoBreakpointStore.match("https://$id.test/x", "GET")?.ruleId != id
+            ) {
+                delay(10)
+            }
         }
     }
 }

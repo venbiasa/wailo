@@ -347,6 +347,83 @@ class DaemonIntegrationTest {
         }
     }
 
+    @Test
+    fun togglingAGroupOffAndOnLeavesItsRulesServingTheSameBody() = runBlocking {
+        harness().use { harness ->
+            val client = harness.client()
+            try {
+                assertTrue(client.awaitReady())
+                val body = """{"ok":true}""".toByteArray()
+                val group = DaemonRuleGroup(id = "checkout", name = "Checkout")
+                fun described() = DaemonRuleNode(
+                    group = group,
+                    rules = listOf(HostMapLocalRule(id = "login", urlPattern = "https://example.com/login")),
+                )
+                suspend fun served() = harness.host.engine.bodyProvider
+                    ?.serve("login", "https://example.com/login", "GET")
+
+                client.replaceMapLocalNodes(
+                    listOf(described()),
+                    enabled = true,
+                    bodies = mapOf("login" to body),
+                )
+                assertContentEquals(body, served()?.body)
+
+                client.replaceMapLocalNodes(
+                    listOf(described().copy(group = group.copy(enabled = false))),
+                    enabled = true,
+                )
+                assertNull(served())
+
+                client.replaceMapLocalNodes(listOf(described()), enabled = true)
+                assertContentEquals(body, served()?.body)
+            } finally {
+                client.close()
+            }
+        }
+    }
+
+    // The panel writes an empty body projection that the daemon restores to the same reference and hash.
+    // Its next poll must still reconcile because that projection was never daemon-confirmed.
+    @Test
+    fun aPublishedLayoutIsRefreshedFromTheDaemonEvenWhenItsHashDidNotMove() = runBlocking {
+        harness().use { harness ->
+            val author = harness.client()
+            val panel = harness.client()
+            try {
+                assertTrue(author.awaitReady())
+                assertTrue(panel.awaitReady())
+
+                val body = """{"ok":true}""".toByteArray()
+                author.upsertMapLocalRule(
+                    HostMapLocalRule(id = "login", urlPattern = "https://example.com/login", body = body),
+                )
+                withTimeout(5_000) {
+                    while (panel.mapLocalRules.value.singleOrNull()?.bodySize != body.size) delay(25)
+                }
+
+                panel.replaceMapLocalNodes(
+                    listOf(
+                        DaemonRuleNode(
+                            rules = listOf(
+                                HostMapLocalRule(id = "login", urlPattern = "https://example.com/login"),
+                            ),
+                        ),
+                    ),
+                    enabled = true,
+                )
+
+                withTimeout(5_000) {
+                    while (panel.mapLocalRules.value.single().bodySize != body.size) delay(25)
+                }
+                assertEquals(bodyDigest(body), panel.mapLocalRules.value.single().bodyHash)
+            } finally {
+                panel.close()
+                author.close()
+            }
+        }
+    }
+
     /**
      * The point of moving grouping onto the daemon (ADR-0080): a rule an agent writes lands in a real
      * group, and every other frontend sees it there without Studio having been open.

@@ -181,6 +181,8 @@ class DaemonClient internal constructor(
     private val _proxy = MutableStateFlow(ProxyStatus())
     val proxy: StateFlow<ProxyStatus> = _proxy.asStateFlow()
 
+    // These hashes describe daemon-confirmed snapshots, not optimistic write-through projections.
+    // Invalidating one forces the next poll to reconcile that family with daemon authority.
     private var mapHash: String? = null
     private var breakpointHash: String? = null
     private var seedHash: String? = null
@@ -445,6 +447,7 @@ class DaemonClient internal constructor(
                 enabled,
             ),
         )
+        captureFilterHash = null
         _captureFilter.value = CaptureFilter(
             allowlist_enabled = allowlistEnabled,
             allow_patterns = allowPatterns,
@@ -456,6 +459,7 @@ class DaemonClient internal constructor(
 
     suspend fun setCaptureFilterEnabled(enabled: Boolean) {
         command("set_capture_filter_enabled", BooleanValue(enabled))
+        captureFilterHash = null
         _captureFilterEnabled.value = enabled
     }
 
@@ -736,18 +740,21 @@ class DaemonClient internal constructor(
     // the daemon reported for it (ADR-0086). Anything that needs the bytes calls [readRuleBody].
     private fun applyMapLocal(nodes: List<DaemonRuleNode<MapLocalRuleDto>>) {
         mapLocalNodeDtos = nodes
+        mapHash = null
         _mapLocalNodes.value = nodes.mapRules { it.toDomain() }
         _mapLocalRules.value = nodes.toHostRules { ByteArray(0) }
     }
 
     private fun applyBreakpoints(nodes: List<DaemonRuleNode<BreakpointRuleDto>>) {
         breakpointNodeDtos = nodes
+        breakpointHash = null
         _breakpointNodes.value = nodes.mapRules { it.toDomain() }
         _breakpointRules.value = nodes.toHostBreakpointRules()
     }
 
     private fun applySeeds(nodes: List<DaemonRuleNode<SeedRuleDto>>) {
         seedNodeDtos = nodes
+        seedHash = null
         _seedNodes.value = nodes.mapRules { it.toDomain() }
         _seeds.value = nodes.toHostSeeds { ByteArray(0) }
     }
