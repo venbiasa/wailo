@@ -6,7 +6,6 @@ import java.net.InetSocketAddress
 import java.net.Socket
 import java.nio.file.Files
 import java.nio.file.Path
-import java.util.concurrent.TimeUnit
 import kotlinx.serialization.Serializable
 
 /** One network service's HTTP and HTTPS proxy settings, exactly as they were before Wailo touched them. */
@@ -127,9 +126,10 @@ internal class SystemProxyController private constructor(
         // itself, which `unlessOurs` has already dropped — a relay chained to its own listener is a loop.
         chained = taken.firstNotNullOfOrNull { it.web.upstream() ?: it.secure.upstream() }
 
-        // Written before the first change, so a process that dies mid-apply still leaves the next daemon
-        // everything it needs to put the machine back.
-        persist(taken)
+        if (!persist(taken)) {
+            chained = null
+            return state("could not record the current system proxy; nothing was changed")
+        }
         val failures = services.mapNotNull { service ->
             val ok = set(service, WEB, port) && set(service, SECURE, port)
             service.takeUnless { ok }
@@ -226,12 +226,8 @@ internal class SystemProxyController private constructor(
         DaemonJson.decodeFromString<List<NetworkServiceProxies>>(Files.readString(statePath))
     }.getOrNull()?.takeIf { it.isNotEmpty() }
 
-    private fun persist(taken: List<NetworkServiceProxies>) {
-        runCatching {
-            Files.createDirectories(statePath.parent)
-            Files.writeString(statePath, DaemonJson.encodeToString(taken))
-        }
-    }
+    private fun persist(taken: List<NetworkServiceProxies>): Boolean =
+        writeAtomically(statePath, DaemonJson.encodeToString(taken))
 
     private fun activeServices(): List<String> = run("-listallnetworkservices")
         ?.lineSequence()
@@ -316,19 +312,7 @@ private const val PROBE_TIMEOUT_MS = 250
 private fun systemNetworkSetup(): NetworkSetup? {
     val onAMac = System.getProperty("os.name").orEmpty().contains("Mac", ignoreCase = true)
     if (!onAMac || !File(NETWORKSETUP).canExecute()) return null
-    return NetworkSetup { arguments ->
-        runCatching {
-            val process = ProcessBuilder(listOf(NETWORKSETUP) + arguments)
-                .redirectErrorStream(true)
-                .start()
-            val output = process.inputStream.bufferedReader().readText()
-            if (!process.waitFor(TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
-                process.destroyForcibly()
-                return@NetworkSetup null
-            }
-            if (process.exitValue() != 0) null else output
-        }.getOrNull()
-    }
+    return NetworkSetup { arguments -> runMachineProcess(listOf(NETWORKSETUP) + arguments, TIMEOUT_SECONDS) }
 }
 
 private fun loopbackAnswers(port: Int): Boolean = runCatching {
