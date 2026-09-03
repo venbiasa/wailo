@@ -122,6 +122,25 @@ class ProxyToolParityTest {
     }
 
     @Test
+    fun aWideBoundProxyReportsItsAddressBeforeItIsEverStarted() {
+        // The bug this guards: the address was only filled in by a start, so a fresh daemon — where the
+        // bind is already wide (ADR-0077) and the listener still off — told everyone 127.0.0.1. That is the
+        // exact moment someone reads it off the screen to type into a phone, and it is never right there.
+        // Never started wide on purpose: binding every interface is not something a test may do to the
+        // network it happens to run on, and what is under test is the address, not the socket.
+        val stopped = ProxyController(host, 0, initialLan = true)
+            .also { closeables += it }
+            .sample()
+
+        // The oracle is what a start would have computed, taken from a listener that stays on loopback.
+        startProxy()
+
+        assertTrue(stopped.lan)
+        assertEquals(proxy.status.value.lanAddress, stopped.lanAddress)
+        assertEquals(stopped.lanAddress.isEmpty(), stopped.reachableAddress.startsWith("127.0.0.1:"))
+    }
+
+    @Test
     fun aBlockedHostIsStillRelayedButNotRecorded() {
         val origin = origin { out -> out.respond("served anyway") }
         host.updateCaptureFilter(false, emptyList(), true, listOf("127.0.0.1"))

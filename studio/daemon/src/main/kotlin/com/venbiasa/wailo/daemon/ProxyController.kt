@@ -113,13 +113,23 @@ internal class ProxyController(
      */
     private val tls = object : ProxyTls {
         override fun unlock(host: String): SSLContext? =
-            if (decryptHosts.none { hostWildcardMatches(it, host) }) null else ca.contextFor(host)
+            when {
+                host.equals(PROXY_SETUP_HOST, ignoreCase = true) && ca.current() != null -> ca.contextFor(host)
+                decryptHosts.any { hostWildcardMatches(it, host) } -> ca.contextFor(host)
+                else -> null
+            }
 
         override fun upstream(): SSLContext = this@ProxyController.upstream ?: SSLContext.getDefault()
     }
 
+    // A phone needs the LAN address before the first listener start.
     private val _status = MutableStateFlow(
-        ProxyStatus(port = initialPort, decryptHosts = initialDecryptHosts, lan = initialLan),
+        ProxyStatus(
+            port = initialPort,
+            decryptHosts = initialDecryptHosts,
+            lan = initialLan,
+            lanAddress = currentLanAddress(),
+        ),
     )
     val status: StateFlow<ProxyStatus> = _status.asStateFlow()
 
@@ -154,6 +164,8 @@ internal class ProxyController(
 
     /** Mint the local root if there is not one yet, and hand back what a user needs to install it. */
     fun certificate(): CertificateAuthorityInfo? = ca.ensure().also { publish() }
+
+    fun currentCertificate(): CertificateAuthorityInfo? = ca.current()
 
     /** Why there is no root, when a caller asked for one and did not get it. */
     val certificateError: String? get() = ca.lastError
@@ -191,7 +203,7 @@ internal class ProxyController(
             caExpiresEpochMs = root?.notAfterEpochMs ?: 0,
             decryptHosts = decryptHosts,
             lan = lan,
-            lanAddress = engine.lanAddress.value.takeUnless { it == "localhost" }.orEmpty(),
+            lanAddress = currentLanAddress(),
             systemProxy = machine.active,
             systemProxySupported = machine.supported,
             chainedTo = machine.chainedTo?.let { "${it.host}:${it.port}" }.orEmpty(),
@@ -258,7 +270,7 @@ internal class ProxyController(
 
     /** Refresh the counters the panel and the menu bar read; they only change as traffic flows. */
     fun sample(): ProxyStatus {
-        val current = server ?: return _status.value
+        val current = server ?: return sampleLanAddress()
         val next = describe(running = true, port = current.port).copy(
             connections = current.connections,
             exchanges = current.exchangeCount,
@@ -266,6 +278,16 @@ internal class ProxyController(
         _status.value = next
         return next
     }
+
+    // Refresh only the network-dependent field; [describe] would read the Keychain on every poll.
+    private fun sampleLanAddress(): ProxyStatus {
+        val address = currentLanAddress()
+        if (address == _status.value.lanAddress) return _status.value
+        return _status.value.copy(lanAddress = address).also { _status.value = it }
+    }
+
+    private fun currentLanAddress(): String =
+        engine.lanAddress.value.takeUnless { it == "localhost" }.orEmpty()
 
     @Synchronized
     fun setPort(port: Int): Boolean {

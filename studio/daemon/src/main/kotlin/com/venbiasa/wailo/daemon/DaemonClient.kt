@@ -1,5 +1,7 @@
 package com.venbiasa.wailo.daemon
 
+import com.venbiasa.wailo.daemon.provision.ProxyTargetOutcome
+import com.venbiasa.wailo.daemon.provision.ProxyTargetScan
 import com.venbiasa.wailo.engine.BodyRef
 import com.venbiasa.wailo.engine.CapturedExchange
 import com.venbiasa.wailo.engine.ConnectedDevice
@@ -386,6 +388,10 @@ class DaemonClient internal constructor(
         return status
     }
 
+    /** Returns the existing local root without creating one. */
+    suspend fun currentProxyCertificate(): ProxyCertificate =
+        rpc.call("current_proxy_certificate", JsonNull, ProxyCertificateDto.serializer()).toDomain()
+
     /**
      * The local root, minting one if this is the first ask (ADR-0073). Separate from the status flow on
      * purpose: polling for state must never be what puts a universal signing key on the machine.
@@ -398,6 +404,23 @@ class DaemonClient internal constructor(
 
     suspend fun removeProxyCertificate(): ProxyCertificate =
         rpc.call("remove_proxy_certificate", JsonNull, ProxyCertificateDto.serializer()).toDomain()
+
+    /** Returns configurable proxy targets on demand; detection shells out to `simctl` and `adb`. */
+    suspend fun proxyTargets(): ProxyTargetScan =
+        rpc.call("proxy_targets", JsonNull, ProxyTargetsDto.serializer()).toDomain()
+
+    /** Route one target through the proxy and trust the local root there. */
+    suspend fun setUpProxyTarget(id: String): ProxyTargetOutcome = rpc.call(
+        "setup_proxy_target",
+        DaemonJson.encodeToJsonElement(ProxyTargetRequest(id)),
+        ProxyTargetOutcomeDto.serializer(),
+    ).toDomain()
+
+    suspend fun clearProxyTarget(id: String): ProxyTargetOutcome = rpc.call(
+        "clear_proxy_target",
+        DaemonJson.encodeToJsonElement(ProxyTargetRequest(id)),
+        ProxyTargetOutcomeDto.serializer(),
+    ).toDomain()
 
     /**
      * Re-reads the AI tool gate straight from the daemon. Callers that enforce it must not wait for the

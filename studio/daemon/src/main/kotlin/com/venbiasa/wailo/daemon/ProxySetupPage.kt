@@ -3,28 +3,39 @@ package com.venbiasa.wailo.daemon
 import com.venbiasa.wailo.protocol.Header
 import com.venbiasa.wailo.protocol.HttpResponse
 import com.venbiasa.wailo.proxy.ProxySetup
+import java.net.URI
 import okio.ByteString.Companion.toByteString
 
+const val PROXY_SETUP_HOST = "wailo.test"
+
 /**
- * What Wailo serves to a browser pointed *at* the proxy port (ADR-0076): the local root, and the steps
- * for the device it is being installed on.
- *
- * This exists because a phone cannot read a file on the desktop. Every other way to get the certificate
- * across — AirDrop, email, a USB cable, a QR of a 1 KB PEM — is worse than fetching it from the machine
- * the device is already routed through.
- *
- * It never mints. [root] is the existing root or nothing, so a device that reaches this page cannot be
- * what puts a universal signing key on the user's machine (ADR-0073); creating one stays an act at the
- * desk, in Studio or the CLI.
+ * Serves device setup and the existing public root through the proxy (ADR-0076).
+ * Network requests never mint a signing key.
  */
 internal class ProxySetupPage(
     private val root: () -> CertificateAuthorityInfo?,
     private val decryptHosts: () -> List<String>,
 ) : ProxySetup {
-    override fun page(target: String): HttpResponse? = when (target.substringBefore('?')) {
-        "/", "/setup" -> html(landing())
-        CERTIFICATE_PATH -> root()?.let { certificate(it) } ?: html(landing())
-        else -> null
+    override fun page(target: String): HttpResponse? {
+        val absolute = runCatching { URI(target) }.getOrNull()
+        if (absolute?.host.equals(PROXY_SETUP_HOST, ignoreCase = true)) {
+            return when {
+                absolute?.scheme.equals("http", ignoreCase = true) &&
+                    absolute?.path == ROUTE_CHECK_PATH -> routeCheck()
+                absolute?.scheme.equals("http", ignoreCase = true) &&
+                    absolute?.path in setOf("", "/", "/setup") -> html(landing())
+                absolute?.scheme.equals("http", ignoreCase = true) &&
+                    absolute?.path == CERTIFICATE_PATH -> root()?.let(::certificate) ?: html(landing())
+                absolute?.scheme.equals("https", ignoreCase = true) &&
+                    absolute?.path == TRUST_CHECK_PATH -> root()?.let(::trustCheck)
+                else -> null
+            }
+        }
+        return when (target.substringBefore('?')) {
+            "/", "/setup" -> html(landing())
+            CERTIFICATE_PATH -> root()?.let { certificate(it) } ?: html(landing())
+            else -> null
+        }
     }
 
     private fun landing(): String {
@@ -48,6 +59,15 @@ internal class ProxySetupPage(
                 append("<p><strong>Android:</strong> Settings &rarr; Security &rarr; Encryption &amp; ")
                 append("credentials &rarr; Install a certificate &rarr; CA certificate. Apps only trust ")
                 append("user certificates if they opt in, so a release build may still refuse.</p>")
+                append("<p><button class=\"button\" onclick=\"checkTrust()\">Check browser trust</button></p>")
+                append("<p id=\"trust\" class=\"fingerprint\">Not checked yet.</p>")
+                append("<script>async function checkTrust(){const status=document.getElementById('trust');")
+                append("status.textContent='Checking…';try{const response=await fetch('https://")
+                append(PROXY_SETUP_HOST)
+                append(TRUST_CHECK_PATH)
+                append("',{cache:'no-store'});status.textContent=response.ok?")
+                append("'Confirmed: this browser trusts Wailo.':'The check was refused.';}catch(_){")
+                append("status.textContent='Not trusted yet. Finish the install and trust steps, then retry.';}}</script>")
             }
             append("<h2>2. Unlock the hosts to read</h2>")
             if (unlocked.isEmpty()) {
@@ -61,11 +81,7 @@ internal class ProxySetupPage(
         }
     }
 
-    /**
-     * `application/x-x509-ca-cert` is what makes iOS treat this as a profile to install and Android open
-     * its certificate installer. Served as `text/plain` it is a file both platforms will happily download
-     * and then do nothing with.
-     */
+    // This MIME type opens the platform certificate installer instead of downloading inert text.
     private fun certificate(current: CertificateAuthorityInfo) = HttpResponse(
         code = 200,
         message = "OK",
@@ -77,6 +93,35 @@ internal class ProxySetupPage(
         body = current.pem.toByteArray().toByteString(),
         body_size = current.pem.toByteArray().size.toLong(),
     )
+
+    private fun trustCheck(current: CertificateAuthorityInfo): HttpResponse {
+        val bytes = "trusted\nsha256=${current.sha256}\n".toByteArray()
+        return HttpResponse(
+            code = 200,
+            message = "OK",
+            headers = listOf(
+                Header("Content-Type", "text/plain; charset=utf-8"),
+                Header("Access-Control-Allow-Origin", "*"),
+                Header("Cache-Control", "no-store"),
+            ),
+            body = bytes.toByteString(),
+            body_size = bytes.size.toLong(),
+        )
+    }
+
+    private fun routeCheck(): HttpResponse {
+        val bytes = "routed\n".toByteArray()
+        return HttpResponse(
+            code = 200,
+            message = "OK",
+            headers = listOf(
+                Header("Content-Type", "text/plain; charset=utf-8"),
+                Header("Cache-Control", "no-store"),
+            ),
+            body = bytes.toByteString(),
+            body_size = bytes.size.toLong(),
+        )
+    }
 
     private fun html(body: String): HttpResponse {
         val bytes = (PAGE_HEAD + body + PAGE_TAIL).toByteArray()
@@ -94,9 +139,10 @@ internal class ProxySetupPage(
 
     private companion object {
         const val CERTIFICATE_PATH = "/cert"
+        const val ROUTE_CHECK_PATH = "/route-check"
+        const val TRUST_CHECK_PATH = "/check"
 
-        // Deliberately one file with no assets: every request for one would be another round trip through
-        // a proxy the device may not be able to use yet.
+        // One asset avoids extra requests through a proxy that may not work yet.
         val PAGE_HEAD = """
             <!doctype html><html lang="en"><head><meta charset="utf-8">
             <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -111,6 +157,8 @@ internal class ProxySetupPage(
             h2 { font-size: 1rem; margin: 2rem 0 .5rem; }
             a.button { display: inline-block; padding: .7rem 1.1rem; border: 1px solid var(--ink);
               border-radius: 8px; color: var(--ink); text-decoration: none; }
+            button.button { padding: .7rem 1.1rem; border: 1px solid var(--ink); border-radius: 8px;
+              color: var(--ink); background: var(--bg); font: inherit; }
             code, .fingerprint { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .8rem; }
             .fingerprint { color: var(--muted); word-break: break-all; }
             p { margin: .6rem 0; } strong { font-weight: 600; }

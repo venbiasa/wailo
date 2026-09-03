@@ -1,5 +1,10 @@
 package com.venbiasa.wailo.daemon
 
+import com.venbiasa.wailo.daemon.provision.CaTrust
+import com.venbiasa.wailo.daemon.provision.ProxyTarget
+import com.venbiasa.wailo.daemon.provision.ProxyTargetKind
+import com.venbiasa.wailo.daemon.provision.ProxyTargetOutcome
+import com.venbiasa.wailo.daemon.provision.ProxyTargetScan
 import com.venbiasa.wailo.engine.BodyRef
 import com.venbiasa.wailo.engine.CaptureSource
 import com.venbiasa.wailo.engine.CapturedExchange
@@ -23,7 +28,7 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import okio.ByteString.Companion.toByteString
 
-internal const val DAEMON_CONTROL_PROTOCOL_VERSION = 15
+internal const val DAEMON_CONTROL_PROTOCOL_VERSION = 16
 
 /**
  * The one command whose socket is not answered and closed. The daemon holds it open and counts it as a
@@ -450,6 +455,93 @@ internal data class AdbDeviceDto(
     val name: String,
     val status: String,
     val error: String? = null,
+)
+
+@Serializable
+internal data class ProxyTargetDto(
+    val id: String,
+    val name: String,
+    val kind: String,
+    val proxySet: Boolean = false,
+    val trust: String = CaTrust.NONE.name,
+    val certificateCurrent: Boolean = false,
+    val cleanupPending: Boolean = false,
+    val actionRequired: String = "",
+    val detail: String = "",
+) {
+    fun toDomain() = ProxyTarget(
+        id = id,
+        name = name,
+        kind = runCatching { ProxyTargetKind.valueOf(kind) }.getOrDefault(ProxyTargetKind.ANDROID_EMULATOR),
+        proxySet = proxySet,
+        trust = runCatching { CaTrust.valueOf(trust) }.getOrDefault(CaTrust.NONE),
+        certificateCurrent = certificateCurrent,
+        cleanupPending = cleanupPending,
+        actionRequired = actionRequired,
+        detail = detail,
+    )
+}
+
+@Serializable
+internal data class ProxyTargetsDto(
+    val supported: Boolean,
+    val targets: List<ProxyTargetDto>,
+    val error: String? = null,
+) {
+    fun toDomain() = ProxyTargetScan(
+        supported = supported,
+        targets = targets.map { it.toDomain() },
+        error = error,
+    )
+}
+
+@Serializable
+internal data class ProxyTargetRequest(val id: String)
+
+@Serializable
+internal data class ProxyTargetOutcomeDto(
+    val target: ProxyTargetDto? = null,
+    val proxySet: Boolean = false,
+    val trust: String = CaTrust.NONE.name,
+    val certificateCurrent: Boolean = false,
+    val cleanupPending: Boolean = false,
+    val actionRequired: String = "",
+    val note: String = "",
+    val error: String? = null,
+) {
+    fun toDomain() = ProxyTargetOutcome(
+        target = target?.toDomain(),
+        proxySet = proxySet,
+        trust = runCatching { CaTrust.valueOf(trust) }.getOrDefault(CaTrust.NONE),
+        certificateCurrent = certificateCurrent,
+        cleanupPending = cleanupPending,
+        actionRequired = actionRequired,
+        note = note,
+        error = error,
+    )
+}
+
+internal fun ProxyTarget.toDto() = ProxyTargetDto(
+    id = id,
+    name = name,
+    kind = kind.name,
+    proxySet = proxySet,
+    trust = trust.name,
+    certificateCurrent = certificateCurrent,
+    cleanupPending = cleanupPending,
+    actionRequired = actionRequired,
+    detail = detail,
+)
+
+internal fun ProxyTargetOutcome.toDto() = ProxyTargetOutcomeDto(
+    target = target?.toDto(),
+    proxySet = proxySet,
+    trust = trust.name,
+    certificateCurrent = certificateCurrent,
+    cleanupPending = cleanupPending,
+    actionRequired = actionRequired,
+    note = note,
+    error = error,
 )
 
 /**

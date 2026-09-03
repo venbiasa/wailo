@@ -1,5 +1,7 @@
 package com.venbiasa.wailo.daemon
 
+import com.venbiasa.wailo.daemon.provision.ProxyTargetKind
+import com.venbiasa.wailo.daemon.provision.ProxyTargetProvisioner
 import com.venbiasa.wailo.engine.BodyRef
 import com.venbiasa.wailo.host.HeadlessHost
 import com.venbiasa.wailo.host.HostBreakpointRule
@@ -69,6 +71,7 @@ internal class DaemonRuntime(
     certificateAuthority: WailoCertificateAuthority = WailoCertificateAuthority(EphemeralCertificateAuthorityStore()),
     systemProxy: SystemProxyController = SystemProxyController.forThisMachine(),
     private val fixtures: DaemonFixturesStore = DaemonFixturesStore(),
+    private val provisioner: ProxyTargetProvisioner = ProxyTargetProvisioner.forThisMachine(),
 ) : AutoCloseable {
     /**
      * The bundled proxy, off until something explicitly starts it (ADR-0070). Daemon-owned like every
@@ -85,6 +88,13 @@ internal class DaemonRuntime(
 
     /** Whether the proxy is holding this daemon up: a client pointed at a dead one loses its network. */
     val proxyRunning: Boolean get() = proxy.running
+
+    private data class ActiveProxyTarget(val id: String, val kind: ProxyTargetKind)
+
+    private val provisionedTargets = mutableMapOf<String, ActiveProxyTarget>()
+    private var proxyStartedForTargets = false
+    private var lanEnabledForTargets = false
+    private var systemProxyEnabledForTargets = false
 
     // Daemon-owned rather than engine-owned: neither value changes what is captured, only what an MCP
     // client is allowed to do with it, and both must outlive whichever frontend flipped them.
@@ -243,19 +253,41 @@ internal class DaemonRuntime(
         )
     }
 
+    @Synchronized
     fun setProxyEnabled(enabled: Boolean, port: Int? = null): ProxyStatus {
+        if (port != null && hasTargetRoutes()) {
+            return proxy.sample().copy(error = "Release configured proxy targets before changing the proxy port.")
+        }
+        if (!enabled && !releaseAllProxyTargets()) {
+            val status = proxy.sample()
+            return status.copy(
+                error = if (status.running) {
+                    "A target route could not be restored, so the proxy was left running."
+                } else {
+                    "Target routes were restored and the proxy stopped, but certificate cleanup remains pending."
+                },
+            )
+        }
         if (port != null) proxy.setPort(port)
-        if (enabled) proxy.start() else proxy.stop()
+        if (enabled) {
+            proxyStartedForTargets = false
+            proxy.start()
+        } else {
+            proxy.stop()
+        }
         val status = proxy.sample()
-        // Persisted after the attempt, so a port that would not bind is not the one a restart retries.
-        if (status.running) settings.update { it.copy(proxyPort = status.port) }
+        settings.update { it.copy(proxyPort = status.port) }
         return status
     }
 
+    @Synchronized
     fun setProxyPort(port: Int): ProxyStatus {
+        if (hasTargetRoutes()) {
+            return proxy.sample().copy(error = "Release configured proxy targets before changing the proxy port.")
+        }
         proxy.setPort(port)
         val status = proxy.sample()
-        settings.update { it.copy(proxyPort = port) }
+        settings.update { it.copy(proxyPort = status.port) }
         return status
     }
 
@@ -274,9 +306,21 @@ internal class DaemonRuntime(
      * Bind the proxy beyond loopback, or bring it back (ADR-0074). Persisted so a device configured once
      * keeps working, and applied immediately by restarting a running listener on the wider address.
      */
+    @Synchronized
     fun setProxyLan(enabled: Boolean): ProxyStatus {
+        if (
+            !enabled &&
+            (
+                provisionedTargets.values.any { it.kind == ProxyTargetKind.ANDROID_DEVICE } ||
+                    provisioner.activeTargets().any { it.kind == ProxyTargetKind.ANDROID_DEVICE } ||
+                    provisioner.lastError != null
+                )
+        ) {
+            return proxy.sample().copy(error = "Release physical Android targets before closing LAN access.")
+        }
+        if (enabled) lanEnabledForTargets = false
         val status = proxy.setLan(enabled)
-        settings.update { it.copy(proxyLan = enabled) }
+        settings.update { it.copy(proxyLan = status.lan) }
         return status
     }
 
@@ -285,14 +329,158 @@ internal class DaemonRuntime(
      * a daemon that reclaimed the system proxy on every start would take over a machine nobody asked it
      * to, and it always restores on the way out.
      */
-    fun setSystemProxy(enabled: Boolean): ProxyStatus = proxy.setSystemProxy(enabled)
+    @Synchronized
+    fun setSystemProxy(enabled: Boolean): ProxyStatus {
+        if (
+            !enabled &&
+            (
+                provisionedTargets.values.any { it.kind == ProxyTargetKind.IOS_SIMULATOR } ||
+                    provisioner.activeTargets().any { it.kind == ProxyTargetKind.IOS_SIMULATOR } ||
+                    provisioner.lastError != null
+                )
+        ) {
+            return proxy.sample().copy(error = "Release configured simulators before restoring the system proxy.")
+        }
+        if (enabled) systemProxyEnabledForTargets = false
+        return proxy.setSystemProxy(enabled)
+    }
 
     /** Mint the local root if there is not one yet — the one call that may create a signing key. */
+    @Synchronized
     fun proxyCertificate(): ProxyCertificateDto = proxy.certificate().toDto(proxy.certificateError)
 
-    fun rotateProxyCertificate(): ProxyCertificateDto = proxy.rotateCertificate().toDto(proxy.certificateError)
+    fun currentProxyCertificate(): ProxyCertificateDto = proxy.currentCertificate().toDto()
 
+    fun proxyTargets(): ProxyTargetsDto {
+        val fingerprint = proxy.status.value.caFingerprint
+        return ProxyTargetsDto(
+            supported = provisioner.supported,
+            targets = provisioner.targets(fingerprint).map { it.toDto() },
+            error = provisioner.lastError,
+        )
+    }
+
+    @Synchronized
+    fun setUpProxyTarget(id: String): ProxyTargetOutcomeDto {
+        val certificate = proxy.certificate()
+        val target = provisioner.targets(certificate?.sha256.orEmpty()).firstOrNull { it.id == id }
+            ?: return ProxyTargetOutcomeDto(error = "No configurable target called $id is connected.")
+        val pem = certificate?.pem
+            ?: return ProxyTargetOutcomeDto(
+                target = target.toDto(),
+                error = proxy.certificateError ?: "This machine has nowhere to keep a signing key.",
+            )
+        val before = proxy.sample()
+        val ready = when (target.kind) {
+            ProxyTargetKind.IOS_SIMULATOR -> {
+                val status = proxy.setSystemProxy(true)
+                if (!before.systemProxy && status.systemProxy) systemProxyEnabledForTargets = true
+                if (!before.running && status.running) proxyStartedForTargets = true
+                status.running && status.systemProxy
+            }
+            ProxyTargetKind.ANDROID_EMULATOR -> {
+                (proxy.running || proxy.start()).also {
+                    if (it && !before.running) proxyStartedForTargets = true
+                }
+            }
+            ProxyTargetKind.ANDROID_DEVICE -> {
+                val widened = if (before.lan) before else proxy.setLan(true).also {
+                    if (it.lan) {
+                        lanEnabledForTargets = true
+                    }
+                }
+                val started = widened.lanAddress.isNotEmpty() && (proxy.running || proxy.start())
+                if (started && !before.running) proxyStartedForTargets = true
+                started
+            }
+        }
+        if (!ready) {
+            rollbackUnusedTargetResources(target.kind)
+            return ProxyTargetOutcomeDto(
+                target = target.toDto(),
+                error = proxy.status.value.error ?: "The proxy could not be started.",
+            )
+        }
+        val status = proxy.sample()
+        if (status.running) settings.update { it.copy(proxyPort = status.port) }
+        val outcome = provisioner.setUp(id, pem, status.port, status.lanAddress)
+        if (outcome.proxySet) {
+            provisionedTargets[target.stableId] = ActiveProxyTarget(target.id, target.kind)
+        } else {
+            provisionedTargets.remove(target.stableId)
+            rollbackUnusedTargetResources(target.kind)
+        }
+        return outcome.toDto()
+    }
+
+    @Synchronized
+    fun clearProxyTarget(id: String): ProxyTargetOutcomeDto {
+        val outcome = provisioner.clear(id)
+        if (!outcome.proxySet) {
+            val stableId = outcome.target?.stableId
+            val released = stableId?.let(provisionedTargets::remove)
+            released?.kind?.let(::rollbackUnusedTargetResources)
+        }
+        return outcome.toDto()
+    }
+
+    private fun releaseAllProxyTargets(): Boolean {
+        val ids = provisionedTargets.values.map { it.id }
+        val inMemoryReleased = ids.map { clearProxyTarget(it).error == null }.all { it }
+        val recordedReleased = provisioner.recoverableTargets()
+            .filterNot { it.stableId in provisionedTargets }
+            .map { provisioner.clear(it.id).error == null }
+            .all { it }
+        return inMemoryReleased && recordedReleased && provisioner.lastError == null
+    }
+
+    private fun hasTargetRoutes(): Boolean =
+        provisionedTargets.isNotEmpty() ||
+            provisioner.activeTargets().isNotEmpty() ||
+            provisioner.lastError != null
+
+    private fun rollbackUnusedTargetResources(kind: ProxyTargetKind) {
+        when (kind) {
+            ProxyTargetKind.IOS_SIMULATOR -> {
+                if (
+                    systemProxyEnabledForTargets &&
+                    provisionedTargets.values.none { it.kind == ProxyTargetKind.IOS_SIMULATOR }
+                ) {
+                    proxy.setSystemProxy(false)
+                    systemProxyEnabledForTargets = false
+                }
+            }
+            ProxyTargetKind.ANDROID_DEVICE -> {
+                if (
+                    lanEnabledForTargets &&
+                    provisionedTargets.values.none { it.kind == ProxyTargetKind.ANDROID_DEVICE }
+                ) {
+                    proxy.setLan(false)
+                    lanEnabledForTargets = false
+                }
+            }
+            ProxyTargetKind.ANDROID_EMULATOR -> Unit
+        }
+        if (proxyStartedForTargets && provisionedTargets.isEmpty()) {
+            proxy.stop()
+            proxyStartedForTargets = false
+        }
+    }
+
+    // Explicit startup call: constructing a test runtime must not mutate real devices.
+    fun recoverProvisionedTargets(): Boolean = provisioner.recover()
+
+    @Synchronized
+    fun rotateProxyCertificate(): ProxyCertificateDto =
+        proxy.rotateCertificate().toDto(proxy.certificateError)
+
+    @Synchronized
     fun removeProxyCertificate(): ProxyCertificateDto {
+        if (hasTargetRoutes()) {
+            return proxy.currentCertificate().toDto().copy(
+                error = "Release configured proxy targets before removing the root.",
+            )
+        }
         proxy.removeCertificate()
         return null.toDto()
     }
@@ -596,6 +784,9 @@ internal class DaemonRuntime(
     }
 
     override fun close() {
+        synchronized(this) {
+            releaseAllProxyTargets()
+        }
         proxy.close()
         usb.close()
         adb.close()
@@ -948,6 +1139,20 @@ internal class DaemonServer(
                 DaemonJson.encodeToJsonElement(
                     runtime.setSystemProxy(request.decode(BooleanValue.serializer()).value).toDto(),
                 ),
+            )
+            "proxy_targets" -> success(DaemonJson.encodeToJsonElement(runtime.proxyTargets()))
+            "setup_proxy_target" -> success(
+                DaemonJson.encodeToJsonElement(
+                    runtime.setUpProxyTarget(request.decode(ProxyTargetRequest.serializer()).id),
+                ),
+            )
+            "clear_proxy_target" -> success(
+                DaemonJson.encodeToJsonElement(
+                    runtime.clearProxyTarget(request.decode(ProxyTargetRequest.serializer()).id),
+                ),
+            )
+            "current_proxy_certificate" -> success(
+                DaemonJson.encodeToJsonElement(runtime.currentProxyCertificate()),
             )
             "proxy_certificate" -> success(DaemonJson.encodeToJsonElement(runtime.proxyCertificate()))
             "rotate_proxy_certificate" -> success(

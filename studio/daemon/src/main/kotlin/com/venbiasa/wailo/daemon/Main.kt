@@ -87,12 +87,22 @@ fun main() {
         certificateAuthority = certificateAuthority,
         systemProxy = systemProxy,
     )
+    // A killed daemon can leave an emulator pointed at a listener that no longer exists (ADR-0090).
+    if (runtime.recoverProvisionedTargets()) {
+        System.err.println("wailo-daemon: cleared an emulator proxy a previous run left behind")
+    }
+    val targetRecovery = ProxyTargetRecoveryWatchdog(
+        recover = { runtime.recoverProvisionedTargets() },
+    ).also {
+        it.start()
+    }
     val stopped = CountDownLatch(1)
     val stopping = AtomicBoolean()
     lateinit var server: DaemonServer
     lateinit var idleWatchdog: DaemonIdleWatchdog
     val stop = {
         if (stopping.compareAndSet(false, true)) {
+            runCatching { targetRecovery.close() }
             runCatching { idleWatchdog.close() }
             runCatching { server.close() }
             runtime.close()

@@ -1,11 +1,17 @@
 package com.venbiasa.wailo.daemon
 
+import com.venbiasa.wailo.daemon.provision.parseCertificate
 import com.venbiasa.wailo.engine.WailoEngine
 import com.venbiasa.wailo.host.HeadlessHost
 import java.io.Closeable
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.Socket
+import java.security.KeyStore
+import java.security.SecureRandom
+import javax.net.ssl.SSLContext
+import javax.net.ssl.SSLSocket
+import javax.net.ssl.TrustManagerFactory
 import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -64,6 +70,59 @@ class ProxySetupPageTest {
     }
 
     @Test
+    fun theHttpSelfCheckProvesThePhoneIsRoutingThroughWailo() {
+        assertTrue(proxy.start(0))
+
+        val response = fetch("http://$PROXY_SETUP_HOST/route-check")
+
+        assertTrue(response.contains("200 OK"), response)
+        assertTrue(response.endsWith("routed\n"), response)
+    }
+
+    @Test
+    fun theHttpsSelfCheckSucceedsOnlyAfterTheBrowserTrustsTheRoot() {
+        val certificate = assertNotNull(ca.ensure())
+        assertTrue(proxy.start(0))
+        val trustStore = KeyStore.getInstance(KeyStore.getDefaultType()).apply {
+            load(null, null)
+            setCertificateEntry("wailo", assertNotNull(parseCertificate(certificate.pem)))
+        }
+        val trustManagers = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm()).apply {
+            init(trustStore)
+        }
+        val context = SSLContext.getInstance("TLS").apply {
+            init(null, trustManagers.trustManagers, SecureRandom())
+        }
+
+        Socket().use { socket ->
+            socket.connect(InetSocketAddress(InetAddress.getLoopbackAddress(), proxy.status.value.port), 2_000)
+            socket.soTimeout = 5_000
+            socket.getOutputStream().apply {
+                write(
+                    "CONNECT $PROXY_SETUP_HOST:443 HTTP/1.1\r\nHost: $PROXY_SETUP_HOST\r\n\r\n".toByteArray(),
+                )
+                flush()
+            }
+            assertTrue(readHttpHead(socket).contains("200 Connection Established"))
+
+            val secured = context.socketFactory.createSocket(socket, PROXY_SETUP_HOST, 443, true) as SSLSocket
+            secured.useClientMode = true
+            secured.startHandshake()
+            secured.getOutputStream().apply {
+                write(
+                    "GET /check HTTP/1.1\r\nHost: $PROXY_SETUP_HOST\r\nConnection: close\r\n\r\n".toByteArray(),
+                )
+                flush()
+            }
+            val response = String(secured.getInputStream().readBytes())
+
+            assertTrue(response.contains("200 OK"), response)
+            assertTrue(response.contains("trusted"), response)
+            secured.close()
+        }
+    }
+
+    @Test
     fun anUnknownPathIsStillRefusedAsAProxyPort() {
         assertTrue(proxy.start(0))
 
@@ -81,5 +140,15 @@ class ProxySetupPageTest {
             flush()
         }
         String(socket.getInputStream().readBytes())
+    }
+
+    private fun readHttpHead(socket: Socket): String {
+        val bytes = ArrayList<Byte>()
+        while (bytes.takeLast(4) != listOf(13.toByte(), 10.toByte(), 13.toByte(), 10.toByte())) {
+            val next = socket.getInputStream().read()
+            if (next < 0) break
+            bytes += next.toByte()
+        }
+        return bytes.toByteArray().toString(Charsets.ISO_8859_1)
     }
 }

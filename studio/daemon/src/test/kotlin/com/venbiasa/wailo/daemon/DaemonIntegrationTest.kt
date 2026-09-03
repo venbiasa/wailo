@@ -1,5 +1,8 @@
 package com.venbiasa.wailo.daemon
 
+import com.venbiasa.wailo.daemon.provision.CaTrust
+import com.venbiasa.wailo.daemon.provision.DeviceTool
+import com.venbiasa.wailo.daemon.provision.ProxyTargetProvisioner
 import com.venbiasa.wailo.engine.WailoEngine
 import com.venbiasa.wailo.host.HeadlessHost
 import com.venbiasa.wailo.host.HostMapLocalRule
@@ -14,6 +17,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertFails
 import kotlin.test.assertNotEquals
+import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlinx.coroutines.async
@@ -942,6 +946,7 @@ class DaemonIntegrationTest {
                 assertTrue(client.awaitReady())
                 // Nothing has asked for a root, so nothing should have minted one (ADR-0073).
                 assertFalse(client.proxy.value.caInstalled)
+                assertFalse(client.currentProxyCertificate().installed)
 
                 val certificate = client.proxyCertificate()
                 assertTrue(certificate.installed, certificate.error)
@@ -953,6 +958,144 @@ class DaemonIntegrationTest {
                 assertNotEquals(certificate.sha256, rotated.sha256)
 
                 assertFalse(client.removeProxyCertificate().installed)
+            } finally {
+                client.close()
+            }
+        }
+    }
+
+    @Test
+    fun aMachineWithNoDeviceToolingSaysSoRatherThanReportingNothingBooted() = runBlocking {
+        harness(adbTool = null).use { harness ->
+            val client = harness.client()
+            try {
+                assertTrue(client.awaitReady())
+
+                val scan = client.proxyTargets()
+
+                // The distinction has to survive the wire: an empty list means boot something, whereas
+                // unsupported means this machine will never offer one, and only one of those is retryable.
+                assertFalse(scan.supported)
+                assertTrue(scan.targets.isEmpty())
+            } finally {
+                client.close()
+            }
+        }
+    }
+
+    @Test
+    fun setsAnEmulatorUpOverTheWireAndReportsWhichTrustStoreTookTheRoot() = runBlocking {
+        harness(adbTool = StubEmulator()).use { harness ->
+            val client = harness.client()
+            try {
+                assertTrue(client.awaitReady())
+                assertFalse(client.proxy.value.running, "nothing has asked for the listener yet")
+
+                val outcome = client.setUpProxyTarget("emulator-5554")
+
+                assertNull(outcome.error)
+                assertEquals(CaTrust.SYSTEM, outcome.trust)
+                // Naming a target is what starts the listener: a setup that pointed an emulator at a port
+                // nothing was on would leave it with no network (ADR-0090).
+                withTimeout(2_000) {
+                    while (!client.proxy.value.running) delay(10)
+                }
+                assertTrue(client.proxyTargets().targets.single().proxySet)
+                val refusedRemoval = client.removeProxyCertificate()
+                assertTrue(refusedRemoval.installed)
+                assertNotNull(refusedRemoval.error)
+
+                assertNull(client.clearProxyTarget("emulator-5554").error)
+                assertFalse(client.proxyTargets().targets.single().proxySet)
+                withTimeout(2_000) {
+                    while (client.proxy.value.running) delay(10)
+                }
+            } finally {
+                client.close()
+            }
+        }
+    }
+
+    @Test
+    fun releasingATargetStopsOnlyTheListenerProvisioningStarted() = runBlocking {
+        harness(adbTool = StubEmulator()).use { harness ->
+            val client = harness.client()
+            try {
+                assertTrue(client.awaitReady())
+                assertTrue(client.setProxyEnabled(true).running)
+
+                assertNull(client.setUpProxyTarget("emulator-5554").error)
+                assertNull(client.clearProxyTarget("emulator-5554").error)
+
+                assertTrue(client.proxy.value.running)
+            } finally {
+                client.close()
+            }
+        }
+    }
+
+    @Test
+    fun releasingOneOfTwoTargetsKeepsTheirSharedListenerRunning() = runBlocking {
+        val adb = StubEmulator(
+            devices = listOf(
+                "emulator-5554" to "Pixel_API_34",
+                "emulator-5556" to "Pixel_API_35",
+            ),
+        )
+        harness(adbTool = adb).use { harness ->
+            val client = harness.client()
+            try {
+                assertTrue(client.awaitReady())
+                assertNull(client.setUpProxyTarget("emulator-5554").error)
+                assertNull(client.setUpProxyTarget("emulator-5556").error)
+
+                assertNull(client.clearProxyTarget("emulator-5554").error)
+                assertTrue(client.proxy.value.running)
+
+                assertNull(client.clearProxyTarget("emulator-5556").error)
+                withTimeout(2_000) {
+                    while (client.proxy.value.running) delay(10)
+                }
+            } finally {
+                client.close()
+            }
+        }
+    }
+
+    @Test
+    fun normalDaemonShutdownRestoresATargetsExactPriorProxy() = runBlocking {
+        val adb = StubEmulator(initialProxy = "legacy-proxy.example:8080")
+
+        harness(adbTool = adb).use { harness ->
+            val client = harness.client()
+            try {
+                assertTrue(client.awaitReady())
+                assertNull(client.setUpProxyTarget("emulator-5554").error)
+                assertNotEquals("legacy-proxy.example:8080", adb.proxy())
+            } finally {
+                client.close()
+            }
+        }
+
+        assertEquals("legacy-proxy.example:8080", adb.proxy())
+    }
+
+    @Test
+    fun anActiveTargetBlocksAProxyPortChange() = runBlocking {
+        harness(adbTool = StubEmulator()).use { harness ->
+            val client = harness.client()
+            try {
+                assertTrue(client.awaitReady())
+                assertNull(client.setUpProxyTarget("emulator-5554").error)
+                withTimeout(2_000) {
+                    while (!client.proxy.value.running) delay(10)
+                }
+                val activePort = client.proxy.value.port
+
+                val outcome = client.setProxyPort(activePort + 1)
+
+                assertNotNull(outcome.error)
+                assertEquals(activePort, outcome.port)
             } finally {
                 client.close()
             }
@@ -981,6 +1124,7 @@ class DaemonIntegrationTest {
     private fun harness(
         directory: java.nio.file.Path = Files.createTempDirectory("wailo-daemon-test"),
         deleteDirectory: Boolean = true,
+        adbTool: DeviceTool? = null,
     ): Harness {
         val handshakeStore = MemoryDaemonHandshakeStore()
         val host = HeadlessHost.wrap(WailoEngine(port = ServerSocket(0).use { it.localPort }))
@@ -990,7 +1134,15 @@ class DaemonIntegrationTest {
             adb = NoopAdbController(),
             settings = DaemonSettings(directory.resolve("settings.properties")),
             pairingSupported = false,
+            proxyPort = 0,
             fixtures = DaemonFixturesStore(directory),
+            // Never the default: that one drives this developer's real emulators, and its record lives
+            // outside the temp directory on purpose (ADR-0083/0090).
+            provisioner = ProxyTargetProvisioner.over(
+                adb = adbTool,
+                simctl = null,
+                statePath = directory.resolve("proxy-targets.json"),
+            ),
         )
         val server = DaemonServer(
             runtime = runtime,
@@ -1026,6 +1178,61 @@ class DaemonIntegrationTest {
             server.close()
             runtime.close()
             if (deleteDirectory) directory.toFile().deleteRecursively()
+        }
+    }
+}
+
+/**
+ * One cooperative emulator, enough to prove the RPCs reach the provisioner and its verdict comes back. The
+ * store fork and its failure modes are exercised against a fuller stand-in in `ProxyTargetProvisionerTest`.
+ */
+private class StubEmulator(
+    private val devices: List<Pair<String, String>> = listOf("emulator-5554" to "Pixel_API_34"),
+    initialProxy: String? = null,
+) : DeviceTool {
+    private val files = mutableMapOf<Pair<String, String>, String>()
+    private val proxies = devices.associate { it.first to initialProxy }.toMutableMap()
+
+    fun proxy(serial: String = devices.single().first): String? = proxies[serial]
+
+    override fun run(arguments: List<String>): String? {
+        if (arguments.firstOrNull() == "devices") {
+            return buildString {
+                appendLine("List of devices attached")
+                devices.forEach { (serial, _) ->
+                    appendLine("$serial\tdevice model:sdk_gphone64_arm64")
+                }
+            }
+        }
+        val serial = arguments[1]
+        val tail = arguments.drop(2)
+        return when {
+            tail.firstOrNull() == "push" -> {
+                files[serial to tail.last()] = Files.readString(java.nio.file.Path.of(tail[1]))
+                ""
+            }
+            tail.take(2) == listOf("shell", "cp") -> "".also {
+                files[serial to tail.last()] = files[serial to tail[2]].orEmpty()
+            }
+            tail.take(2) == listOf("shell", "cat") -> files[serial to tail.last()]
+            tail.take(2) == listOf("shell", "rm") -> "".also { files.remove(serial to tail.last()) }
+            tail.take(2) == listOf("shell", "getprop") -> when (tail.last()) {
+                "ro.kernel.qemu" -> "1"
+                "ro.boot.qemu.avd_name" -> devices.first { it.first == serial }.second
+                "ro.build.version.sdk" -> "34"
+                else -> ""
+            }
+            tail.take(5) == listOf("shell", "settings", "get", "global", "http_proxy") ->
+                proxies[serial] ?: "null"
+            tail.take(5) == listOf("shell", "settings", "put", "global", "http_proxy") ->
+                "".also { proxies[serial] = tail.last() }
+            tail.take(5) == listOf("shell", "settings", "delete", "global", "http_proxy") ->
+                "".also { proxies[serial] = null }
+            tail.take(3) == listOf("shell", "sh", "-c") -> {
+                val path = Regex("'([^']+)'").find(tail.last())?.groupValues?.get(1)
+                "absent".takeIf { path != null && serial to path !in files }
+            }
+            else -> ""
         }
     }
 }
