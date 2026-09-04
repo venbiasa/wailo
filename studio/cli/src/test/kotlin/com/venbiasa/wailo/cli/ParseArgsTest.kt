@@ -255,6 +255,10 @@ class ParseArgsTest {
                 "wait_device",
                 "list_paired",
                 "set_rule_order",
+                "proxy_setup_guide",
+                "proxy_targets",
+                "setup_proxy_target",
+                "clear_proxy_target",
             ),
         ))
     }

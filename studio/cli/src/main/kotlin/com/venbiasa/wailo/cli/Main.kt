@@ -6,7 +6,10 @@ import com.venbiasa.wailo.daemon.RULE_FAMILIES
 import com.venbiasa.wailo.daemon.RULE_FAMILY_BREAKPOINTS
 import com.venbiasa.wailo.daemon.RULE_FAMILY_MAP_LOCAL
 import com.venbiasa.wailo.daemon.RULE_FAMILY_SEEDS
+import com.venbiasa.wailo.daemon.PROXY_SETUP_HOST
 import com.venbiasa.wailo.daemon.groupIdByRule
+import com.venbiasa.wailo.daemon.provision.CaTrust
+import com.venbiasa.wailo.daemon.provision.ProxyTargetOutcome
 import com.venbiasa.wailo.engine.PausedExchange
 import com.venbiasa.wailo.engine.WailoEngine
 import com.venbiasa.wailo.host.HostBreakpointRule
@@ -108,6 +111,31 @@ private val BLOCKING_COMMANDS = setOf(
 )
 
 internal data class CommandResult(val message: String, val exitCode: Int = 0)
+
+private fun reportProxyTarget(outcome: ProxyTargetOutcome): CommandResult {
+    val target = outcome.target
+    val lines = buildList {
+        add(
+            "id=${target?.id.orEmpty()} proxy=${if (outcome.proxySet) "on" else "off"} " +
+                "trust=${outcome.trust.name.lowercase()} " +
+                "certificate=${if (outcome.certificateCurrent) "current" else "not-current"} " +
+                "cleanup=${if (outcome.cleanupPending) "pending" else "clear"}",
+        )
+        if (outcome.actionRequired.isNotEmpty()) add("action_required=${outcome.actionRequired}")
+        if (outcome.note.isNotEmpty()) add(outcome.note)
+        outcome.error?.let { add("error=$it") }
+    }
+    return CommandResult(
+        lines.joinToString("\n"),
+        exitCode = if (
+            outcome.error != null || (!outcome.proxySet && outcome.trust == CaTrust.NONE)
+        ) {
+            1
+        } else {
+            0
+        },
+    )
+}
 
 internal suspend fun dispatch(host: DaemonClient, args: ParsedArgs): CommandResult {
     return when (args.command) {
@@ -515,6 +543,59 @@ internal suspend fun dispatch(host: DaemonClient, args: ParsedArgs): CommandResu
                     (status.error?.let { " error=$it" } ?: ""),
             )
         }
+        "proxy_setup_guide", "proxy-setup-guide" -> {
+            val status = host.proxy.value
+            val scan = host.proxyTargets()
+            val setupUrl = "http://$PROXY_SETUP_HOST/setup"
+                .takeIf { status.lan && status.lanAddress.isNotEmpty() }
+            CommandResult(
+                buildString {
+                    appendLine("listener=${if (status.running) "on" else "off"}")
+                    appendLine(
+                        "lan=${if (status.lan) "open" else "loopback"} " +
+                            "address=${status.lanAddress.ifEmpty { "unknown" }}",
+                    )
+                    appendLine("ca=${if (status.caInstalled) "installed" else "absent"}")
+                    appendLine("decrypt=${status.decryptHosts.ifEmpty { listOf("none") }.joinToString(",")}")
+                    scan.error?.let { appendLine("target_error=$it") }
+                    if (!status.running) appendLine("next: wailo-cli set_proxy --on")
+                    if (!status.lan) appendLine("physical phone next: wailo-cli set_proxy_lan --on")
+                    if (!status.caInstalled) {
+                        appendLine("certificate next: wailo-cli proxy_ca --out /tmp/wailo-root.pem")
+                    }
+                    if (status.decryptHosts.isEmpty()) {
+                        appendLine("HTTPS next: wailo-cli set_proxy_decrypt --host api.example.com")
+                    }
+                    if (scan.targets.isNotEmpty()) {
+                        appendLine("automatic targets:")
+                        scan.targets.forEach {
+                            appendLine(
+                                "  ${it.id} ${it.kind.name.lowercase()} " +
+                                    "proxy=${it.proxySet} trust=${it.trust.name.lowercase()}",
+                            )
+                        }
+                        appendLine("automatic next: wailo-cli setup_proxy_target --id TARGET_ID")
+                    } else if (!scan.supported) {
+                        appendLine(
+                            "automatic targets: adb and xcrun simctl are unavailable; use the manual phone path",
+                        )
+                    } else {
+                        appendLine("automatic targets: none connected")
+                    }
+                    if (setupUrl != null) {
+                        appendLine("manual setup: $setupUrl")
+                        appendLine("routing check: http://$PROXY_SETUP_HOST/route-check")
+                        appendLine("trust check: https://$PROXY_SETUP_HOST/check")
+                    } else {
+                        appendLine("manual setup appears after LAN access has a reachable address")
+                    }
+                    if (scan.targets.any { it.proxySet || it.cleanupPending }) {
+                        appendLine("restore: wailo-cli clear_proxy_target --id TARGET_ID")
+                    }
+                }.trimEnd(),
+                exitCode = if (scan.error == null) 0 else 1,
+            )
+        }
         "set_system_proxy", "set-system-proxy" -> {
             val enabled = args.flag ?: return CommandResult("set_system_proxy requires --on or --off", exitCode = 2)
             val status = host.setSystemProxy(enabled)
@@ -577,9 +658,39 @@ internal suspend fun dispatch(host: DaemonClient, args: ParsedArgs): CommandResu
             }
             CommandResult("ca=${certificate.commonName} sha256=${certificate.sha256} (reinstall it to keep decrypting)")
         }
-        "remove_proxy_ca", "remove-proxy-ca" -> {
-            host.removeProxyCertificate()
-            CommandResult("ca=removed (also remove it from the system trust store)")
+        "remove_proxy_ca", "remove-proxy-ca" -> host.removeProxyCertificate().let { certificate ->
+            certificate.error?.let { return CommandResult("error=$it", exitCode = 1) }
+            CommandResult("ca=removed (also remove it from any manually configured trust store)")
+        }
+        "proxy_targets", "proxy-targets" -> host.proxyTargets().let { scan ->
+            scan.error?.let { return CommandResult("error=$it", exitCode = 1) }
+            if (!scan.supported) {
+                return CommandResult("no adb or xcrun simctl found on this machine", exitCode = 1)
+            }
+            if (scan.targets.isEmpty()) {
+                return CommandResult("no simulator, emulator, or ADB-connected Android device connected")
+            }
+            CommandResult(
+                scan.targets.joinToString("\n") {
+                    "id=${it.id} name=${it.name} kind=${it.kind.name.lowercase()} " +
+                        "proxy=${if (it.proxySet) "on" else "off"} trust=${it.trust.name.lowercase()} " +
+                        "certificate=${if (it.certificateCurrent) "current" else "not-current"} " +
+                        "cleanup=${if (it.cleanupPending) "pending" else "clear"}" +
+                        (it.detail.takeIf { detail -> detail.isNotEmpty() }?.let { detail -> " ($detail)" } ?: "") +
+                        (it.actionRequired.takeIf(String::isNotEmpty)
+                            ?.let { action -> "\n  action_required=$action" } ?: "")
+                },
+            )
+        }
+        "setup_proxy_target", "setup-proxy-target" -> {
+            val id = args.id
+                ?: return CommandResult("setup_proxy_target requires --id (see proxy_targets)", exitCode = 2)
+            reportProxyTarget(host.setUpProxyTarget(id))
+        }
+        "clear_proxy_target", "clear-proxy-target" -> {
+            val id = args.id
+                ?: return CommandResult("clear_proxy_target requires --id (see proxy_targets)", exitCode = 2)
+            reportProxyTarget(host.clearProxyTarget(id))
         }
         "status", "daemon_status", "daemon-status" -> CommandResult(
             "listening=${host.listening.value} port=${host.capturePort.value} " +
@@ -1013,12 +1124,16 @@ internal enum class Command(val verb: String) {
     SetUsbPort("set_usb_port"),
     SetProxy("set_proxy"),
     ProxyStatus("proxy_status"),
+    ProxySetupGuide("proxy_setup_guide"),
     SetProxyLan("set_proxy_lan"),
     SetSystemProxy("set_system_proxy"),
     SetProxyDecrypt("set_proxy_decrypt"),
     ProxyCa("proxy_ca"),
     RotateProxyCa("rotate_proxy_ca"),
     RemoveProxyCa("remove_proxy_ca"),
+    ProxyTargets("proxy_targets"),
+    SetupProxyTarget("setup_proxy_target"),
+    ClearProxyTarget("clear_proxy_target"),
     SetMcpAccess("set_mcp_access"),
     SetMcpRedaction("set_mcp_redaction"),
     SetRequirePairing("set_require_pairing"),
@@ -1259,12 +1374,16 @@ private fun printUsage() {
         wailo-cli set_usb_port --port N
         wailo-cli set_proxy --on|--off [--port N]
         wailo-cli proxy_status
+        wailo-cli proxy_setup_guide
         wailo-cli set_proxy_lan --on|--off
         wailo-cli set_system_proxy --on|--off
         wailo-cli set_proxy_decrypt --host PATTERN... | --off
         wailo-cli proxy_ca [--out PATH]
         wailo-cli rotate_proxy_ca
         wailo-cli remove_proxy_ca
+        wailo-cli proxy_targets
+        wailo-cli setup_proxy_target --id ID
+        wailo-cli clear_proxy_target --id ID
         wailo-cli set_mcp_access --on|--off
         wailo-cli set_mcp_redaction --on|--off
         wailo-cli set_require_pairing --on|--off
@@ -1329,6 +1448,13 @@ private fun printUsage() {
         time, so --off relocks everything. remove_proxy_ca forgets the root here, but you still have to
         untrust it yourself. A phone cannot read a file here, so browsing to the proxy's own address
         serves it that same root plus the steps for its platform — it never creates one.
+
+        A booted simulator, emulator, or ADB-connected Android phone can start from proxy_targets.
+        setup_proxy_target routes it through the proxy and installs the root where Android permits;
+        clear_proxy_target restores the prior route. `system` trust covers every app, `user` only apps
+        that opted in, and `none` means the command prints the remaining on-device step. Emulators use
+        10.0.2.2 without a LAN bind. Physical Android devices use this Mac's LAN address. Simulators ride
+        set_system_proxy because they have no separate proxy setting.
 
         set_mcp_access gates whether AI tools reach this capture at all; set_mcp_redaction decides
         whether what they read has its credentials stripped. Both are also in Studio's Settings panel.
