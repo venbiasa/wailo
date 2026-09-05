@@ -1,4 +1,4 @@
-package com.venbiasa.wailo.desktop.pairing
+package com.venbiasa.wailo.desktop
 
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.toComposeImageBitmap
@@ -8,16 +8,7 @@ import com.google.zxing.qrcode.QRCodeWriter
 import com.google.zxing.qrcode.decoder.ErrorCorrectionLevel
 import java.awt.image.BufferedImage
 
-/**
- * Renders the `wailo://pair` invite as a QR (ADR-0039).
- *
- * The payload carries Studio's public key as well as the pairing secret, so it runs ~200 characters —
- * comfortably inside QR's capacity, but enough that low error correction keeps the modules large
- * enough to scan off a screen at arm's length. Emitted at 1 module per pixel and scaled by the UI with
- * nearest-neighbour, so the bitmap stays crisp at any size.
- */
-object PairingQr {
-
+internal object QrCode {
     fun render(payload: String): ImageBitmap? = runCatching {
         val matrix = QRCodeWriter().encode(
             payload,

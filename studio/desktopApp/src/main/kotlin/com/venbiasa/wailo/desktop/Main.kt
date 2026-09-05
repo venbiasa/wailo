@@ -36,7 +36,12 @@ import com.venbiasa.wailo.daemon.DaemonClient
 import com.venbiasa.wailo.daemon.DaemonLauncher
 import com.venbiasa.wailo.daemon.DaemonRuleGroup
 import com.venbiasa.wailo.daemon.DaemonRuleNode
+import com.venbiasa.wailo.daemon.PROXY_SETUP_HOST
 import com.venbiasa.wailo.daemon.ProxyCertificate
+import com.venbiasa.wailo.daemon.provision.CaTrust
+import com.venbiasa.wailo.daemon.provision.ProxyTarget
+import com.venbiasa.wailo.daemon.provision.ProxyTargetKind
+import com.venbiasa.wailo.daemon.provision.ProxyTargetOutcome
 import com.venbiasa.wailo.daemon.RULE_FAMILY_MAP_LOCAL
 import com.venbiasa.wailo.daemon.RULE_FAMILY_SEEDS
 import com.venbiasa.wailo.daemon.bodyDigest
@@ -74,6 +79,10 @@ import com.venbiasa.wailo.shared.PausedFlow
 import com.venbiasa.wailo.shared.PickedFile
 import com.venbiasa.wailo.shared.ProxySetupAction
 import com.venbiasa.wailo.shared.ProxyState
+import com.venbiasa.wailo.shared.ProxyTargetInfo
+import com.venbiasa.wailo.shared.ProxyTargetKind as ViewerProxyTargetKind
+import com.venbiasa.wailo.shared.ProxyTargetTrust
+import com.venbiasa.wailo.shared.ProxyTargets
 import com.venbiasa.wailo.shared.RuleArchiveCodec
 import com.venbiasa.wailo.shared.RuleGroup
 import com.venbiasa.wailo.shared.RuleNode
@@ -86,7 +95,6 @@ import com.venbiasa.wailo.shared.WailoCompareWindowContent
 import com.venbiasa.wailo.shared.allRules
 import com.venbiasa.wailo.shared.theme.TextScale
 import com.venbiasa.wailo.shared.ui.StickyScopeRows
-import com.venbiasa.wailo.desktop.pairing.PairingQr
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.delay
@@ -281,22 +289,52 @@ private fun runWailo(engine: DaemonClient) = application {
     )
     val setProxyEnabled: (Boolean) -> Unit = { enabled -> scope.launch { engine.setProxyEnabled(enabled) } }
     val applyProxyPort: (Int) -> Unit = { port -> scope.launch { engine.setProxyPort(port) } }
+
+    // Target detection shells out, so the card requests it instead of adding it to every poll (ADR-0090).
+    var proxyTargets by remember { mutableStateOf(ProxyTargets()) }
     val proxySetupAction: (ProxySetupAction) -> Unit = { action ->
         scope.launch {
             when (action) {
+                is ProxySetupAction.SetProxyEnabled -> engine.setProxyEnabled(action.enabled)
                 is ProxySetupAction.SetLan -> engine.setProxyLan(action.enabled)
                 is ProxySetupAction.SetSystemProxy -> engine.setSystemProxy(action.enabled)
                 is ProxySetupAction.SetDecryptHosts -> engine.setProxyDecryptHosts(action.hosts)
+                ProxySetupAction.EnsureCertificate -> {
+                    val result = engine.proxyCertificate()
+                    certificateNotice = result.error ?: "Created Wailo's local proxy root."
+                }
                 ProxySetupAction.InstallCertificate ->
                     certificateNotice = exportCertificate(engine.proxyCertificate())
                 ProxySetupAction.RotateCertificate ->
                     certificateNotice = exportCertificate(engine.rotateProxyCertificate())
                 ProxySetupAction.RemoveCertificate -> {
-                    engine.removeProxyCertificate()
-                    certificateNotice = ""
+                    val result = engine.removeProxyCertificate()
+                    certificateNotice = result.error ?: "Removed Wailo's local proxy root."
+                }
+                ProxySetupAction.RefreshTargets -> {
+                    proxyTargets = proxyTargets.copy(loading = true, error = null)
+                    proxyTargets = readProxyTargets(proxyTargets, engine)
+                }
+                is ProxySetupAction.SetUpTarget -> {
+                    proxyTargets = proxyTargets.copy(busyId = action.id, error = null, notice = "")
+                    proxyTargets = applyProxyTarget(engine, proxyTargets) { engine.setUpProxyTarget(action.id) }
+                }
+                is ProxySetupAction.ClearTarget -> {
+                    proxyTargets = proxyTargets.copy(busyId = action.id, error = null, notice = "")
+                    proxyTargets = applyProxyTarget(engine, proxyTargets) { engine.clearProxyTarget(action.id) }
                 }
             }
         }
+    }
+    val physicalSetupUrl = remember(proxy.lan, proxy.lanAddress, proxy.port) {
+        if (proxy.lan && proxy.lanAddress.isNotEmpty()) {
+            "http://$PROXY_SETUP_HOST/setup"
+        } else {
+            ""
+        }
+    }
+    val physicalSetupQr = remember(physicalSetupUrl) {
+        physicalSetupUrl.takeIf(String::isNotEmpty)?.let(QrCode::render)
     }
 
     // The address devices should dial. The server binds every interface; we surface the host's LAN
@@ -330,7 +368,7 @@ private fun runWailo(engine: DaemonClient) = application {
         engine.cancelPairing()
     }
     val offerQr = remember(pairingOffer) {
-        pairingOffer?.let { PairingQr.render(it.qrPayload) }
+        pairingOffer?.let { QrCode.render(it.qrPayload) }
     }
     val pairingState = PairingState(
         offer = pairingOffer?.let {
@@ -913,6 +951,7 @@ private fun runWailo(engine: DaemonClient) = application {
             onProxyEnabledChange = setProxyEnabled,
             onApplyProxyPort = applyProxyPort,
             onProxySetupAction = proxySetupAction,
+            proxyTargets = proxyTargets.copy(setupUrl = physicalSetupUrl, setupQr = physicalSetupQr),
             toolPanelWidthRatio = toolPanelWidthRatio,
             onToolPanelWidthRatioChange = { toolPanelWidthRatio = it },
             trafficColumnWidths = trafficColumnWidths,
@@ -1406,6 +1445,50 @@ private suspend fun exportCertificate(certificate: ProxyCertificate): String = w
     }
     "Saved to ${target.path}."
 }
+
+private suspend fun readProxyTargets(current: ProxyTargets, engine: DaemonClient): ProxyTargets = runCatching {
+    val scan = engine.proxyTargets()
+    current.copy(
+        supported = scan.supported,
+        loading = false,
+        targets = scan.targets.map { it.toViewer() },
+        error = scan.error,
+    )
+}.getOrElse {
+    current.copy(loading = false, error = it.message ?: "Could not look for devices.")
+}
+
+private suspend fun applyProxyTarget(
+    engine: DaemonClient,
+    current: ProxyTargets,
+    act: suspend () -> ProxyTargetOutcome,
+): ProxyTargets {
+    val outcome = runCatching { act() }.getOrElse {
+        return current.copy(busyId = null, error = it.message ?: "The setup could not be run.")
+    }
+    return readProxyTargets(current.copy(notice = outcome.note), engine)
+        .copy(busyId = null, error = outcome.error)
+}
+
+private fun ProxyTarget.toViewer() = ProxyTargetInfo(
+    id = id,
+    name = name,
+    kind = when (kind) {
+        ProxyTargetKind.IOS_SIMULATOR -> ViewerProxyTargetKind.IOS_SIMULATOR
+        ProxyTargetKind.ANDROID_EMULATOR -> ViewerProxyTargetKind.ANDROID_EMULATOR
+        ProxyTargetKind.ANDROID_DEVICE -> ViewerProxyTargetKind.ANDROID_DEVICE
+    },
+    proxySet = proxySet,
+    trust = when (trust) {
+        CaTrust.NONE -> ProxyTargetTrust.NONE
+        CaTrust.USER -> ProxyTargetTrust.USER
+        CaTrust.SYSTEM -> ProxyTargetTrust.SYSTEM
+    },
+    certificateCurrent = certificateCurrent,
+    cleanupPending = cleanupPending,
+    actionRequired = actionRequired,
+    detail = detail,
+)
 
 /**
  * Shows the native modal [FileDialog] and suspends until it's dismissed. The dialog is opened via

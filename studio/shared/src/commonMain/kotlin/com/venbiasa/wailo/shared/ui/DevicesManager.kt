@@ -5,6 +5,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -32,6 +33,11 @@ import com.venbiasa.wailo.shared.DeviceInfo
 import com.venbiasa.wailo.shared.DeviceTransportKind
 import com.venbiasa.wailo.shared.PairingAction
 import com.venbiasa.wailo.shared.PairingState
+import com.venbiasa.wailo.shared.ProxySetupAction
+import com.venbiasa.wailo.shared.ProxyState
+import com.venbiasa.wailo.shared.ProxyTargets
+import com.venbiasa.wailo.shared.resources.Res
+import com.venbiasa.wailo.shared.resources.ic_add
 import com.venbiasa.wailo.shared.theme.LocalWailoColors
 
 /**
@@ -39,6 +45,8 @@ import com.venbiasa.wailo.shared.theme.LocalWailoColors
  * devices merely *allowed* in, which are their own section ([pairedDevicesSection]). The two answer
  * different questions ("why isn't my phone showing up" vs "who may connect"), and a device can sit in
  * either without the other.
+ *
+ * SDK-less setup lives here because this is where users look for a device that is not appearing (ADR-0090).
  *
  * [usbPort] is named on each USB row because it is the one setting that can silently mismatch: usbmux has
  * no discovery, so a device listening on another port is indistinguishable from an app that never started.
@@ -53,11 +61,16 @@ internal fun DevicesManager(
     listenPort: Int,
     pairing: PairingState,
     onPairingAction: (PairingAction) -> Unit,
+    proxy: ProxyState = ProxyState(),
+    proxyTargets: ProxyTargets = ProxyTargets(),
+    onProxySetupAction: (ProxySetupAction) -> Unit = {},
     onClose: () -> Unit = {},
 ) {
     // Transient, panel-scoped: arming "forget all" dies with the panel, so reopening never lands on a
     // primed destructive button.
     var confirmingForgetAll by remember { mutableStateOf(false) }
+
+    var settingUp by remember { mutableStateOf(false) }
 
     Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
         Box(Modifier.fillMaxSize()) {
@@ -89,6 +102,22 @@ internal fun DevicesManager(
                             RowDivider()
                         }
                     }
+                    item(key = "sdkless-header") {
+                        SectionHeader("Without the SDK") {
+                            PanelIconButton(
+                                icon = Res.drawable.ic_add,
+                                contentDescription = "Set up a device without the SDK",
+                                onClick = {
+                                    settingUp = true
+                                    onProxySetupAction(ProxySetupAction.RefreshTargets)
+                                },
+                                enabled = !settingUp,
+                            )
+                        }
+                    }
+                    item(key = "sdkless-summary") {
+                        SectionEmptyText(sdklessSummary(proxy))
+                    }
                     pairedDevicesSection(
                         pairing = pairing,
                         confirmingForgetAll = confirmingForgetAll,
@@ -104,23 +133,53 @@ internal fun DevicesManager(
             // the offer rather than just hiding it — a live pairing window nobody can see is worse than none.
             pairing.offer?.let { offer ->
                 val cancel = { onPairingAction(PairingAction.Cancel) }
-                Box(
-                    Modifier.matchParentSize()
-                        .background(MaterialTheme.colorScheme.scrim.copy(alpha = 0.4f))
-                        .clickable(
-                            interactionSource = remember { MutableInteractionSource() },
-                            indication = null,
-                            onClick = cancel,
-                        ),
-                )
+                Scrim(onDismiss = cancel)
                 PairingOfferCard(
                     offer = offer,
                     onCancel = cancel,
                     modifier = Modifier.align(Alignment.Center).padding(16.dp),
                 )
             }
+
+            if (settingUp && pairing.offer == null) {
+                Scrim(onDismiss = { settingUp = false })
+                ProxySetupCard(
+                    proxy = proxy,
+                    targets = proxyTargets,
+                    onAction = onProxySetupAction,
+                    onClose = { settingUp = false },
+                    modifier = Modifier.align(Alignment.Center).padding(16.dp),
+                )
+            }
         }
     }
+}
+
+@Composable
+private fun BoxScope.Scrim(onDismiss: () -> Unit) {
+    Box(
+        Modifier.matchParentSize()
+            .background(MaterialTheme.colorScheme.scrim.copy(alpha = 0.4f))
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = onDismiss,
+            ),
+    )
+}
+
+private fun sdklessSummary(proxy: ProxyState): String = when {
+    !proxy.running ->
+        "A browser, a release build, or someone else's app can be captured through Wailo's proxy instead. " +
+            "It is off right now."
+    !proxy.caInstalled ->
+        "Proxy running on ${proxy.address}. HTTPS is tunnelled without being read until a certificate " +
+            "exists and a host is unlocked."
+    proxy.decryptHosts.isEmpty() ->
+        "Proxy running on ${proxy.address} with a certificate, but no host is unlocked yet, so every " +
+            "HTTPS connection stays an encrypted tunnel."
+    else -> "Proxy running on ${proxy.address}, reading ${proxy.decryptHosts.size} unlocked host" +
+        (if (proxy.decryptHosts.size == 1) "." else "s.")
 }
 
 /**
@@ -140,7 +199,8 @@ private fun emptyDevicesText(usbSupported: Boolean, usbPort: Int, adbSupported: 
         !adbSupported -> " No adb was found, so Android devices have to connect over the network."
         else -> ""
     }
-    return "No devices connected — $ways.$missing"
+    return "No devices connected — $ways.$missing All of those need the app to be built with the Wailo " +
+        "SDK; if it isn't, use Without the SDK below."
 }
 
 @Composable

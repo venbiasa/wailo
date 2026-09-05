@@ -172,6 +172,8 @@ fun WailoApp(
     onProxyEnabledChange: (Boolean) -> Unit = {},
     onApplyProxyPort: (Int) -> Unit = {},
     onProxySetupAction: (ProxySetupAction) -> Unit = {},
+    /** On-demand target scan; detection shells out to `simctl` and `adb`. */
+    proxyTargets: ProxyTargets = ProxyTargets(),
     toolPanelWidthRatio: Float = ToolPanelLayout.DefaultWidthRatio,
     onToolPanelWidthRatioChange: (Float) -> Unit = {},
     trafficColumnWidths: Map<String, Float> = emptyMap(),
@@ -256,6 +258,7 @@ fun WailoApp(
                 onProxyEnabledChange = onProxyEnabledChange,
                 onApplyProxyPort = onApplyProxyPort,
                 onProxySetupAction = onProxySetupAction,
+                proxyTargets = proxyTargets,
                 toolPanelWidthRatio = toolPanelWidthRatio,
                 onToolPanelWidthRatioChange = onToolPanelWidthRatioChange,
                 trafficColumnWidths = trafficColumnWidths,

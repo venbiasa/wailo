@@ -1,5 +1,7 @@
 package com.venbiasa.wailo.shared
 
+import androidx.compose.ui.graphics.ImageBitmap
+
 /**
  * The bundled proxy as the viewer sees it (ADR-0070).
  *
@@ -39,14 +41,55 @@ data class ProxyState(
     val address: String get() = "${if (lan && lanAddress.isNotEmpty()) lanAddress else "127.0.0.1"}:$port"
 }
 
+enum class ProxyTargetKind {
+    IOS_SIMULATOR,
+    ANDROID_EMULATOR,
+    ANDROID_DEVICE,
+}
+
+/** Only [SYSTEM] is trusted by apps that did not opt into user certificates. */
+enum class ProxyTargetTrust {
+    NONE,
+    USER,
+    SYSTEM,
+}
+
+data class ProxyTargetInfo(
+    val id: String,
+    val name: String,
+    val kind: ProxyTargetKind,
+    val proxySet: Boolean = false,
+    val trust: ProxyTargetTrust = ProxyTargetTrust.NONE,
+    val certificateCurrent: Boolean = false,
+    val cleanupPending: Boolean = false,
+    val actionRequired: String = "",
+    val detail: String = "",
+)
+
+/** Setup state fetched on demand because target detection shells out to `simctl` and `adb`. */
+data class ProxyTargets(
+    val supported: Boolean = false,
+    val loading: Boolean = false,
+    val targets: List<ProxyTargetInfo> = emptyList(),
+    val setupUrl: String = "",
+    val setupQr: ImageBitmap? = null,
+    val busyId: String? = null,
+    val notice: String = "",
+    val error: String? = null,
+)
+
 /**
  * What Studio can ask the daemon to do about the proxy's setup. One type rather than a parameter each,
  * because these arrive together and every one of them is a round trip whose answer is a new [ProxyState].
  */
 sealed interface ProxySetupAction {
+    data class SetProxyEnabled(val enabled: Boolean) : ProxySetupAction
+
     data class SetLan(val enabled: Boolean) : ProxySetupAction
 
     data class SetSystemProxy(val enabled: Boolean) : ProxySetupAction
+
+    data object EnsureCertificate : ProxySetupAction
 
     /** Mint the root if there is not one, and hand back the PEM to install. */
     data object InstallCertificate : ProxySetupAction
@@ -57,4 +100,10 @@ sealed interface ProxySetupAction {
 
     /** Replace the unlocked hosts wholesale, so revoking is the same call as granting. */
     data class SetDecryptHosts(val hosts: List<String>) : ProxySetupAction
+
+    data object RefreshTargets : ProxySetupAction
+
+    data class SetUpTarget(val id: String) : ProxySetupAction
+
+    data class ClearTarget(val id: String) : ProxySetupAction
 }

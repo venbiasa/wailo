@@ -56,6 +56,7 @@ import com.venbiasa.wailo.shared.MapLocalRuleDef
 import com.venbiasa.wailo.shared.PickedFile
 import com.venbiasa.wailo.shared.ProxySetupAction
 import com.venbiasa.wailo.shared.ProxyState
+import com.venbiasa.wailo.shared.ProxyTargets
 import com.venbiasa.wailo.shared.ResponseHeader
 import com.venbiasa.wailo.shared.SeedNode
 import com.venbiasa.wailo.shared.SeedRuleDef
@@ -158,6 +159,7 @@ internal fun WailoViewer(
     onProxyEnabledChange: (Boolean) -> Unit,
     onApplyProxyPort: (Int) -> Unit,
     onProxySetupAction: (ProxySetupAction) -> Unit,
+    proxyTargets: ProxyTargets,
     toolPanelWidthRatio: Float,
     onToolPanelWidthRatioChange: (Float) -> Unit,
     trafficColumnWidths: Map<String, Float>,
@@ -542,6 +544,9 @@ internal fun WailoViewer(
                                 listenPort = listenPort,
                                 pairing = pairing,
                                 onPairingAction = onPairingAction,
+                                proxy = proxy,
+                                proxyTargets = proxyTargets,
+                                onProxySetupAction = onProxySetupAction,
                                 onClose = closePanel,
                             )
                             ToolPanel.Settings -> SettingsManager(
