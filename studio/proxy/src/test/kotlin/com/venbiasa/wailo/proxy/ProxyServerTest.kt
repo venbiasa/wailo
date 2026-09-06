@@ -104,6 +104,149 @@ class ProxyServerTest {
     }
 
     @Test
+    fun expectContinueDoesNotDeadlockTheClientAndIsHandledAtThisHop() {
+        val origin = rawOrigin { input, output ->
+            val request = buildList {
+                while (true) {
+                    val line = input.bufferedReadLine() ?: break
+                    if (line.isBlank()) break
+                    add(line)
+                }
+            }
+            assertTrue(request.none { it.startsWith("Expect:", ignoreCase = true) })
+            val length = request.first { it.startsWith("Content-Length:", true) }
+                .substringAfter(':')
+                .trim()
+                .toInt()
+            val body = String(input.readNBytes(length))
+            output.respond("received $body")
+        }
+        val sink = RecordingSink()
+        val proxy = proxy(sink)
+
+        Socket().use { client ->
+            client.connect(InetSocketAddress(InetAddress.getLoopbackAddress(), proxy.port), 2_000)
+            client.soTimeout = 5_000
+            client.getOutputStream().apply {
+                write(
+                    (
+                        "POST http://127.0.0.1:${origin.port}/continue HTTP/1.1\r\n" +
+                            "Host: proxy-test\r\nContent-Length: 7\r\nExpect: 100-continue\r\n" +
+                            "Connection: close\r\n\r\n"
+                        ).toByteArray(),
+                )
+                flush()
+            }
+            assertEquals("100", readHead(client.getInputStream())?.second)
+            client.getOutputStream().apply {
+                write("payload".toByteArray())
+                flush()
+            }
+            assertTrue(String(client.getInputStream().readBytes()).contains("received payload"))
+        }
+        assertEquals("payload", sink.body(sink.awaitOne().requestBody))
+    }
+
+    @Test
+    fun informationalResponsesPassThroughBeforeTheCapturedFinalResponse() {
+        val origin = origin { _, output ->
+            output.write("HTTP/1.1 103 Early Hints\r\nLink: </style.css>; rel=preload\r\n\r\n".toByteArray())
+            output.respond("final")
+        }
+        val sink = RecordingSink()
+        val proxy = proxy(sink)
+
+        val response = proxy.request("GET http://127.0.0.1:${origin.port}/hints HTTP/1.1")
+
+        assertTrue(response.startsWith("HTTP/1.1 103 Early Hints"), response)
+        assertTrue(response.contains("HTTP/1.1 200 OK"), response)
+        assertEquals(200, sink.awaitOne().exchange.response?.code)
+    }
+
+    @Test
+    fun anUpgradeBecomesABidirectionalTunnelAfterItsHandshake() {
+        val origin = rawOrigin { input, output ->
+            val request = buildList {
+                while (true) {
+                    val line = input.bufferedReadLine() ?: break
+                    if (line.isBlank()) break
+                    add(line)
+                }
+            }
+            assertTrue(request.any { it.equals("Connection: Upgrade", ignoreCase = true) })
+            assertTrue(request.any { it.equals("Upgrade: websocket", ignoreCase = true) })
+            output.write(
+                "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n"
+                    .toByteArray(),
+            )
+            output.flush()
+            output.write(input.readNBytes(4))
+            output.flush()
+        }
+        val sink = RecordingSink()
+        val proxy = proxy(sink)
+
+        Socket().use { client ->
+            client.connect(InetSocketAddress(InetAddress.getLoopbackAddress(), proxy.port), 2_000)
+            client.soTimeout = 5_000
+            client.getOutputStream().apply {
+                write(
+                    (
+                        "GET http://127.0.0.1:${origin.port}/socket HTTP/1.1\r\n" +
+                            "Host: proxy-test\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n"
+                        ).toByteArray(),
+                )
+                flush()
+            }
+            assertEquals("101", readHead(client.getInputStream())?.second)
+            client.getOutputStream().apply {
+                write("ping".toByteArray())
+                flush()
+            }
+            assertEquals("ping", String(client.getInputStream().readNBytes(4)))
+        }
+
+        val row = sink.awaitOne()
+        assertEquals(101, row.exchange.response?.code)
+        assertTrue(row.exchange.response?.headers.orEmpty().any { it.name.equals("Upgrade", true) })
+    }
+
+    @Test
+    fun closingTheProxyTerminatesAnActiveEventStream() {
+        val origin = rawOrigin { input, output ->
+            while (input.bufferedReadLine()?.isNotBlank() == true) Unit
+            output.write(
+                (
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n" +
+                        "Transfer-Encoding: chunked\r\n\r\n4\r\ntick\r\n"
+                    ).toByteArray(),
+            )
+            output.flush()
+            input.read()
+        }
+        val proxy = proxy(RecordingSink())
+        val client = Socket()
+        client.connect(InetSocketAddress(InetAddress.getLoopbackAddress(), proxy.port), 2_000)
+        client.soTimeout = 5_000
+        client.getOutputStream().apply {
+            write(
+                (
+                    "GET http://127.0.0.1:${origin.port}/events HTTP/1.1\r\n" +
+                        "Host: proxy-test\r\n\r\n"
+                    ).toByteArray(),
+            )
+            flush()
+        }
+
+        assertEquals("200", readHead(client.getInputStream())?.second)
+        assertEquals("4\r\ntick\r\n", String(client.getInputStream().readNBytes(9)))
+
+        proxy.close()
+        assertEquals(-1, client.getInputStream().read())
+        client.close()
+    }
+
+    @Test
     fun aGzippedResponseIsForwardedCompressedAndCapturedReadable() {
         val payload = "the quick brown fox".repeat(20)
         val compressed = ByteArrayOutputStream().also { out ->

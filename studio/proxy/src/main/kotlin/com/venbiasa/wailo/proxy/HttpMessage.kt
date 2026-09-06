@@ -32,6 +32,19 @@ internal class HttpHead(
 
     /** Whether the peer asked to end the connection after this message. */
     fun wantsClose(): Boolean = header("Connection")?.contains("close", ignoreCase = true) == true
+
+    fun expectsContinue(): Boolean =
+        headers.any {
+            it.name.equals("Expect", ignoreCase = true) &&
+                it.value_.split(',').any { value -> value.trim().equals("100-continue", ignoreCase = true) }
+        }
+
+    fun requestsUpgrade(): Boolean =
+        header("Upgrade")?.isNotBlank() == true &&
+            headers
+                .filter { it.name.equals("Connection", ignoreCase = true) }
+                .flatMap { it.value_.split(',') }
+                .any { it.trim().equals("upgrade", ignoreCase = true) }
 }
 
 /**
@@ -49,8 +62,24 @@ private val HopByHopHeaders = setOf(
     "upgrade",
 )
 
-internal fun List<Header>.withoutHopByHop(): List<Header> =
-    filterNot { it.name.lowercase() in HopByHopHeaders }
+internal fun List<Header>.withoutHopByHop(preserveUpgrade: Boolean = false): List<Header> {
+    val namedByConnection = filter { it.name.equals("Connection", ignoreCase = true) }
+        .flatMap { it.value_.split(',') }
+        .map { it.trim().lowercase() }
+        .toSet()
+    val kept = filterNot {
+        it.name.lowercase() in HopByHopHeaders || it.name.lowercase() in namedByConnection
+    }
+    if (!preserveUpgrade) return kept
+    val upgrade = firstOrNull { it.name.equals("Upgrade", ignoreCase = true) } ?: return kept
+    return kept + Header("Connection", "Upgrade") + upgrade
+}
+
+internal fun List<Header>.withoutContinueExpectation(): List<Header> =
+    filterNot {
+        it.name.equals("Expect", ignoreCase = true) &&
+            it.value_.split(',').any { value -> value.trim().equals("100-continue", ignoreCase = true) }
+    }
 
 /** Guards against a peer that opens a connection and streams header bytes forever. */
 private const val MAX_HEAD_BYTES = 64 * 1024

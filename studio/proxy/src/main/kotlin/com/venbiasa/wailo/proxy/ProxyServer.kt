@@ -20,6 +20,7 @@ import java.net.Socket
 import java.net.SocketException
 import java.net.URI
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
@@ -56,6 +57,7 @@ class ProxyServer private constructor(
     private val closed = AtomicBoolean()
     private val liveConnections = AtomicInteger()
     private val relayed = AtomicLong()
+    private val liveSockets = ConcurrentHashMap.newKeySet<Socket>()
 
     val port: Int get() = socket.localPort
 
@@ -80,9 +82,11 @@ class ProxyServer private constructor(
             }
             executor.execute {
                 liveConnections.incrementAndGet()
+                liveSockets += client
                 try {
                     serve(client)
                 } finally {
+                    liveSockets -= client
                     liveConnections.decrementAndGet()
                     runCatching { client.close() }
                 }
@@ -138,7 +142,7 @@ class ProxyServer private constructor(
             return
         }
         secured.useClientMode = false
-        secured.soTimeout = READ_TIMEOUT_MS
+        secured.soTimeout = 0
         val inner = BufferedInputStream(secured.inputStream, RELAY_BUFFER_BYTES)
         val innerOut = BufferedOutputStream(secured.outputStream, RELAY_BUFFER_BYTES)
         val tunnelTo = ProxyTarget(host, port, "/", "https://$authority", secure = true)
@@ -180,10 +184,23 @@ class ProxyServer private constructor(
             if (page != null) writeResponse(clientOut, page) else respondDirectly(clientOut, 400, "Bad Request", DIRECT_REQUEST_HELP)
             return false
         }
+        if (head.first.equals("GET", ignoreCase = true)) {
+            val page = runCatching { setup.page(target.url) }.getOrNull()
+            if (page != null) {
+                writeResponse(clientOut, page)
+                return false
+            }
+        }
         val startedAt = System.currentTimeMillis()
-        val forwardedHeaders = head.headers.withoutHopByHop().withHost(target)
+        val upgradeRequested = head.requestsUpgrade()
+        val forwardedHeaders = head.headers.withoutHopByHop(preserveUpgrade = upgradeRequested).withHost(target)
         val intent = runCatching { rules.intercepts(head.first, target.url) }.getOrDefault(Interception())
         val requestFrame = requestFraming(head)
+        val expectsContinue = head.expectsContinue() && requestFrame.kind != FramingKind.None
+        if (expectsContinue) {
+            clientOut.write(CONTINUE_RESPONSE)
+            clientOut.flush()
+        }
         val held = if (intent.holdRequest) hold(clientIn, requestFrame) else null
 
         var request = HttpRequest(
@@ -245,50 +262,108 @@ class ProxyServer private constructor(
             return false
         }
 
+        liveSockets += upstream.socket
         upstream.socket.use {
-            val upstreamIn = BufferedInputStream(it.getInputStream(), RELAY_BUFFER_BYTES)
-            val upstreamOut = BufferedOutputStream(it.getOutputStream(), RELAY_BUFFER_BYTES)
-            val route = target.takeUnless { _ -> upstream.absoluteForm } ?: target.asAbsoluteForm()
-            val sent = sendRequest(upstreamOut, head, route, request, held, requestFrame, clientIn, intent)
-            upstreamOut.flush()
+            try {
+                val upstreamIn = BufferedInputStream(it.getInputStream(), RELAY_BUFFER_BYTES)
+                val upstreamOut = BufferedOutputStream(it.getOutputStream(), RELAY_BUFFER_BYTES)
+                val route = target.takeUnless { _ -> upstream.absoluteForm } ?: target.asAbsoluteForm()
+                val outboundRequest = if (expectsContinue) {
+                    request.copy(headers = request.headers.withoutContinueExpectation())
+                } else {
+                    request
+                }
+                val sent = sendRequest(upstreamOut, head, route, outboundRequest, held, requestFrame, clientIn, intent)
+                upstreamOut.flush()
 
-            val responseHead = readHead(upstreamIn)
-                ?: throw IOException("Upstream closed before sending a response")
-            val framing = responseFraming(head, responseHead)
-            // A response that says up front it is past the hold ceiling is relayed as usual, rather than
-            // read to the ceiling only to give up there.
-            val holdable = framing.kind != FramingKind.Fixed || framing.length <= MAX_HELD_BODY_BYTES
-            if (intent.holdResponse && holdable) {
-                return holdResponse(head, request, responseHead, framing, upstreamIn, clientOut, peer, startedAt, sent, intent)
+                var responseHead = readHead(upstreamIn)
+                    ?: throw IOException("Upstream closed before sending a response")
+                while (responseHead.isInformational() && !responseHead.switchesProtocol()) {
+                    if (!(expectsContinue && responseHead.second.toIntOrNull() == 100)) {
+                        clientOut.write(responseHead.raw)
+                        clientOut.flush()
+                    }
+                    responseHead = readHead(upstreamIn)
+                        ?: throw IOException("Upstream closed before sending a final response")
+                }
+                if (responseHead.switchesProtocol()) {
+                    clientOut.write(responseHead.raw)
+                    clientOut.flush()
+                    record(
+                        intent,
+                        exchange(
+                            request = request,
+                            startedAt = startedAt,
+                            response = responseHead.asResponse(0, spoiled = false, decoded = false),
+                            requestBytes = sent.bytes,
+                            requestSpoiled = sent.spoiled,
+                            responseBytes = 0,
+                            responseSpoiled = false,
+                        ),
+                        peer,
+                        sent.ref,
+                        null,
+                    )
+                    upstream.socket.soTimeout = 0
+                    bridgeUpgrade(clientIn, clientOut, upstream.socket, upstreamIn, upstreamOut)
+                    return false
+                }
+                val framing = responseFraming(head, responseHead)
+                // A response that says up front it is past the hold ceiling is relayed as usual, rather than
+                // read to the ceiling only to give up there.
+                val holdable = framing.kind != FramingKind.Fixed || framing.length <= MAX_HELD_BODY_BYTES
+                if (intent.holdResponse && holdable) {
+                    return holdResponse(
+                        head,
+                        request,
+                        responseHead,
+                        framing,
+                        upstreamIn,
+                        clientOut,
+                        peer,
+                        startedAt,
+                        sent,
+                        intent,
+                    )
+                }
+
+                if (
+                    framing.kind == FramingKind.Chunked ||
+                    framing.kind == FramingKind.UntilClose ||
+                    responseHead.isEventStream()
+                ) {
+                    upstream.socket.soTimeout = 0
+                }
+                clientOut.write(responseHead.raw)
+                clientOut.flush()
+                val response = relayBody(
+                    source = upstreamIn,
+                    destination = clientOut,
+                    framing = framing,
+                    record = intent.record,
+                    contentEncoding = responseHead.header("Content-Encoding"),
+                )
+                clientOut.flush()
+
+                record(
+                    intent,
+                    exchange(
+                        request = request,
+                        startedAt = startedAt,
+                        response = responseHead.asResponse(response.bytes, response.spoiled, response.decoded),
+                        requestBytes = sent.bytes,
+                        requestSpoiled = sent.spoiled,
+                        responseBytes = response.bytes,
+                        responseSpoiled = response.spoiled,
+                    ),
+                    peer,
+                    sent.ref,
+                    response.ref,
+                )
+                return framing.kind != FramingKind.UntilClose && !head.wantsClose() && !responseHead.wantsClose()
+            } finally {
+                liveSockets -= upstream.socket
             }
-
-            clientOut.write(responseHead.raw)
-            clientOut.flush()
-            val response = relayBody(
-                source = upstreamIn,
-                destination = clientOut,
-                framing = framing,
-                record = intent.record,
-                contentEncoding = responseHead.header("Content-Encoding"),
-            )
-            clientOut.flush()
-
-            record(
-                intent,
-                exchange(
-                    request = request,
-                    startedAt = startedAt,
-                    response = responseHead.asResponse(response.bytes, response.spoiled, response.decoded),
-                    requestBytes = sent.bytes,
-                    requestSpoiled = sent.spoiled,
-                    responseBytes = response.bytes,
-                    responseSpoiled = response.spoiled,
-                ),
-                peer,
-                sent.ref,
-                response.ref,
-            )
-            return framing.kind != FramingKind.UntilClose && !head.wantsClose() && !responseHead.wantsClose()
         }
     }
 
@@ -555,20 +630,24 @@ class ProxyServer private constructor(
             )
             return
         }
+        liveSockets += upstream
         upstream.use {
-            clientOut.write(TUNNEL_ESTABLISHED)
-            clientOut.flush()
-            record(intent, tunnelExchange(host, port, head, startedAt, established = true), peer, null, null)
-            val upstreamOut = it.getOutputStream()
-            executor.execute {
-                runCatching { pump(clientIn, upstreamOut) }
-                // Half-close rather than close: the origin still owes a response to what was already sent.
-                runCatching { it.shutdownOutput() }
+            try {
+                upstream.soTimeout = 0
+                clientOut.write(TUNNEL_ESTABLISHED)
+                clientOut.flush()
+                record(intent, tunnelExchange(host, port, head, startedAt, established = true), peer, null, null)
+                val upstreamOut = it.getOutputStream()
+                executor.execute {
+                    runCatching { pump(clientIn, upstreamOut) }
+                    // The origin may still owe a response to bytes already sent.
+                    runCatching { it.shutdownOutput() }
+                }
+                runCatching { pump(it.getInputStream(), clientOut) }
+                // Closing the client socket releases the unjoined outbound pump if its read is still parked.
+            } finally {
+                liveSockets -= upstream
             }
-            runCatching { pump(it.getInputStream(), clientOut) }
-            // Returning ends the tunnel. The outbound pump is deliberately not joined — it is parked on a
-            // read from a client that may never speak again, and `serve` closing that socket is what frees
-            // it. Waiting here would hang the connection thread for as long as the client stayed silent.
         }
     }
 
@@ -586,6 +665,20 @@ class ProxyServer private constructor(
             destination.write(buffer, 0, read)
             destination.flush()
         }
+    }
+
+    private fun bridgeUpgrade(
+        clientIn: InputStream,
+        clientOut: OutputStream,
+        upstream: Socket,
+        upstreamIn: InputStream,
+        upstreamOut: OutputStream,
+    ) {
+        executor.execute {
+            runCatching { pump(clientIn, upstreamOut) }
+            runCatching { upstream.shutdownOutput() }
+        }
+        runCatching { pump(upstreamIn, clientOut) }
     }
 
     private enum class FramingKind { None, Chunked, Fixed, UntilClose }
@@ -628,6 +721,14 @@ class ProxyServer private constructor(
             else -> Framing(FramingKind.UntilClose)
         }
     }
+
+    private fun HttpHead.isInformational(): Boolean =
+        second.toIntOrNull()?.let { it in 100..199 } == true
+
+    private fun HttpHead.switchesProtocol(): Boolean = second.toIntOrNull() == 101
+
+    private fun HttpHead.isEventStream(): Boolean =
+        header("Content-Type")?.substringBefore(';')?.trim()?.equals("text/event-stream", ignoreCase = true) == true
 
     private fun entityOf(source: InputStream, framing: Framing): InputStream = when (framing.kind) {
         FramingKind.Chunked -> ChunkedInputStream(source)
@@ -820,6 +921,7 @@ class ProxyServer private constructor(
     override fun close() {
         if (!closed.compareAndSet(false, true)) return
         runCatching { socket.close() }
+        liveSockets.toList().forEach { runCatching { it.close() } }
         executor.shutdownNow()
     }
 
@@ -843,6 +945,9 @@ class ProxyServer private constructor(
 
         private val TUNNEL_ESTABLISHED =
             "HTTP/1.1 200 Connection Established\r\n\r\n".toByteArray(Charsets.ISO_8859_1)
+
+        private val CONTINUE_RESPONSE =
+            "HTTP/1.1 100 Continue\r\n\r\n".toByteArray(Charsets.ISO_8859_1)
 
         private val CRLF = "\r\n".toByteArray(Charsets.ISO_8859_1)
 
@@ -947,7 +1052,11 @@ private fun List<Header>.chunkedFraming(): List<Header> =
 private fun HttpHead.asResponse(bytes: Long, spoiled: Boolean, decoded: Boolean) = HttpResponse(
     code = second.toIntOrNull() ?: 0,
     message = third,
-    headers = if (decoded) headers.withoutHopByHop().framedFor(bytes, complete = true) else headers.withoutHopByHop(),
+    headers = if (decoded) {
+        headers.withoutHopByHop().framedFor(bytes, complete = true)
+    } else {
+        headers.withoutHopByHop(preserveUpgrade = second.toIntOrNull() == 101)
+    },
     body = ByteString.EMPTY,
     body_size = bytes,
     body_truncated = spoiled,
