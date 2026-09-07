@@ -2,6 +2,8 @@ package com.venbiasa.wailo.mcp
 
 import com.venbiasa.wailo.daemon.DaemonClient
 import com.venbiasa.wailo.daemon.DaemonRuleGroup
+import com.venbiasa.wailo.daemon.ProxyCertificate
+import com.venbiasa.wailo.daemon.ProxyStatus
 import com.venbiasa.wailo.daemon.RULE_FAMILY_MAP_LOCAL
 import com.venbiasa.wailo.daemon.RULE_FAMILY_SEEDS
 import com.venbiasa.wailo.daemon.groupIdByRule
@@ -17,6 +19,8 @@ import com.venbiasa.wailo.host.HostSeed
 import com.venbiasa.wailo.protocol.CaptureFilter
 import com.venbiasa.wailo.protocol.HttpRequest
 import com.venbiasa.wailo.protocol.HttpResponse
+import com.venbiasa.wailo.daemon.provision.ProxyTargetOutcome
+import com.venbiasa.wailo.daemon.provision.ProxyTargetScan
 import kotlin.time.Duration
 import kotlinx.coroutines.flow.StateFlow
 
@@ -58,6 +62,7 @@ internal interface McpBackend {
 
     /** Hosts the user marked as worth watching — which hosts they care about, readable here (ADR-0084). */
     val bookmarkedHosts: List<String>
+    val proxyStatus: ProxyStatus get() = ProxyStatus(error = "Proxy controls need a running Wailo daemon.")
 
     fun searchTraffic(
         urlContains: String?,
@@ -124,6 +129,21 @@ internal interface McpBackend {
     suspend fun clearSeedQueue()
     suspend fun resumeHold(id: String, request: HttpRequest?, response: HttpResponse?): Boolean
     suspend fun abortHold(id: String): Boolean
+    suspend fun proxyTargets(): ProxyTargetScan = proxyUnavailable()
+    suspend fun setProxyEnabled(enabled: Boolean, port: Int?): ProxyStatus = proxyUnavailable()
+    suspend fun setProxyPort(port: Int): ProxyStatus = proxyUnavailable()
+    suspend fun setProxyLan(enabled: Boolean): ProxyStatus = proxyUnavailable()
+    suspend fun setSystemProxy(enabled: Boolean): ProxyStatus = proxyUnavailable()
+    suspend fun setProxyDecryptHosts(hosts: List<String>): ProxyStatus = proxyUnavailable()
+    suspend fun currentProxyCertificate(): ProxyCertificate = proxyUnavailable()
+    suspend fun ensureProxyCertificate(): ProxyCertificate = proxyUnavailable()
+    suspend fun rotateProxyCertificate(): ProxyCertificate = proxyUnavailable()
+    suspend fun removeProxyCertificate(): ProxyCertificate = proxyUnavailable()
+    suspend fun setUpProxyTarget(id: String): ProxyTargetOutcome = proxyUnavailable()
+    suspend fun clearProxyTarget(id: String): ProxyTargetOutcome = proxyUnavailable()
+
+    private fun proxyUnavailable(): Nothing =
+        throw UnsupportedOperationException("Proxy controls need a running Wailo daemon")
 }
 
 internal class DaemonMcpBackend(
@@ -152,6 +172,7 @@ internal class DaemonMcpBackend(
     override val captureFilter get() = daemon.captureFilter.value
     override val captureFilterEnabled get() = daemon.captureFilterEnabled.value
     override val bookmarkedHosts get() = daemon.bookmarkedHosts.value
+    override val proxyStatus get() = daemon.proxy.value
 
     override fun searchTraffic(
         urlContains: String?,
@@ -210,6 +231,18 @@ internal class DaemonMcpBackend(
     override suspend fun resumeHold(id: String, request: HttpRequest?, response: HttpResponse?) =
         daemon.resumeHold(id, request, response)
     override suspend fun abortHold(id: String) = daemon.abortHold(id)
+    override suspend fun proxyTargets() = daemon.proxyTargets()
+    override suspend fun setProxyEnabled(enabled: Boolean, port: Int?) = daemon.setProxyEnabled(enabled, port)
+    override suspend fun setProxyPort(port: Int) = daemon.setProxyPort(port)
+    override suspend fun setProxyLan(enabled: Boolean) = daemon.setProxyLan(enabled)
+    override suspend fun setSystemProxy(enabled: Boolean) = daemon.setSystemProxy(enabled)
+    override suspend fun setProxyDecryptHosts(hosts: List<String>) = daemon.setProxyDecryptHosts(hosts)
+    override suspend fun currentProxyCertificate() = daemon.currentProxyCertificate()
+    override suspend fun ensureProxyCertificate() = daemon.proxyCertificate()
+    override suspend fun rotateProxyCertificate() = daemon.rotateProxyCertificate()
+    override suspend fun removeProxyCertificate() = daemon.removeProxyCertificate()
+    override suspend fun setUpProxyTarget(id: String) = daemon.setUpProxyTarget(id)
+    override suspend fun clearProxyTarget(id: String) = daemon.clearProxyTarget(id)
 }
 
 internal class LocalMcpBackend(

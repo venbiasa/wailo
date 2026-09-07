@@ -5,6 +5,11 @@ import com.venbiasa.wailo.daemon.RULE_FAMILIES
 import com.venbiasa.wailo.daemon.RULE_FAMILY_BREAKPOINTS
 import com.venbiasa.wailo.daemon.RULE_FAMILY_MAP_LOCAL
 import com.venbiasa.wailo.daemon.RULE_FAMILY_SEEDS
+import com.venbiasa.wailo.daemon.ProxyCertificate
+import com.venbiasa.wailo.daemon.ProxyStatus
+import com.venbiasa.wailo.daemon.PROXY_SETUP_HOST
+import com.venbiasa.wailo.daemon.provision.ProxyTarget
+import com.venbiasa.wailo.daemon.provision.ProxyTargetOutcome
 import com.venbiasa.wailo.engine.BodyRef
 import com.venbiasa.wailo.engine.CapturedExchange
 import com.venbiasa.wailo.engine.PausedExchange
@@ -31,11 +36,6 @@ internal data class McpToolResponse(
     val isError: Boolean = false,
 )
 
-/**
- * Pure MCP-facing command surface over the shared daemon. The local-host constructor is retained for
- * hermetic service tests; production MCP processes always use [DaemonMcpBackend].
- * into MCP content, which keeps every tool callable in unit tests without a JSON-RPC transport.
- */
 internal class WailoMcpService(
     private val backend: McpBackend,
 ) {
@@ -70,6 +70,20 @@ internal class WailoMcpService(
                 "clear_capture" -> clearCapture()
                 "set_capturing" -> setCapturing(arguments)
                 "set_max_retained" -> setMaxRetained(arguments)
+                "proxy_status" -> proxyStatus()
+                "get_proxy_setup_guide" -> proxySetupGuide()
+                "list_proxy_targets" -> listProxyTargets()
+                "set_proxy" -> setProxy(arguments)
+                "set_proxy_port" -> setProxyPort(arguments)
+                "set_proxy_lan" -> setProxyLan(arguments)
+                "set_system_proxy" -> setSystemProxy(arguments)
+                "set_proxy_decrypt_hosts" -> setProxyDecryptHosts(arguments)
+                "get_proxy_ca" -> currentProxyCertificate()
+                "ensure_proxy_ca" -> ensureProxyCertificate(arguments)
+                "rotate_proxy_ca" -> rotateProxyCertificate(arguments)
+                "remove_proxy_ca" -> removeProxyCertificate(arguments)
+                "setup_proxy_target" -> setUpProxyTarget(arguments)
+                "clear_proxy_target" -> clearProxyTarget(arguments)
                 "set_map_local" -> setMapLocal(arguments)
                 "remove_map_local" -> removeMapLocal(arguments)
                 "list_map_local" -> listMapLocal()
@@ -123,6 +137,7 @@ internal class WailoMcpService(
             "seeds_enabled" to backend.seedsEnabled,
             "seed_count" to backend.seeds.size,
             "armed_seed_count" to backend.seedQueue.size,
+            "proxy" to proxyData(backend.proxyStatus),
             // The hosts the user singled out — a standing hint about which traffic is worth looking at
             // first, available here because it is daemon state rather than a Studio preference (ADR-0084).
             "bookmarked_hosts" to backend.bookmarkedHosts,
@@ -278,6 +293,250 @@ internal class WailoMcpService(
         backend.setMaxRetained(requested)
         return success("max_retained=$requested", mapOf("max_retained" to requested))
     }
+
+    private fun proxyStatus(): McpToolResponse {
+        val status = backend.proxyStatus
+        return McpToolResponse(proxyText(status), proxyData(status), isError = status.error != null)
+    }
+
+    private suspend fun proxySetupGuide(): McpToolResponse {
+        val status = backend.proxyStatus
+        val scan = backend.proxyTargets()
+        val configured = scan.targets.filter { it.proxySet || it.cleanupPending }
+        val setupUrl = if (status.lan && status.lanAddress.isNotEmpty()) {
+            "http://$PROXY_SETUP_HOST/setup"
+        } else {
+            ""
+        }
+        val blockers = buildList {
+            status.error?.let { add(it) }
+            scan.error?.let { add(it) }
+            if (!status.running) add("The proxy listener is off.")
+            if (!status.lan) add("Manual phones cannot reach the loopback-only listener.")
+            if (status.lan && status.lanAddress.isEmpty()) add("This Mac has no detected LAN address.")
+            if (!status.caInstalled) add("No local proxy root exists.")
+            if (status.decryptHosts.isEmpty()) add("No HTTPS hosts are unlocked for decryption.")
+            configured.filter { it.cleanupPending }.forEach {
+                add("${it.name} has cleanup pending: ${it.actionRequired}")
+            }
+        }
+        val nextSteps = buildList {
+            if (!status.running) add("Call set_proxy with enabled=true and confirm=true.")
+            if (!status.lan) add("For a physical phone, call set_proxy_lan with enabled=true and confirm=true.")
+            if (!status.caInstalled) add("Call ensure_proxy_ca with confirm=true.")
+            if (status.decryptHosts.isEmpty()) {
+                add("Call set_proxy_decrypt_hosts with only the required hosts and confirm=true.")
+            }
+            if (scan.targets.any { !it.proxySet && !it.cleanupPending }) {
+                add("Call setup_proxy_target with a listed id and confirm=true for automatic setup.")
+            }
+            if (setupUrl.isNotEmpty()) {
+                add("For a manual phone, set its Wi-Fi proxy to ${status.lanAddress}:${status.port}, then open $setupUrl.")
+            } else {
+                add("For a manual phone, use the LAN address shown after the listener is running and exposed.")
+            }
+            add("After installing the root, open https://$PROXY_SETUP_HOST/check to verify browser trust.")
+            if (configured.isNotEmpty()) {
+                add("When finished, call clear_proxy_target with each configured id and confirm=true.")
+            }
+        }
+        val data = mapOf(
+            "proxy" to proxyData(status),
+            "targets_supported" to scan.supported,
+            "targets" to scan.targets.map(::targetData),
+            "setup_url" to setupUrl,
+            "routing_check_url" to "http://$PROXY_SETUP_HOST/route-check",
+            "trust_check_url" to "https://$PROXY_SETUP_HOST/check",
+            "blockers" to blockers,
+            "next_steps" to nextSteps,
+            "restoration" to mapOf(
+                "system_proxy_owned" to status.systemProxy,
+                "lan_exposed" to status.lan,
+                "configured_target_ids" to configured.map { it.id },
+                "cleanup_pending_ids" to configured.filter { it.cleanupPending }.map { it.id },
+            ),
+        )
+        return McpToolResponse(
+            text = blockers.firstOrNull() ?: "Proxy setup has no known blocker.",
+            data = data,
+            isError = status.error != null || scan.error != null,
+        )
+    }
+
+    private suspend fun listProxyTargets(): McpToolResponse {
+        val scan = backend.proxyTargets()
+        val targets = scan.targets.map(::targetData)
+        val data = mapOf(
+            "supported" to scan.supported,
+            "targets" to targets,
+            "error" to scan.error,
+        )
+        val error = scan.error
+        val text = when {
+            error != null -> error
+            !scan.supported -> "No adb or xcrun simctl is available."
+            targets.isEmpty() -> "No configurable target is connected."
+            else -> "${targets.size} configurable target(s)"
+        }
+        return McpToolResponse(text, data, isError = scan.error != null)
+    }
+
+    private suspend fun setProxy(arguments: ToolArguments): McpToolResponse {
+        arguments.requireConfirmation("change the proxy listener")
+        val enabled = arguments.requiredBoolean("enabled")
+        val port = arguments.intOrNull("port")?.inRange("port", 1..65535)
+        return proxyResult(backend.setProxyEnabled(enabled, port))
+    }
+
+    private suspend fun setProxyPort(arguments: ToolArguments): McpToolResponse {
+        arguments.requireConfirmation("change the proxy listener port")
+        return proxyResult(backend.setProxyPort(arguments.requiredInt("port").inRange("port", 1..65535)))
+    }
+
+    private suspend fun setProxyLan(arguments: ToolArguments): McpToolResponse {
+        arguments.requireConfirmation("change LAN exposure")
+        return proxyResult(backend.setProxyLan(arguments.requiredBoolean("enabled")))
+    }
+
+    private suspend fun setSystemProxy(arguments: ToolArguments): McpToolResponse {
+        arguments.requireConfirmation("change this Mac's HTTP and HTTPS proxy settings")
+        return proxyResult(backend.setSystemProxy(arguments.requiredBoolean("enabled")))
+    }
+
+    private suspend fun setProxyDecryptHosts(arguments: ToolArguments): McpToolResponse {
+        arguments.requireConfirmation("replace the TLS decryption allowlist")
+        if (!arguments.contains("hosts")) throw ToolFailure("hosts is required")
+        return proxyResult(backend.setProxyDecryptHosts(arguments.strings("hosts")))
+    }
+
+    private suspend fun currentProxyCertificate(): McpToolResponse =
+        certificateResult(backend.currentProxyCertificate(), missingText = "ca=absent")
+
+    private suspend fun ensureProxyCertificate(arguments: ToolArguments): McpToolResponse {
+        arguments.requireConfirmation("create the local proxy root")
+        return certificateResult(backend.ensureProxyCertificate())
+    }
+
+    private suspend fun rotateProxyCertificate(arguments: ToolArguments): McpToolResponse {
+        arguments.requireConfirmation("replace the local proxy root")
+        val certificate = backend.rotateProxyCertificate()
+        val result = certificateResult(certificate)
+        return if (certificate.installed && certificate.error == null) {
+            result.copy(
+                text = "${result.text} Configured targets must be repaired before HTTPS will decrypt.",
+                data = result.data + (
+                    "action_required" to
+                        "Repair every configured target before expecting HTTPS decryption."
+                    ),
+            )
+        } else {
+            result
+        }
+    }
+
+    private suspend fun removeProxyCertificate(arguments: ToolArguments): McpToolResponse {
+        arguments.requireConfirmation("remove the local proxy root")
+        return certificateResult(backend.removeProxyCertificate())
+    }
+
+    private suspend fun setUpProxyTarget(arguments: ToolArguments): McpToolResponse {
+        arguments.requireConfirmation("change the target's network and certificate state")
+        return targetResult(backend.setUpProxyTarget(arguments.requiredString("id")))
+    }
+
+    private suspend fun clearProxyTarget(arguments: ToolArguments): McpToolResponse {
+        arguments.requireConfirmation("restore the target and remove Wailo-owned certificate files")
+        return targetResult(backend.clearProxyTarget(arguments.requiredString("id")))
+    }
+
+    private fun proxyResult(status: ProxyStatus): McpToolResponse =
+        McpToolResponse(proxyText(status), proxyData(status), isError = status.error != null)
+
+    private fun proxyText(status: ProxyStatus): String = buildString {
+        append("proxy=${if (status.running) "on" else "off"}:${status.port}")
+        append(" lan=${if (status.lan) "open" else "loopback"}")
+        append(" system_proxy=${if (status.systemProxy) "on" else "off"}")
+        status.error?.let { append(" error=$it") }
+    }
+
+    private fun proxyData(status: ProxyStatus): Map<String, Any?> = mapOf(
+        "running" to status.running,
+        "port" to status.port,
+        "connections" to status.connections,
+        "exchanges" to status.exchanges,
+        "error" to status.error,
+        "lan" to status.lan,
+        "lan_address" to status.lanAddress,
+        "reachable_address" to status.reachableAddress,
+        "system_proxy" to status.systemProxy,
+        "system_proxy_supported" to status.systemProxySupported,
+        "chained_to" to status.chainedTo,
+        "ca_installed" to status.caInstalled,
+        "ca_fingerprint" to status.caFingerprint,
+        "decrypt_hosts" to status.decryptHosts,
+        "warnings" to buildList {
+            if (status.lan) add("The proxy is reachable by other clients on this network.")
+            if (status.systemProxy) add("This Mac's HTTP and HTTPS traffic is routed through Wailo.")
+            if ("*" in status.decryptHosts) add("TLS decryption is unlocked for every host.")
+        },
+    )
+
+    private fun certificateResult(
+        certificate: ProxyCertificate,
+        missingText: String = "ca=removed",
+    ): McpToolResponse {
+        val data = mapOf(
+            "installed" to certificate.installed,
+            "common_name" to certificate.commonName,
+            "sha256" to certificate.sha256,
+            "expires_at_epoch_ms" to certificate.expiresEpochMs,
+            "pem" to certificate.pem,
+            "error" to certificate.error,
+        )
+        val text = certificate.error ?: if (certificate.installed) {
+            "ca=installed sha256=${certificate.sha256}"
+        } else {
+            missingText
+        }
+        return McpToolResponse(text, data, isError = certificate.error != null)
+    }
+
+    private fun targetResult(outcome: ProxyTargetOutcome): McpToolResponse {
+        val data = targetOutcomeData(outcome)
+        val text = buildString {
+            append("proxy=${if (outcome.proxySet) "on" else "off"}")
+            append(" trust=${outcome.trust.name.lowercase()}")
+            append(" certificate=${if (outcome.certificateCurrent) "current" else "not-current"}")
+            append(" cleanup=${if (outcome.cleanupPending) "pending" else "clear"}")
+            if (outcome.actionRequired.isNotEmpty()) append(" action_required=${outcome.actionRequired}")
+            if (outcome.note.isNotEmpty()) append(" ${outcome.note}")
+            outcome.error?.let { append(" error=$it") }
+        }
+        return McpToolResponse(text, data, isError = outcome.error != null)
+    }
+
+    private fun targetOutcomeData(outcome: ProxyTargetOutcome): Map<String, Any?> = mapOf(
+        "target" to outcome.target?.let(::targetData),
+        "proxy_set" to outcome.proxySet,
+        "trust" to outcome.trust.name.lowercase(),
+        "certificate_current" to outcome.certificateCurrent,
+        "cleanup_pending" to outcome.cleanupPending,
+        "action_required" to outcome.actionRequired,
+        "note" to outcome.note,
+        "error" to outcome.error,
+    )
+
+    private fun targetData(target: ProxyTarget): Map<String, Any?> = mapOf(
+        "id" to target.id,
+        "name" to target.name,
+        "kind" to target.kind.name.lowercase(),
+        "proxy_set" to target.proxySet,
+        "trust" to target.trust.name.lowercase(),
+        "certificate_current" to target.certificateCurrent,
+        "cleanup_pending" to target.cleanupPending,
+        "action_required" to target.actionRequired,
+        "detail" to target.detail,
+    )
 
     private suspend fun setMapLocal(arguments: ToolArguments): McpToolResponse {
         val id = arguments.requiredString("id")
@@ -898,6 +1157,12 @@ private data class TrafficFilter(
 
 private class ToolArguments(private val values: Map<String, Any?>) {
     fun contains(name: String): Boolean = values.containsKey(name)
+
+    fun requireConfirmation(action: String) {
+        if (values["confirm"] != true) {
+            throw ToolFailure("confirm=true is required to $action")
+        }
+    }
 
     fun requiredString(name: String): String =
         string(name)?.takeIf(String::isNotBlank) ?: throw ToolFailure("$name is required")

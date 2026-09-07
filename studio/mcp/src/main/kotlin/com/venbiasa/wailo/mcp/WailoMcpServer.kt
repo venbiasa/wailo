@@ -32,7 +32,7 @@ internal object WailoMcpServer {
         output: OutputStream,
     ): McpSyncServer = create(LocalMcpBackend(host, capturePort), input, output)
 
-    private fun create(
+    internal fun create(
         backend: McpBackend,
         input: InputStream,
         output: OutputStream,
@@ -74,6 +74,9 @@ internal object WailoMcpServer {
                     "Call status first, configure Map Local, Capture Filter, breakpoint, or seed rules as " +
                     "needed, then inspect or wait for exchanges. To script a sequence of answers, set " +
                     "breakpoints, write seeds, then fill_seeds. " +
+                    "For SDK-less traffic, read get_proxy_setup_guide before making an explicit proxy " +
+                    "change; mutations require confirm=true and setup_proxy_target returns the confirmed " +
+                    "trust store and any remaining manual action. " +
                     "Studio, CLI, and MCP share one persistent local daemon. " +
                     "The user controls this access and can revoke it; when status reports " +
                     "redacting_secrets, credentials in headers, URLs, and bodies read back as " +
@@ -183,6 +186,140 @@ internal object WailoMcpTools {
             objectSchema(
                 "max_retained" to integer("Exchange retention cap", minimum = 100, maximum = 100_000),
                 required = listOf("max_retained"),
+            ),
+            destructive = true,
+        ),
+        readTool(
+            "proxy_status",
+            "Read the bundled proxy's listener, LAN exposure, system-proxy takeover, certificate, and TLS " +
+                "decryption state. The warnings array calls out active machine or network effects.",
+            objectSchema(),
+        ),
+        readTool(
+            "get_proxy_setup_guide",
+            "Get ordered blockers, next steps, self-check URLs, and target outcomes for SDK-less setup. " +
+                "This never starts the listener, opens LAN access, or creates a certificate.",
+            objectSchema(),
+        ),
+        readTool(
+            "list_proxy_targets",
+            "List booted simulators, emulators, and ADB-connected Android phones, including routing, " +
+                "confirmed trust store, stale-certificate, pending-cleanup, and required-action state.",
+            objectSchema(),
+        ),
+        McpToolDefinition(
+            "set_proxy",
+            "Explicitly start or stop the bundled proxy. Stopping first restores targets Wailo configured " +
+                "and refuses to stop if any restoration fails. A port can be supplied only when no target is routed.",
+            objectSchema(
+                "enabled" to boolean("Whether the listener should run"),
+                "port" to integer("Listener port; omit to keep the current port", minimum = 1, maximum = 65535),
+                "confirm" to confirmation("start or stop the listener and restore any dependent targets"),
+                required = listOf("enabled", "confirm"),
+            ),
+            destructive = true,
+        ),
+        McpToolDefinition(
+            "set_proxy_port",
+            "Change the bundled proxy's port. This is refused while any configured target still depends on the old port.",
+            objectSchema(
+                "port" to integer("Listener port", minimum = 1, maximum = 65535),
+                "confirm" to confirmation("change the listener port"),
+                required = listOf("port", "confirm"),
+            ),
+            destructive = true,
+        ),
+        McpToolDefinition(
+            "set_proxy_lan",
+            "Explicitly expose the proxy to this Mac's network or return it to loopback. Enabling this " +
+                "opens an unauthenticated relay to clients that can reach the Mac; disabling is refused " +
+                "while a physical Android target depends on it.",
+            objectSchema(
+                "enabled" to boolean("Whether the listener is reachable over LAN"),
+                "confirm" to confirmation("change LAN exposure"),
+                required = listOf("enabled", "confirm"),
+            ),
+            destructive = true,
+        ),
+        McpToolDefinition(
+            "set_system_proxy",
+            "Explicitly route this Mac's HTTP and HTTPS traffic through Wailo or restore its snapshotted " +
+                "settings. Disabling is refused while a configured iOS Simulator depends on it.",
+            objectSchema(
+                "enabled" to boolean("Whether Wailo owns the Mac system proxy"),
+                "confirm" to confirmation("change this Mac's HTTP and HTTPS proxy settings"),
+                required = listOf("enabled", "confirm"),
+            ),
+            destructive = true,
+        ),
+        McpToolDefinition(
+            "set_proxy_decrypt_hosts",
+            "Replace the complete list of host patterns whose TLS Wailo may terminate. An empty list " +
+                "relocks every host; * unlocks every host and should be used only deliberately.",
+            objectSchema(
+                "hosts" to stringArray("Full host patterns to decrypt; replaces the current list"),
+                "confirm" to confirmation("replace the TLS decryption allowlist"),
+                required = listOf("hosts", "confirm"),
+            ),
+            destructive = true,
+        ),
+        readTool(
+            "get_proxy_ca",
+            "Read the existing local proxy root and public PEM without creating one. The private key never leaves the daemon.",
+            objectSchema(),
+        ),
+        McpToolDefinition(
+            "ensure_proxy_ca",
+            "Create the local proxy root if absent and return its public PEM and SHA-256 fingerprint. " +
+                "The private key never leaves the daemon.",
+            objectSchema(
+                "confirm" to confirmation("create a signing root in this Mac's Keychain if none exists"),
+                required = listOf("confirm"),
+            ),
+            destructive = true,
+        ),
+        McpToolDefinition(
+            "rotate_proxy_ca",
+            "Replace the local proxy root. Every configured target becomes stale and must be repaired " +
+                "before HTTPS decryption works again.",
+            objectSchema(
+                "confirm" to confirmation("replace the signing root and invalidate target trust"),
+                required = listOf("confirm"),
+            ),
+            destructive = true,
+            idempotent = false,
+        ),
+        McpToolDefinition(
+            "remove_proxy_ca",
+            "Remove the local proxy root. Refused while Wailo has configured targets, because their trust " +
+                "stores must be released first.",
+            objectSchema(
+                "confirm" to confirmation("remove the local signing root"),
+                required = listOf("confirm"),
+            ),
+            destructive = true,
+        ),
+        McpToolDefinition(
+            "setup_proxy_target",
+            "Configure one id from list_proxy_targets, creating the local root if absent, then install or " +
+                "stage it. This may start the proxy, enable the Mac system proxy for an iOS Simulator, or " +
+                "expose the listener over LAN for a physical Android device. Inspect the structured trust " +
+                "and action_required fields.",
+            objectSchema(
+                "id" to string("Target id returned by list_proxy_targets"),
+                "confirm" to confirmation("change this target's network and certificate state"),
+                required = listOf("id", "confirm"),
+            ),
+            destructive = true,
+        ),
+        McpToolDefinition(
+            "clear_proxy_target",
+            "Restore one target's exact prior proxy and remove only certificate files Wailo recorded as " +
+                "its own. A failed cleanup remains recorded and retryable.",
+            objectSchema(
+                "id" to string("Configured target id"),
+                "confirm" to confirmation("restore this target and remove Wailo-owned certificate files"),
+                required = listOf("id", "confirm"),
             ),
             destructive = true,
         ),
@@ -432,6 +569,9 @@ private fun boolean(description: String): Map<String, Any> = mapOf(
     "type" to "boolean",
     "description" to description,
 )
+
+private fun confirmation(action: String): Map<String, Any> =
+    boolean("Must be true to confirm that Wailo may $action.")
 
 private fun enumString(description: String, vararg values: String): Map<String, Any> = mapOf(
     "type" to "string",
