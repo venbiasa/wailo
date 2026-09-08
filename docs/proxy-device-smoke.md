@@ -18,7 +18,7 @@ run it last, and confirm the settings came back.
 
 ## Device setup paths
 
-- **Android emulator:** boot it, open Devices → Without the SDK, and choose Set up. Wailo uses
+- **Android emulator:** boot it, open Devices → Proxy, and choose Set up. Wailo uses
   `10.0.2.2`, preserves the emulator's previous proxy, and reports `system`, `user`, or `none` only after
   checking where the root actually landed.
 - **Physical Android:** enable Developer options and USB debugging (or Wireless debugging), connect through

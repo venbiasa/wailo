@@ -23,6 +23,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -48,25 +49,37 @@ import com.venbiasa.wailo.protocol.Header
 import com.venbiasa.wailo.protocol.HttpExchange
 import com.venbiasa.wailo.shared.BodyHandle
 import com.venbiasa.wailo.shared.FlowEntry
+import com.venbiasa.wailo.shared.ProxySetupAction
+import com.venbiasa.wailo.shared.ProxyState
 import com.venbiasa.wailo.shared.format.BodyContent
 import com.venbiasa.wailo.shared.format.UrlPart
 import com.venbiasa.wailo.shared.format.basicAuthDecoded
 import com.venbiasa.wailo.shared.format.bodyContent
 import com.venbiasa.wailo.shared.format.contentType
 import com.venbiasa.wailo.shared.format.formatBytes
+import com.venbiasa.wailo.shared.format.requestHost
 import com.venbiasa.wailo.shared.format.statusChipText
 import com.venbiasa.wailo.shared.format.statusKind
 import com.venbiasa.wailo.shared.format.urlSegments
+import com.venbiasa.wailo.shared.isLockedProxyTunnel
 import com.venbiasa.wailo.shared.theme.LocalWailoColors
+import com.venbiasa.wailo.shared.toggleExactHost
 import okio.ByteString
 
 @Composable
 internal fun DetailPanel(
     entry: FlowEntry,
+    proxy: ProxyState,
+    onProxySetupAction: (ProxySetupAction) -> Unit,
     modifier: Modifier,
     onClose: () -> Unit,
 ) {
     val exchange = entry.exchange
+    val lockedHost = if (entry.isLockedProxyTunnel()) {
+        requestHost(exchange.request?.url.orEmpty()).ifEmpty { null }
+    } else {
+        null
+    }
     Column(modifier.background(MaterialTheme.colorScheme.surfaceContainer)) {
         DetailHeader(exchange, onClose)
         RowDivider()
@@ -74,6 +87,9 @@ internal fun DetailPanel(
             exchange = exchange,
             requestBody = entry.requestBody,
             responseBody = entry.responseBody,
+            lockedHost = lockedHost,
+            proxy = proxy,
+            onProxySetupAction = onProxySetupAction,
             modifier = Modifier.weight(1f).fillMaxWidth(),
         )
     }
@@ -206,6 +222,9 @@ private fun RequestResponseSplit(
     exchange: HttpExchange,
     requestBody: BodyHandle?,
     responseBody: BodyHandle?,
+    lockedHost: String?,
+    proxy: ProxyState,
+    onProxySetupAction: (ProxySetupAction) -> Unit,
     modifier: Modifier,
 ) {
     val request = exchange.request
@@ -245,6 +264,21 @@ private fun RequestResponseSplit(
             // Auth is a request-side concern (credentials the client sends); the response only
             // echoes Set-Cookie/challenge headers, which read fine under Headers.
             showAuth = false,
+            lockedResponse = lockedHost?.let { host ->
+                LockedResponseState(
+                    host = host,
+                    certificateExists = proxy.caInstalled,
+                    exactHostUnlocked = host in proxy.decryptHosts,
+                )
+            },
+            onCreateCertificate = {
+                onProxySetupAction(ProxySetupAction.InstallCertificate)
+            },
+            onUnlockHost = { host ->
+                onProxySetupAction(
+                    ProxySetupAction.SetDecryptHosts(proxy.decryptHosts.toggleExactHost(host)),
+                )
+            },
             modifier = paneModifier,
         )
     }
@@ -366,6 +400,12 @@ private enum class MessageTab(val label: String) {
     Raw("Raw"),
 }
 
+private data class LockedResponseState(
+    val host: String,
+    val certificateExists: Boolean,
+    val exactHostUnlocked: Boolean,
+)
+
 @Composable
 private fun MessagePane(
     caption: String,
@@ -377,10 +417,13 @@ private fun MessagePane(
     truncated: Boolean,
     notice: String,
     showAuth: Boolean,
+    lockedResponse: LockedResponseState? = null,
+    onCreateCertificate: () -> Unit = {},
+    onUnlockHost: (String) -> Unit = {},
     modifier: Modifier,
 ) {
     Column(modifier) {
-        if (!present) {
+        if (!present && lockedResponse == null) {
             Box(Modifier.fillMaxSize().padding(16.dp), contentAlignment = Alignment.Center) {
                 Text(
                     notice,
@@ -405,7 +448,9 @@ private fun MessagePane(
         )
         // Fetched only for the two tabs that show bytes: opening a row on Headers should cost headers.
         // Switching away and back re-reads, which is a local socket and a decrypt, not a network trip.
-        val shownBody = body.takeIf { tab == MessageTab.Body || tab == MessageTab.Raw }
+        val shownBody = body.takeIf {
+            lockedResponse == null && (tab == MessageTab.Body || tab == MessageTab.Raw)
+        }
         val bytes = rememberBodyBytes(shownBody)
         val capturedSize = body?.size ?: 0L
         Box(Modifier.weight(1f).fillMaxWidth()) {
@@ -413,6 +458,13 @@ private fun MessagePane(
             // centered image, neither of which can live inside the shared vertical scroll the
             // text-based tabs use.
             when {
+                lockedResponse != null -> {
+                    LockedResponseContent(
+                        state = lockedResponse,
+                        onCreateCertificate = onCreateCertificate,
+                        onUnlockHost = onUnlockHost,
+                    )
+                }
                 tab == MessageTab.Body -> {
                     BodyPreview(
                         body = bytes,
@@ -435,6 +487,49 @@ private fun MessagePane(
                             }
                         }
                     }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun LockedResponseContent(
+    state: LockedResponseState,
+    onCreateCertificate: () -> Unit,
+    onUnlockHost: (String) -> Unit,
+) {
+    Column(
+        Modifier.fillMaxSize().padding(24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+    ) {
+        Text(
+            when {
+                !state.certificateExists ->
+                    "This tunnel was captured encrypted. Create and trust the local root, unlock ${state.host}, " +
+                        "then send a new request. This historical row cannot be decrypted."
+                state.exactHostUnlocked ->
+                    "${state.host} is unlocked now. This historical tunnel remains encrypted; send a " +
+                        "new request to capture its headers and body."
+                else ->
+                    "This tunnel was captured encrypted. Unlock ${state.host}, then send a new request. " +
+                        "This historical row cannot be decrypted."
+            },
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center,
+        )
+        Spacer(Modifier.height(12.dp))
+        when {
+            !state.certificateExists -> {
+                Button(onClick = onCreateCertificate) {
+                    Text("Create certificate")
+                }
+            }
+            !state.exactHostUnlocked -> {
+                Button(onClick = { onUnlockHost(state.host) }) {
+                    Text("Unlock host")
                 }
             }
         }

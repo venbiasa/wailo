@@ -103,7 +103,7 @@ $CLI list_exchanges
 $CLI stop                              # the daemon otherwise remains running
 ```
 
-## Capturing without the SDK (the proxy)
+## Capturing through the proxy
 
 Some things cannot host the SDK: a browser, a `curl`, a third-party app, an emulator you did not build, a
 phone. For those the daemon runs a bundled HTTP proxy — off until you start it, owned by the daemon rather
@@ -126,7 +126,7 @@ HTTPS starts locked, and stays locked until you do two separate things (ADR-0071
 2. **Unlock the hosts you want to read**, by name. Everything else stays an opaque tunnel and shows as a
    locked row, so "not decrypted" never looks like traffic Wailo missed.
 
-Open **Devices → Without the SDK** for target-first setup. A booted Android emulator or iOS Simulator is
+Open **Devices → Proxy** for target-first setup. A booted Android emulator or iOS Simulator is
 one click. An ADB-connected Android phone is also one click for routing; on an ordinary unrooted phone,
 Wailo stages the root in Downloads and names the approval that still has to happen. For an iPhone or a
 manual Android phone, enter the shown Wi-Fi proxy and scan the setup QR. The page serves the certificate,

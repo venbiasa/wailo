@@ -63,6 +63,7 @@ import com.venbiasa.wailo.shared.SeedRuleDef
 import com.venbiasa.wailo.shared.TrafficFilter
 import com.venbiasa.wailo.shared.compile
 import com.venbiasa.wailo.shared.format.requestHost
+import com.venbiasa.wailo.shared.toggleExactHost
 import com.venbiasa.wailo.shared.resources.Res
 import com.venbiasa.wailo.shared.resources.ic_breakpoint
 import com.venbiasa.wailo.shared.resources.ic_content_paste_go
@@ -71,6 +72,7 @@ import com.venbiasa.wailo.shared.resources.ic_delete
 import com.venbiasa.wailo.shared.resources.ic_devices
 import com.venbiasa.wailo.shared.resources.ic_light_mode
 import com.venbiasa.wailo.shared.resources.ic_lock
+import com.venbiasa.wailo.shared.resources.ic_lock_open
 import com.venbiasa.wailo.shared.resources.ic_pause
 import com.venbiasa.wailo.shared.resources.ic_play_arrow
 import com.venbiasa.wailo.shared.resources.ic_refresh
@@ -86,7 +88,7 @@ import org.jetbrains.compose.resources.vectorResource
  * to reason about two side panels, and each opens at the one host-owned [WailoViewer] width ratio. Modeled
  * as one value rather than a flag per panel so "two panels open at once" isn't a state that can be reached.
  */
-private enum class ToolPanel { CaptureFilter, MapLocal, Breakpoints, Seed, Devices, Settings }
+private enum class ToolPanel { CaptureFilter, Unlock, MapLocal, Breakpoints, Seed, Devices, Settings }
 
 // Common HTTP verbs lead the filter's Method menu (in this order); anything else follows alphabetically.
 private val MethodOrder = listOf("GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS")
@@ -366,6 +368,7 @@ internal fun WailoViewer(
                                 onRemoveBookmark = onRemoveBookmark,
                                 allowHosts = captureFilter.allowHosts,
                                 blockHosts = captureFilter.blockHosts,
+                                decryptHosts = proxy.decryptHosts,
                                 // Row toggles add/remove the exact host in a list. They don't flip the
                                 // list's switch — arming stays a deliberate act in the capture-filter
                                 // panel (a stray click can't silently filter all traffic).
@@ -379,6 +382,11 @@ internal fun WailoViewer(
                                     onCaptureFilterChange(
                                         if (host in captureFilter.blockHosts) captureFilter.removeBlock(host)
                                         else captureFilter.addBlock(host),
+                                    )
+                                },
+                                onToggleDecryptHost = { host ->
+                                    onProxySetupAction(
+                                        ProxySetupAction.SetDecryptHosts(proxy.decryptHosts.toggleExactHost(host)),
                                     )
                                 },
                                 // A row's "Map Local…" seeds a fresh draft (exact URL + method + the
@@ -440,6 +448,8 @@ internal fun WailoViewer(
                             }
                             DetailPanel(
                                 entry = selected,
+                                proxy = proxy,
+                                onProxySetupAction = onProxySetupAction,
                                 modifier = Modifier.fillMaxWidth()
                                     .height(detailHeight.coerceIn(minDetail, maxDetail)),
                                 onClose = { selectedId = null },
@@ -527,6 +537,11 @@ internal fun WailoViewer(
                                 onFilterChange = onCaptureFilterChange,
                                 onClose = closePanel,
                             )
+                            ToolPanel.Unlock -> UnlockManager(
+                                proxy = proxy,
+                                onAction = onProxySetupAction,
+                                onClose = closePanel,
+                            )
                             ToolPanel.Breakpoints -> BreakpointManager(
                                 nodes = breakpointNodes,
                                 onLayoutChange = onBreakpointLayoutChange,
@@ -587,7 +602,6 @@ internal fun WailoViewer(
                 ToolRail(
                     darkTheme = darkTheme,
                     onToggleDarkTheme = onToggleDarkTheme,
-                    proxyRunning = proxy.running,
                     openPanel = openPanel,
                     onSelectPanel = { panel ->
                         // Rail buttons are toggles: picking the open panel closes it.
@@ -652,7 +666,6 @@ private fun seededHeaders(responseHeaders: List<Header>): List<ResponseHeader> {
 private fun ToolRail(
     darkTheme: Boolean,
     onToggleDarkTheme: () -> Unit,
-    proxyRunning: Boolean,
     openPanel: ToolPanel?,
     onSelectPanel: (ToolPanel) -> Unit,
 ) {
@@ -683,6 +696,12 @@ private fun ToolRail(
             onClick = { onSelectPanel(ToolPanel.CaptureFilter) },
         )
         ToolRailButton(
+            icon = Res.drawable.ic_lock_open,
+            contentDescription = "Unlock",
+            selected = openPanel == ToolPanel.Unlock,
+            onClick = { onSelectPanel(ToolPanel.Unlock) },
+        )
+        ToolRailButton(
             icon = Res.drawable.ic_rule,
             contentDescription = "Map Local",
             selected = openPanel == ToolPanel.MapLocal,
@@ -709,13 +728,10 @@ private fun ToolRail(
             onClick = { onSelectPanel(ToolPanel.Devices) },
         )
         Spacer(Modifier.weight(1f))
-        // Settings is where the proxy is switched on, so its button carries the running marker: the top
-        // bar says where the proxy is listening, but only once it already is.
         ToolRailButton(
             icon = Res.drawable.ic_settings,
-            contentDescription = if (proxyRunning) "Settings (proxy running)" else "Settings",
+            contentDescription = "Settings",
             selected = openPanel == ToolPanel.Settings,
-            active = proxyRunning,
             onClick = { onSelectPanel(ToolPanel.Settings) },
         )
     }
@@ -739,16 +755,9 @@ private fun ToolRailButton(
     contentDescription: String,
     selected: Boolean,
     onClick: () -> Unit,
-    // Whether the tool behind this button is doing something right now, which is a different question
-    // from whether its panel is open. Only a tool with a running part uses it.
-    active: Boolean = false,
 ) {
     val background = if (selected) MaterialTheme.colorScheme.surfaceVariant else Color.Transparent
-    val tint = when {
-        active -> LocalWailoColors.current.info
-        selected -> MaterialTheme.colorScheme.onSurface
-        else -> MaterialTheme.colorScheme.onSurfaceVariant
-    }
+    val tint = if (selected) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant
     // The rail is icon-only; hovering names the tool so an unfamiliar glyph is still legible.
     HoverTooltip(label = contentDescription) {
         Box(

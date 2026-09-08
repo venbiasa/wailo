@@ -21,6 +21,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -46,7 +47,7 @@ import com.venbiasa.wailo.shared.theme.LocalWailoColors
  * different questions ("why isn't my phone showing up" vs "who may connect"), and a device can sit in
  * either without the other.
  *
- * SDK-less setup lives here because this is where users look for a device that is not appearing (ADR-0090).
+ * Proxy setup lives here because this is where users look for a device that is not appearing (ADR-0090).
  *
  * [usbPort] is named on each USB row because it is the one setting that can silently mismatch: usbmux has
  * no discovery, so a device listening on another port is indistinguishable from an app that never started.
@@ -71,6 +72,9 @@ internal fun DevicesManager(
     var confirmingForgetAll by remember { mutableStateOf(false) }
 
     var settingUp by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        onProxySetupAction(ProxySetupAction.RefreshTargets)
+    }
 
     Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
         Box(Modifier.fillMaxSize()) {
@@ -102,11 +106,11 @@ internal fun DevicesManager(
                             RowDivider()
                         }
                     }
-                    item(key = "sdkless-header") {
-                        SectionHeader("Without the SDK") {
+                    item(key = "proxy-header") {
+                        SectionHeader("Proxy") {
                             PanelIconButton(
                                 icon = Res.drawable.ic_add,
-                                contentDescription = "Set up a device without the SDK",
+                                contentDescription = "Set up a proxy device",
                                 onClick = {
                                     settingUp = true
                                     onProxySetupAction(ProxySetupAction.RefreshTargets)
@@ -115,8 +119,20 @@ internal fun DevicesManager(
                             )
                         }
                     }
-                    item(key = "sdkless-summary") {
-                        SectionEmptyText(sdklessSummary(proxy))
+                    if (proxyTargets.loading && proxyTargets.targets.isEmpty()) {
+                        item(key = "proxy-loading") {
+                            SectionEmptyText("Looking for proxy devices…")
+                        }
+                    } else {
+                        items(proxyTargets.targets, key = { "proxy-${it.id}" }) { target ->
+                            ProxyTargetRow(
+                                target = target,
+                                busy = proxyTargets.busyId == target.id,
+                                enabled = proxyTargets.busyId == null,
+                                onAction = onProxySetupAction,
+                            )
+                            RowDivider()
+                        }
                     }
                     pairedDevicesSection(
                         pairing = pairing,
@@ -168,20 +184,6 @@ private fun BoxScope.Scrim(onDismiss: () -> Unit) {
     )
 }
 
-private fun sdklessSummary(proxy: ProxyState): String = when {
-    !proxy.running ->
-        "A browser, a release build, or someone else's app can be captured through Wailo's proxy instead. " +
-            "It is off right now."
-    !proxy.caInstalled ->
-        "Proxy running on ${proxy.address}. HTTPS is tunnelled without being read until a certificate " +
-            "exists and a host is unlocked."
-    proxy.decryptHosts.isEmpty() ->
-        "Proxy running on ${proxy.address} with a certificate, but no host is unlocked yet, so every " +
-            "HTTPS connection stays an encrypted tunnel."
-    else -> "Proxy running on ${proxy.address}, reading ${proxy.decryptHosts.size} unlocked host" +
-        (if (proxy.decryptHosts.size == 1) "." else "s.")
-}
-
 /**
  * Why nothing is listed, in terms of what this machine can actually do about it — a Mac without the
  * Android platform-tools cannot be told to attach a phone by cable, and a Linux host cannot be told to
@@ -200,7 +202,7 @@ private fun emptyDevicesText(usbSupported: Boolean, usbPort: Int, adbSupported: 
         else -> ""
     }
     return "No devices connected — $ways.$missing All of those need the app to be built with the Wailo " +
-        "SDK; if it isn't, use Without the SDK below."
+        "SDK; if it isn't, use Proxy below."
 }
 
 @Composable

@@ -202,12 +202,6 @@ internal fun SettingsManager(
                 )
                 RowDivider()
                 CertificateRow(proxy = proxy, onAction = onProxySetupAction)
-                if (proxy.caInstalled) {
-                    RowDivider()
-                    DecryptHostsRow(hosts = proxy.decryptHosts) {
-                        onProxySetupAction(ProxySetupAction.SetDecryptHosts(it))
-                    }
-                }
 
                 SectionHeader("Capture")
                 NumberField(
@@ -343,47 +337,6 @@ private fun CertificateRow(proxy: ProxyState, onAction: (ProxySetupAction) -> Un
             "Compare this fingerprint with the one your keychain shows. A phone gets the same certificate " +
                 "by browsing to http://${proxy.address}. Replacing it invalidates everything the old one " +
                 "signed, so every machine that trusted it has to trust the new one.",
-        )
-    }
-}
-
-/**
- * The unlocked hosts. One per line rather than a chip editor: the list is short, it is edited rarely,
- * and a plain text area makes "what can Wailo read" answerable at a glance — which is the whole point of
- * an allowlist (ADR-0071). Applied explicitly, because a keystroke should not widen it.
- */
-@Composable
-private fun DecryptHostsRow(hosts: List<String>, onApply: (List<String>) -> Unit) {
-    val committed = hosts.joinToString("\n")
-    var draft by remember(committed) { mutableStateOf(committed) }
-
-    Column(
-        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        Text(
-            "Decrypt these hosts",
-            style = MaterialTheme.typography.labelLarge,
-            color = MaterialTheme.colorScheme.onSurface,
-        )
-        CompactOutlinedTextField(
-            value = draft,
-            onValueChange = { draft = it },
-            placeholder = "api.example.com",
-            singleLine = false,
-            modifier = Modifier.fillMaxWidth().height(84.dp),
-        )
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-            Button(
-                enabled = draft != committed,
-                onClick = { onApply(draft.lines().map { it.trim() }.filter { it.isNotEmpty() }) },
-            ) { Text("Apply") }
-            if (hosts.isEmpty()) MutedText("Nothing is decrypted yet.")
-        }
-        MutedText(
-            "One host per line; `*` matches any run of characters. Everything not listed stays an " +
-                "encrypted tunnel and shows as a locked row. A pinned app will still refuse — that is " +
-                "the app working correctly, not Wailo failing.",
         )
     }
 }

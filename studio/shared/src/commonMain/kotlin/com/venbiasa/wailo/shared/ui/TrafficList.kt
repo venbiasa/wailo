@@ -94,8 +94,10 @@ internal fun TrafficList(
     onRemoveBookmark: (String) -> Unit,
     allowHosts: List<String>,
     blockHosts: List<String>,
+    decryptHosts: List<String>,
     onToggleAllowHost: (String) -> Unit,
     onToggleBlockHost: (String) -> Unit,
+    onToggleDecryptHost: (String) -> Unit,
     onMapLocalFromUrl: (String, String, List<Header>, ByteArray?) -> Unit,
     onSeedFromUrl: (String, String, Int, List<Header>, ByteArray?) -> Unit,
     onBreakpointFromUrl: (String, String) -> Unit,
@@ -197,8 +199,10 @@ internal fun TrafficList(
                             onRemoveBookmark = onRemoveBookmark,
                             allowHosts = allowHosts,
                             blockHosts = blockHosts,
+                            decryptHosts = decryptHosts,
                             onToggleAllowHost = onToggleAllowHost,
                             onToggleBlockHost = onToggleBlockHost,
+                            onToggleDecryptHost = onToggleDecryptHost,
                             onMapLocalFromUrl = onMapLocalFromUrl,
                             onSeedFromUrl = onSeedFromUrl,
                             onBreakpointFromUrl = onBreakpointFromUrl,
@@ -305,8 +309,10 @@ private fun TrafficRow(
     onRemoveBookmark: (String) -> Unit,
     allowHosts: List<String>,
     blockHosts: List<String>,
+    decryptHosts: List<String>,
     onToggleAllowHost: (String) -> Unit,
     onToggleBlockHost: (String) -> Unit,
+    onToggleDecryptHost: (String) -> Unit,
     onMapLocalFromUrl: (String, String, List<Header>, ByteArray?) -> Unit,
     onSeedFromUrl: (String, String, Int, List<Header>, ByteArray?) -> Unit,
     onBreakpointFromUrl: (String, String) -> Unit,
@@ -320,14 +326,8 @@ private fun TrafficRow(
     val hasError = exchange.error.isNotEmpty()
     val kind = statusKind(code, hasError)
 
-    // Right-click can copy the complete captured request as cURL, bookmark this row's host (a tick once
-    // saved; the slot is reserved when not, so the label never shifts as it toggles), add/remove the host
-    // in the capture filter's allow or block list, or author a rule from its URL. The
-    // Allowlist/Blocklist ticks track *exact* membership (so a subdomain isn't shown as listed under a
-    // `*.example.com` entry, and toggling removes only the exact host it added — a wildcard entry is never
-    // silently dropped); arming each list stays a deliberate switch in the capture-filter panel. A row with
-    // no parseable host skips the bookmark/filter entries; one with no URL skips copy and rule authoring —
-    // an all-empty list is a plain passthrough (no menu).
+    // Host menu ticks use exact membership, so toggling a concrete row never removes a broader wildcard.
+    // A row with no parseable host skips host actions; one with no URL skips copy and rule authoring.
     val url = request?.url ?: ""
     val host = remember(url) { requestHost(url) }
     // A rule matches the method as captured; the display fallback above ("?") is not one.
@@ -335,6 +335,7 @@ private fun TrafficRow(
     val bookmarked = host in bookmarks
     val allowed = host in allowHosts
     val blocked = host in blockHosts
+    val unlocked = host in decryptHosts
     // Bodies are fetched when an action runs, not when the menu is built: a right-click must not pull
     // megabytes for an entry the user is about to skip past (ADR-0069).
     val bodyLoader = LocalBodyLoader.current
@@ -364,6 +365,9 @@ private fun TrafficRow(
             )
             add(ContextMenuAction("Allowlist", checked = allowed) { onToggleAllowHost(host) })
             add(ContextMenuAction("Blocklist", checked = blocked) { onToggleBlockHost(host) })
+            if (entry.viaProxy) {
+                add(ContextMenuAction("Unlock", checked = unlocked) { onToggleDecryptHost(host) })
+            }
         }
         if (url.isNotEmpty()) {
             // All three seed a new rule with this row's exact URL and method, so the panel opens on the

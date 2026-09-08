@@ -96,7 +96,7 @@ relations: gives ADR-0076's manual setup an automatic path for targets that have
     than a false `system`.
   - The provisioner is covered against stand-in tools with no device attached; `forThisMachine()` is the only
     construction the suite cannot reach.
-  - Manual smoke: boot an emulator on a Google APIs image, open Devices → Without the SDK → Set up, and
+  - Manual smoke: boot an emulator on a Google APIs image, open Devices → Proxy → Set up, and
     confirm it reports `system` trust and that an HTTPS request from a release build in it appears decrypted
     once its host is unlocked. Then Release, and confirm the emulator has a network again. Repeat on a Play
     Store image and confirm it reports `none` and names the remaining step. On a booted simulator, confirm

@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -31,6 +32,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.venbiasa.wailo.shared.ProxySetupAction
 import com.venbiasa.wailo.shared.ProxyState
@@ -45,7 +47,7 @@ import com.venbiasa.wailo.shared.theme.LocalWailoColors
 private enum class PhonePlatform { IPhone, Android }
 
 /**
- * SDK-less setup is detection-first; state comes from the daemon so every frontend agrees
+ * Proxy target setup is detection-first; state comes from the daemon so every frontend agrees
  * (ADR-0085/0090).
  */
 @Composable
@@ -66,7 +68,9 @@ internal fun ProxySetupCard(
     ) {
         Column(Modifier.heightIn(max = 560.dp)) {
             Row(
-                Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp, top = 6.dp),
+                Modifier.fillMaxWidth()
+                    .height(TopBarHeight)
+                    .padding(start = 16.dp, end = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
@@ -83,24 +87,40 @@ internal fun ProxySetupCard(
                 )
                 CloseButton(onClose, contentDescription = "Close device setup")
             }
+            RowDivider()
 
             Column(
-                Modifier.verticalScroll(rememberScrollState()).padding(bottom = 16.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
+                Modifier.fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = 16.dp, vertical = 16.dp),
+                verticalArrangement = Arrangement.spacedBy(20.dp),
             ) {
                 MutedText(
                     "For anything that cannot host the Wailo SDK — a browser, a release build, someone " +
                         "else's app. Its traffic joins the list ticked in the Proxy column.",
-                    Modifier.padding(horizontal = 16.dp),
                 )
 
-                SectionHeader("On this machine")
-                TargetsSection(targets = targets, onAction = onAction)
+                SetupSection("On this machine") {
+                    TargetsSection(targets = targets, onAction = onAction)
+                }
 
-                SectionHeader("A physical phone")
-                PhoneSteps(proxy = proxy, targets = targets, onAction = onAction)
+                SetupSection("A physical phone") {
+                    PhoneSteps(proxy = proxy, targets = targets, onAction = onAction)
+                }
             }
         }
+    }
+}
+
+@Composable
+private fun SetupSection(title: String, content: @Composable () -> Unit) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text(
+            title,
+            style = MaterialTheme.typography.titleSmall,
+            color = MaterialTheme.colorScheme.onSurface,
+        )
+        content()
     }
 }
 
@@ -109,46 +129,47 @@ private fun TargetsSection(targets: ProxyTargets, onAction: (ProxySetupAction) -
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
         when {
             // `supported` is only authoritative after the first fetch.
-            targets.loading && targets.targets.isEmpty() -> SectionEmptyText("Looking…")
-            !targets.supported -> SectionEmptyText(
+            targets.loading && targets.targets.isEmpty() -> MutedText("Looking…")
+            !targets.supported -> MutedText(
                 "No device tooling found here — Wailo looks for Android platform-tools and Xcode's " +
                     "command line tools. A phone can still be configured manually, below.",
             )
-            targets.targets.isEmpty() -> SectionEmptyText(
+            targets.targets.isEmpty() -> MutedText(
                 "Nothing configurable is connected. Start a simulator or emulator, or connect an Android " +
                     "phone with ADB debugging, then press Look again.",
             )
             else -> targets.targets.forEach { target ->
-                TargetRow(
+                ProxyTargetRow(
                     target = target,
                     busy = targets.busyId == target.id,
                     // Device remount operations must not overlap.
                     enabled = targets.busyId == null,
                     onAction = onAction,
+                    horizontalPadding = 0.dp,
                 )
             }
         }
         targets.error?.let {
             Text(
                 it,
-                Modifier.padding(horizontal = 16.dp),
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.error,
             )
         }
-        if (targets.notice.isNotEmpty()) MutedText(targets.notice, Modifier.padding(horizontal = 16.dp))
+        if (targets.notice.isNotEmpty()) MutedText(targets.notice)
     }
 }
 
 @Composable
-private fun TargetRow(
+internal fun ProxyTargetRow(
     target: ProxyTargetInfo,
     busy: Boolean,
     enabled: Boolean,
     onAction: (ProxySetupAction) -> Unit,
+    horizontalPadding: Dp = 16.dp,
 ) {
     Row(
-        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
+        Modifier.fillMaxWidth().padding(horizontal = horizontalPadding, vertical = 10.dp),
         horizontalArrangement = Arrangement.spacedBy(10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -281,7 +302,7 @@ private fun PhoneSteps(
             return@Column
         }
         if (proxy.lanAddress.isEmpty()) {
-            SectionEmptyText(
+            MutedText(
                 "Wailo cannot find this Mac's LAN address. Connect both devices to the same network, then press Look again.",
             )
             return@Column
@@ -299,7 +320,7 @@ private fun PhoneSteps(
         }
 
         Column(
-            Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+            Modifier.fillMaxWidth(),
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
             Text(
@@ -322,7 +343,7 @@ private fun PhoneSteps(
 
         targets.setupQr?.let { qr ->
             Column(
-                Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+                Modifier.fillMaxWidth(),
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
@@ -348,7 +369,7 @@ private fun PhoneSteps(
         )
 
         Column(
-            Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+            Modifier.fillMaxWidth(),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             Step(
@@ -379,7 +400,7 @@ private fun PhoneSteps(
                 }
             }
             Step(5, "Use Check browser trust on that page; a successful check proves this browser accepts the root.")
-            Step(6, "Back here, unlock the hosts to read under Settings → Proxy.")
+            Step(6, "Back here, open Unlock and add the hosts whose HTTPS traffic you need to read.")
         }
     }
 }
@@ -387,7 +408,7 @@ private fun PhoneSteps(
 @Composable
 private fun ReadinessStep(text: String, action: String, onClick: () -> Unit) {
     Column(
-        Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+        Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         MutedText(text)
@@ -399,7 +420,6 @@ private fun ReadinessStep(text: String, action: String, onClick: () -> Unit) {
 private fun SetupError(message: String) {
     Text(
         message,
-        Modifier.padding(horizontal = 16.dp),
         style = MaterialTheme.typography.labelSmall,
         color = MaterialTheme.colorScheme.error,
     )
