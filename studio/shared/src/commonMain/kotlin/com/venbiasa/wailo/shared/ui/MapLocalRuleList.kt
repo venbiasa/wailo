@@ -59,8 +59,7 @@ internal fun RuleListPage(
     ) { rule -> MapLocalRuleContent(rule) }
 }
 
-// A Map Local rule row's label (rendered in the shared row scaffold's clickable column): the rule's name
-// over a "METHOD → url" summary.
+// A Map Local rule row's label: the rule's name over a compact method, optional delay, and URL summary.
 @Composable
 private fun MapLocalRuleContent(rule: MapLocalRuleDef) {
     Text(
@@ -71,8 +70,9 @@ private fun MapLocalRuleContent(rule: MapLocalRuleDef) {
         overflow = TextOverflow.Ellipsis,
     )
     val method = rule.method.ifBlank { "ANY" }
+    val delay = if (rule.delayMillis > 0) "  \u00b7  ${rule.delayMillis} ms" else ""
     Text(
-        "$method  \u2192  ${rule.urlPattern.ifBlank { "(no pattern)" }}",
+        "$method$delay  \u2192  ${rule.urlPattern.ifBlank { "(no pattern)" }}",
         style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
         maxLines = 1,

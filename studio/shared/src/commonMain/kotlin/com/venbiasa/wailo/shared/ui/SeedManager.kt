@@ -137,6 +137,7 @@ internal fun SeedManager(
                         urlPattern = target.urlPattern,
                         method = target.method,
                         statusCode = target.statusCode,
+                        delayMillis = target.delayMillis,
                         headers = target.headers,
                     ),
                     // A seed is identified by what it matches, so there is no name to author.
@@ -159,6 +160,7 @@ internal fun SeedManager(
                             urlPattern = draft.urlPattern,
                             method = draft.method,
                             statusCode = draft.statusCode,
+                            delayMillis = draft.delayMillis,
                             headers = draft.headers,
                         )
                         // Body first: the layout is what makes the seed reachable, so writing it last
@@ -179,9 +181,9 @@ internal fun SeedManager(
 }
 
 // A seed row's label (rendered in the shared row scaffold's clickable column): the URL it matches over a
-// "METHOD → status" caption, the same stack the breakpoint rows use. There's no name line — a seed doesn't
-// have one — and the URL leads because it's both the longest part and what tells two seeds apart; sharing
-// a line with the method and status left it too cramped to read.
+// method/status/optional-delay caption, the same stack the breakpoint rows use. There's no name line — a
+// seed doesn't have one — and the URL leads because it's both the longest part and what tells two seeds
+// apart; sharing a line with the method and status left it too cramped to read.
 @Composable
 private fun SeedRuleContent(rule: SeedRuleDef) {
     Text(
@@ -191,8 +193,9 @@ private fun SeedRuleContent(rule: SeedRuleDef) {
         maxLines = 1,
         overflow = TextOverflow.Ellipsis,
     )
+    val delay = if (rule.delayMillis > 0) "  \u00b7  ${rule.delayMillis} ms" else ""
     Text(
-        "${rule.method.ifBlank { "ANY" }}  \u2192  ${rule.statusCode}",
+        "${rule.method.ifBlank { "ANY" }}  \u2192  ${rule.statusCode}$delay",
         style = MaterialTheme.typography.labelSmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )

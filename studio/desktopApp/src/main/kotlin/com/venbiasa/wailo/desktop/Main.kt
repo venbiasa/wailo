@@ -611,6 +611,7 @@ private fun runWailo(engine: DaemonClient) = application {
             urlPattern = rule.urlPattern,
             method = rule.method,
             statusCode = rule.statusCode,
+            delayMillis = rule.delayMillis,
             headers = rule.headers,
         )
         // The source rule's bytes are the daemon's, so the copy is a fetch — and the layout is published
@@ -1150,6 +1151,7 @@ private fun SeedRuleDef.toHostSeed(known: Map<String, HostSeed>) = HostSeed(
     urlPattern = urlPattern,
     method = method,
     statusCode = statusCode,
+    delayMillis = delayMillis,
     headers = headers.map { Header(name = it.name, value_ = it.value) },
     bodySize = known[id]?.bodySize ?: 0,
     bodyHash = known[id]?.bodyHash.orEmpty(),
@@ -1161,6 +1163,7 @@ private fun HostSeed.toSeedRuleDef() = SeedRuleDef(
     urlPattern = urlPattern,
     method = method,
     statusCode = statusCode,
+    delayMillis = delayMillis,
     headers = headers.map { ResponseHeader(name = it.name, value = it.value_) },
 )
 
@@ -1212,6 +1215,7 @@ private fun MapLocalRuleDef.toHostRule(known: Map<String, HostMapLocalRule>) = H
     urlPattern = urlPattern,
     method = method.trim(),
     statusCode = statusCode,
+    delayMillis = delayMillis,
     headers = headers.map { Header(name = it.name, value_ = it.value) },
     // The daemon's reference, echoed back rather than the bytes it stands for (ADR-0086).
     bodySize = known[id]?.bodySize ?: 0,
@@ -1232,6 +1236,7 @@ internal fun List<DaemonRuleNode<HostMapLocalRule>>.toMapLocalNodes(): List<MapL
             urlPattern = rule.urlPattern,
             method = rule.method,
             statusCode = rule.statusCode,
+            delayMillis = rule.delayMillis,
             headers = rule.headers
                 .filterNot { it.name.equals("Content-Length", ignoreCase = true) }
                 .map { ResponseHeader(it.name, it.value_) },

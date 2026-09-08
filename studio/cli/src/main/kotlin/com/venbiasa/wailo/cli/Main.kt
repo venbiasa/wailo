@@ -201,7 +201,8 @@ internal suspend fun dispatch(host: DaemonClient, args: ParsedArgs): CommandResu
                 } else {
                     rules.joinToString("\n") { rule ->
                         val group = groups[rule.id]?.let { "\t[$it]" }.orEmpty()
-                        "${rule.id}\t${if (rule.enabled) "on" else "off"}\t${rule.method.ifBlank { "*" }}\t${rule.statusCode}\t${rule.bodySize}B\t${rule.urlPattern}$group"
+                        "${rule.id}\t${if (rule.enabled) "on" else "off"}\t${rule.method.ifBlank { "*" }}\t" +
+                            "${rule.statusCode}\t${rule.bodySize}B\t${rule.urlPattern}$group\t${rule.delayMillis}ms"
                     }
                 },
             )
@@ -219,6 +220,7 @@ internal suspend fun dispatch(host: DaemonClient, args: ParsedArgs): CommandResu
                     appendLine("url_pattern=${rule.urlPattern}")
                     appendLine("method=${rule.method.ifBlank { "*" }}")
                     appendLine("status=${rule.statusCode}")
+                    appendLine("delay_ms=${rule.delayMillis}")
                     group?.let { appendLine("group=$it") }
                     rule.headers.forEach { appendLine("  < ${it.name}: ${it.value_}") }
                     append(ruleBody(host, RULE_FAMILY_MAP_LOCAL, rule.id, rule.bodySize, args.bodyChars))
@@ -298,7 +300,7 @@ internal suspend fun dispatch(host: DaemonClient, args: ParsedArgs): CommandResu
                             val queued = if (seed.id in armed) "armed" else "-"
                             appendLine(
                                 "${seed.id}\t$state\t$method\t${seed.statusCode}\t" +
-                                    "${seed.bodySize}B\t$queued\t${seed.urlPattern}",
+                                    "${seed.bodySize}B\t$queued\t${seed.urlPattern}\t${seed.delayMillis}ms",
                             )
                         }
                     }
@@ -317,6 +319,7 @@ internal suspend fun dispatch(host: DaemonClient, args: ParsedArgs): CommandResu
                     appendLine("url_pattern=${seed.urlPattern}")
                     appendLine("method=${seed.method.takeIf { it.isNotBlank() } ?: "*"}")
                     appendLine("status=${seed.statusCode}")
+                    appendLine("delay_ms=${seed.delayMillis}")
                     appendLine("armed=${host.seedQueue.value.any { it.id == seed.id }}")
                     group?.let { appendLine("group=$it") }
                     seed.headers.forEach { appendLine("  < ${it.name}: ${it.value_}") }
@@ -772,6 +775,7 @@ private suspend fun setMapLocal(host: DaemonClient, args: ParsedArgs): CommandRe
             urlPattern = canned.urlPattern,
             method = args.method.orEmpty(),
             statusCode = canned.statusCode,
+            delayMillis = args.delayMillis ?: 0,
             headers = canned.headers,
             body = canned.body,
         ),
@@ -989,6 +993,7 @@ private suspend fun setSeed(host: DaemonClient, args: ParsedArgs): CommandResult
             urlPattern = canned.urlPattern,
             method = args.method.orEmpty(),
             statusCode = canned.statusCode,
+            delayMillis = args.delayMillis ?: 0,
             headers = canned.headers,
             body = canned.body,
         ),
@@ -1156,6 +1161,7 @@ internal data class ParsedArgs(
     val urlPattern: String? = null,
     val method: String? = null,
     val statusCode: Int? = null,
+    val delayMillis: Int? = null,
     val appId: String? = null,
     val limit: Int = 50,
     val bodyChars: Int = 4_096,
@@ -1198,6 +1204,7 @@ internal fun parseArgs(args: Array<String>): ParsedArgs? {
     var urlPattern: String? = null
     var method: String? = null
     var statusCode: Int? = null
+    var delayMillis: Int? = null
     var appId: String? = null
     var limit = 50
     var bodyChars = 4_096
@@ -1237,6 +1244,7 @@ internal fun parseArgs(args: Array<String>): ParsedArgs? {
             "--url-pattern" -> urlPattern = args.getOrNull(++i) ?: return null
             "--method" -> method = args.getOrNull(++i) ?: return null
             "--status" -> statusCode = args.getOrNull(++i)?.toIntOrNull() ?: return null
+            "--delay-ms" -> delayMillis = args.getOrNull(++i)?.toIntOrNull() ?: return null
             "--app" -> appId = args.getOrNull(++i) ?: return null
             "--limit" -> limit = args.getOrNull(++i)?.toIntOrNull() ?: return null
             "--body-chars" -> {
@@ -1276,6 +1284,7 @@ internal fun parseArgs(args: Array<String>): ParsedArgs? {
     }
     if (port !in WailoEngine.PORT_RANGE) return null
     if (limit !in 1..1_000 || bodyChars !in 0..1_000_000 || timeoutSeconds !in 0..86_400) return null
+    if (delayMillis != null && delayMillis < 0) return null
     return ParsedArgs(
         command = command,
         port = port,
@@ -1285,6 +1294,7 @@ internal fun parseArgs(args: Array<String>): ParsedArgs? {
         urlPattern = urlPattern,
         method = method,
         statusCode = statusCode,
+        delayMillis = delayMillis,
         appId = appId,
         limit = limit,
         bodyChars = bodyChars,
@@ -1326,7 +1336,7 @@ private fun printUsage() {
         wailo-cli list_exchanges [--limit N]
         wailo-cli search_traffic [--url S] [--url-pattern GLOB] [--method M] [--status C] [--app ID]
         wailo-cli get_exchange --id ID
-        wailo-cli set_map_local --id ID --url-pattern GLOB [--name TEXT] [--method M] [--status C]
+        wailo-cli set_map_local --id ID --url-pattern GLOB [--name TEXT] [--method M] [--status C] [--delay-ms N]
                     [--header "Name: value"]... [--body-file PATH|--body-text TEXT] [--off]
                     [--group-id ID]
         wailo-cli remove_map_local --id ID
@@ -1343,7 +1353,7 @@ private fun printUsage() {
         wailo-cli remove_breakpoint --id ID
         wailo-cli list_breakpoints
         wailo-cli set_breakpoints_enabled --on|--off
-        wailo-cli set_seed --id ID --url-pattern GLOB [--method M] [--status C]
+        wailo-cli set_seed --id ID --url-pattern GLOB [--method M] [--status C] [--delay-ms N]
                     [--header "Name: value"]... [--body-file PATH|--body-text TEXT] [--off]
                     [--group-id ID]
         wailo-cli remove_seed --id ID
@@ -1405,6 +1415,7 @@ private fun printUsage() {
 
         A rule matches one method, or any: --method names the one verb, and omitting it matches every
         verb. Repeating the flag keeps the last, as with any other override.
+        --delay-ms adds fixed response latency to Map Local and Seed rules; omitting it serves immediately.
 
         Top-to-bottom order is match priority: of two rules that both match, the higher one wins.
         set_rule_order sets it for one container — the rules inside --group-id, or the top level

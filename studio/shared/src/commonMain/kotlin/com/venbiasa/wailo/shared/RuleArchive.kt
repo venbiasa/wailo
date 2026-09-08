@@ -81,6 +81,7 @@ data class ArchivedMapLocalRule(
     val urlPattern: String = "",
     val method: String = "",
     val statusCode: Int = 200,
+    val delayMillis: Int = 0,
     val headers: List<ArchivedHeader> = emptyList(),
     val inline: Boolean = true,
     val filePath: String = "",
@@ -105,6 +106,7 @@ data class ArchivedSeedRule(
     val urlPattern: String = "",
     val method: String = "",
     val statusCode: Int = 200,
+    val delayMillis: Int = 0,
     val headers: List<ArchivedHeader> = emptyList(),
     val bodyEntry: String = "",
 )
@@ -197,6 +199,7 @@ fun MapLocalRuleDef.toArchived(bodyEntry: String): ArchivedMapLocalRule = Archiv
     urlPattern = urlPattern,
     method = method,
     statusCode = statusCode,
+    delayMillis = delayMillis,
     headers = headers.map { ArchivedHeader(it.name, it.value) },
     inline = inline,
     filePath = filePath,
@@ -218,6 +221,7 @@ fun ArchivedMapLocalRule.toRuleDef(filePathResolves: Boolean): MapLocalRuleDef {
         method = method,
         filePath = if (keepsFile) filePath else "",
         statusCode = statusCode,
+        delayMillis = delayMillis.coerceAtLeast(0),
         headers = headers.map { ResponseHeader(it.name, it.value) },
         inline = !keepsFile,
     )
@@ -247,6 +251,7 @@ fun SeedRuleDef.toArchived(bodyEntry: String): ArchivedSeedRule = ArchivedSeedRu
     urlPattern = urlPattern,
     method = method,
     statusCode = statusCode,
+    delayMillis = delayMillis,
     headers = headers.map { ArchivedHeader(it.name, it.value) },
     bodyEntry = bodyEntry,
 )
@@ -257,6 +262,7 @@ fun ArchivedSeedRule.toRuleDef(): SeedRuleDef = SeedRuleDef(
     urlPattern = urlPattern,
     method = method,
     statusCode = statusCode,
+    delayMillis = delayMillis.coerceAtLeast(0),
     headers = headers.map { ResponseHeader(it.name, it.value) },
 )
 

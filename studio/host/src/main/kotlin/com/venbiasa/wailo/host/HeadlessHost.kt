@@ -184,6 +184,7 @@ class HeadlessHost private constructor(
         require(rule.id.isNotBlank()) { "Map Local id must not be blank" }
         require(rule.urlPattern.isNotBlank()) { "Map Local URL pattern must not be blank" }
         require(rule.statusCode in 100..599) { "Map Local status must be between 100 and 599" }
+        require(rule.delayMillis >= 0) { "Map Local delay must not be negative" }
         mapLocalMutex.withLock {
             val current = _mapLocalRules.value
             val index = current.indexOfFirst { it.id == rule.id }
@@ -218,6 +219,7 @@ class HeadlessHost private constructor(
             require(it.id.isNotBlank()) { "Map Local id must not be blank" }
             require(it.urlPattern.isNotBlank()) { "Map Local URL pattern must not be blank" }
             require(it.statusCode in 100..599) { "Map Local status must be between 100 and 599" }
+            require(it.delayMillis >= 0) { "Map Local delay must not be negative" }
         }
         mapLocalMutex.withLock {
             _mapLocalRules.value = rules.toList()
@@ -301,6 +303,7 @@ class HeadlessHost private constructor(
         require(seed.id.isNotBlank()) { "Seed id must not be blank" }
         require(seed.urlPattern.isNotBlank()) { "Seed URL pattern must not be blank" }
         require(seed.statusCode in 100..599) { "Seed status must be between 100 and 599" }
+        require(seed.delayMillis >= 0) { "Seed delay must not be negative" }
         seedMutex.withLock {
             val current = _seeds.value
             val index = current.indexOfFirst { it.id == seed.id }
@@ -328,6 +331,7 @@ class HeadlessHost private constructor(
             require(it.id.isNotBlank()) { "Seed id must not be blank" }
             require(it.urlPattern.isNotBlank()) { "Seed URL pattern must not be blank" }
             require(it.statusCode in 100..599) { "Seed status must be between 100 and 599" }
+            require(it.delayMillis >= 0) { "Seed delay must not be negative" }
         }
         seedMutex.withLock {
             _seeds.value = seeds.toList()

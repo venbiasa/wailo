@@ -86,11 +86,13 @@ class WailoMcpServiceTest {
                     "url_pattern" to "https://example.com/*",
                     "method" to "GET",
                     "status_code" to 201,
+                    "delay_ms" to 250,
                     "body_text" to """{"ok":true}""",
                 ),
             )
             assertFalse(mapLocal.isError)
             assertEquals("fixture", engine.rules.value.rules.single().id)
+            assertEquals(250, host.mapLocalRules.value.single().delayMillis)
             assertEquals(201, engine.bodyProvider?.serve("fixture", "https://example.com/a", "GET")?.code)
 
             val filter = service.call(
@@ -205,6 +207,12 @@ class WailoMcpServiceTest {
                     ),
                 ).isError,
             )
+            assertTrue(
+                service.call(
+                    "set_seed",
+                    mapOf("id" to "bad-delay", "url_pattern" to "*", "delay_ms" to -1),
+                ).isError,
+            )
             assertTrue(service.call("resume_hold", mapOf("correlation_id" to "missing")).isError)
             assertTrue(service.call("remove_breakpoint", mapOf("id" to "missing")).isError)
         } finally {
@@ -223,6 +231,7 @@ class WailoMcpServiceTest {
                     "id" to "fixture",
                     "name" to "Profile 500",
                     "url_pattern" to "https://example.com/*",
+                    "delay_ms" to 425,
                     "headers" to listOf(mapOf("name" to "Content-Type", "value" to "text/plain")),
                     "body_text" to "hello world",
                 ),
@@ -231,6 +240,7 @@ class WailoMcpServiceTest {
             val listed = service.call("list_map_local", emptyMap()).rules().single()
             assertFalse(listed.containsKey("body"))
             assertEquals("Profile 500", listed["name"])
+            assertEquals(425, listed["delay_ms"])
             assertEquals(11, listed["body_bytes"])
 
             val full = service.call("get_map_local", mapOf("id" to "fixture")).body()
@@ -260,6 +270,7 @@ class WailoMcpServiceTest {
                         "id" to "poll-1",
                         "url_pattern" to "https://example.com/poll",
                         "status_code" to 202,
+                        "delay_ms" to 700,
                         "headers" to listOf(mapOf("name" to "Content-Type", "value" to "text/plain")),
                         "body_text" to "pending",
                     ),
@@ -268,6 +279,7 @@ class WailoMcpServiceTest {
             val authored = service.call("list_seeds", emptyMap()).seeds().single()
             assertFalse(authored.containsKey("body"))
             assertEquals(false, authored["armed"])
+            assertEquals(700, authored["delay_ms"])
             assertEquals(7, authored["body_bytes"])
 
             assertEquals(1, service.call("fill_seeds", emptyMap()).data["armed"])

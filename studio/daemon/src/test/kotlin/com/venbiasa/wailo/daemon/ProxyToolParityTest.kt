@@ -18,6 +18,7 @@ import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
+import kotlin.system.measureTimeMillis
 import kotlinx.coroutines.runBlocking
 
 /**
@@ -47,6 +48,7 @@ class ProxyToolParityTest {
                     id = "m1",
                     urlPattern = "http://127.0.0.1:$deadPort/*",
                     statusCode = 201,
+                    delayMillis = 150,
                     headers = listOf(Header("Content-Type", "application/json")),
                     body = """{"mapped":true}""".toByteArray(),
                 ),
@@ -54,10 +56,14 @@ class ProxyToolParityTest {
         }
         startProxy()
 
-        val response = get("http://127.0.0.1:$deadPort/thing")
+        lateinit var response: String
+        val elapsed = measureTimeMillis {
+            response = get("http://127.0.0.1:$deadPort/thing")
+        }
 
         assertTrue(response.startsWith("HTTP/1.1 201"), response)
         assertTrue(response.endsWith("""{"mapped":true}"""), response)
+        assertTrue(elapsed >= 120, "Map Local returned after ${elapsed}ms")
         val row = awaitRow()
         assertEquals(CaptureSource.PROXY, row.source)
         assertEquals(201, row.exchange.response?.code)
@@ -70,15 +76,27 @@ class ProxyToolParityTest {
             host.upsertBreakpointRule(
                 HostBreakpointRule(id = "b1", urlPattern = "http://127.0.0.1:${origin.port}/*", onResponse = true),
             )
-            host.upsertSeed(HostSeed(id = "s1", urlPattern = "http://127.0.0.1:${origin.port}/*", statusCode = 503, body = "seeded".toByteArray()))
+            host.upsertSeed(
+                HostSeed(
+                    id = "s1",
+                    urlPattern = "http://127.0.0.1:${origin.port}/*",
+                    statusCode = 503,
+                    delayMillis = 150,
+                    body = "seeded".toByteArray(),
+                ),
+            )
             host.fillSeeds()
         }
         startProxy()
 
-        val response = get("http://127.0.0.1:${origin.port}/poll")
+        lateinit var response: String
+        val elapsed = measureTimeMillis {
+            response = get("http://127.0.0.1:${origin.port}/poll")
+        }
 
         assertTrue(response.startsWith("HTTP/1.1 503"), response)
         assertTrue(response.endsWith("seeded"), response)
+        assertTrue(elapsed >= 120, "Seed returned after ${elapsed}ms")
         assertTrue(host.listHolds().isEmpty(), "the spend must release the hold")
     }
 

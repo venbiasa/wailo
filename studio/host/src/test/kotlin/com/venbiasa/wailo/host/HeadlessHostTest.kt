@@ -55,6 +55,7 @@ class HeadlessHostTest {
                     id = "seed",
                     urlPattern = "https://example.com/*",
                     statusCode = 202,
+                    delayMillis = 350,
                     body = "{}".toByteArray(),
                 ),
             )
@@ -71,6 +72,7 @@ class HeadlessHostTest {
             assertEquals(BreakpointAction.BREAKPOINT_ACTION_PROCEED, decision.action)
             assertEquals(202, decision.edited_response?.code)
             assertEquals("{}", decision.edited_response?.body?.utf8())
+            assertEquals(350, decision.delay_ms)
             assertTrue(host.seedQueue.value.isEmpty())
             // Spending removes it from the run, never from the library it was armed out of.
             assertEquals("seed", host.seeds.value.single().id)
@@ -92,6 +94,7 @@ class HeadlessHostTest {
                     urlPattern = "https://api.example.com/*",
                     method = "GET",
                     statusCode = 201,
+                    delayMillis = 450,
                     headers = listOf(Header(name = "Content-Type", value_ = "application/json")),
                     body = """{"ok":true}""".toByteArray(),
                 ),
@@ -101,6 +104,7 @@ class HeadlessHostTest {
             val served = engine.bodyProvider?.serve("fixture", "https://api.example.com/items", "GET")
             assertNotNull(served)
             assertEquals(201, served.code)
+            assertEquals(450, served.delayMillis)
             assertEquals("""{"ok":true}""", served.body.decodeToString())
             assertEquals(
                 served.body.size.toString(),

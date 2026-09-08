@@ -32,6 +32,7 @@ class ResponseRuleSaveStateTest {
                         urlPattern = "https://api.example.com/v1/*",
                         method = "GET",
                         statusCode = 200,
+                        delayMillis = 120,
                         headers = listOf(ResponseHeader("Content-Type", "application/json")),
                     ),
                     initialName = "Login",
@@ -53,7 +54,7 @@ class ResponseRuleSaveStateTest {
         waitUntilExactlyOneExists(hasText("Saved"))
         onNodeWithText("Save").assertIsNotEnabled()
 
-        onNodeWithText("https://api.example.com/v1/*").performTextInput("x")
+        onNodeWithText("120").performTextInput("5")
 
         waitUntilExactlyOneExists(hasText("Unsaved changes"))
         onNodeWithText("Save").assertIsEnabled()

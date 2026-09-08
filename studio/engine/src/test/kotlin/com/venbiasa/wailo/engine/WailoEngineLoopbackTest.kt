@@ -241,6 +241,7 @@ class WailoEngineLoopbackTest {
                     code = 201,
                     headers = listOf(Header(name = "Content-Type", value_ = "text/plain")),
                     body = "mapped!".toByteArray(),
+                    delayMillis = 450,
                 )
             } else {
                 null
@@ -254,6 +255,7 @@ class WailoEngineLoopbackTest {
         assertTrue(response.found)
         assertEquals(201, response.code)
         assertEquals("mapped!", response.body.utf8())
+        assertEquals(450, response.delay_ms)
         assertEquals("Content-Type", response.headers.first().name)
     }
 

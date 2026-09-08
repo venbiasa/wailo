@@ -102,11 +102,12 @@ object MapLocalLayoutCodec {
         encodeHeaders(rule.headers),
         if (rule.inline) "1" else "0",
         enc(rule.name),
+        rule.delayMillis.toString(),
     ).joinToString(FIELD_SEP)
 
     private fun decodeRule(parts: List<String>): MapLocalRuleDef? {
-        // 7 fields = pre-inline (file-backed) legacy, 8 = pre-name, 9 = current.
-        if (parts.size !in 7..9) return null
+        // 7 fields = pre-inline legacy, 8 = pre-name, 9 = pre-delay, 10 = current.
+        if (parts.size !in 7..10) return null
         return MapLocalRuleDef(
             id = parts[0],
             // Rules saved before names existed migrate to "Untitled" (a blank name can't be saved now).
@@ -117,6 +118,7 @@ object MapLocalLayoutCodec {
             method = dec(parts[3]).substringBefore(METHOD_SEP).trim(),
             filePath = dec(parts[4]),
             statusCode = parts[5].toIntOrNull() ?: 200,
+            delayMillis = if (parts.size >= 10) parts[9].toIntOrNull()?.coerceAtLeast(0) ?: 0 else 0,
             headers = decodeHeaders(parts[6]),
             inline = parts.size >= 8 && parts[7] == "1",
         )

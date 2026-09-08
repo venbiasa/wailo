@@ -12,6 +12,7 @@ class SeedLayoutTest {
         url: String = "https://x/$id",
         method: String = "",
         statusCode: Int = 200,
+        delayMillis: Int = 0,
         headers: List<ResponseHeader> = emptyList(),
     ) = SeedRuleDef(
         id = id,
@@ -19,6 +20,7 @@ class SeedLayoutTest {
         urlPattern = url,
         method = method,
         statusCode = statusCode,
+        delayMillis = delayMillis,
         headers = headers,
     )
 
@@ -36,6 +38,7 @@ class SeedLayoutTest {
                         url = "https://a/pay",
                         method = "POST",
                         statusCode = 402,
+                        delayMillis = 1_250,
                         headers = listOf(ResponseHeader("Content-Type", "application/json"), ResponseHeader("X-Trace", "abc")),
                     ),
                     seed("s3", enabled = false),
@@ -67,6 +70,14 @@ class SeedLayoutTest {
     fun codecEmptyStringIsEmptyLayout() {
         assertEquals(emptyList(), SeedLayoutCodec.decode(""))
         assertEquals("", SeedLayoutCodec.encode(emptyList()))
+    }
+
+    @Test
+    fun aPreDelayLineDefaultsToNoDelay() {
+        val current = SeedLayoutCodec.encode(listOf(RuleNode(seed("s1", delayMillis = 500))))
+        val preDelay = current.substringBeforeLast('|')
+
+        assertEquals(0, SeedLayoutCodec.decode(preDelay).findRule("s1")?.delayMillis)
     }
 
     @Test

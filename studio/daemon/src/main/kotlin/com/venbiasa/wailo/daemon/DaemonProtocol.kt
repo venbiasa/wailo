@@ -28,7 +28,7 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import okio.ByteString.Companion.toByteString
 
-internal const val DAEMON_CONTROL_PROTOCOL_VERSION = 16
+internal const val DAEMON_CONTROL_PROTOCOL_VERSION = 17
 
 /**
  * The one command whose socket is not answered and closed. The daemon holds it open and counts it as a
@@ -313,6 +313,7 @@ internal data class MapLocalRuleDto(
      */
     val methods: List<String>? = null,
     val statusCode: Int,
+    val delayMillis: Int = 0,
     val headers: List<HeaderDto>,
     val bodySize: Int = 0,
     val bodyHash: String = "",
@@ -333,6 +334,7 @@ internal data class MapLocalRuleDto(
         urlPattern = urlPattern,
         method = collapsedMethod(method, methods),
         statusCode = statusCode,
+        delayMillis = delayMillis,
         headers = headers.map(HeaderDto::toDomain),
         body = body,
         // The reference, not the bytes handed in: the daemon derives both when it adopts a layout, so
@@ -394,6 +396,7 @@ internal data class SeedRuleDto(
     val urlPattern: String,
     val method: String,
     val statusCode: Int,
+    val delayMillis: Int = 0,
     val headers: List<HeaderDto>,
     val bodySize: Int = 0,
     val bodyHash: String = "",
@@ -405,6 +408,7 @@ internal data class SeedRuleDto(
         urlPattern = urlPattern,
         method = method,
         statusCode = statusCode,
+        delayMillis = delayMillis,
         headers = headers.map(HeaderDto::toDomain),
         body = body,
         bodySize = bodySize,
@@ -794,6 +798,7 @@ internal fun HostMapLocalRule.toDto() = MapLocalRuleDto(
     urlPattern = urlPattern,
     method = method,
     statusCode = statusCode,
+    delayMillis = delayMillis,
     headers = headers.map { HeaderDto(it.name, it.value_) },
     // Carried, not recomputed: a frontend publishing a layout holds bytes only for the rules it is
     // changing, and the daemon derives the reference for every rule as it adopts them anyway.
@@ -817,6 +822,7 @@ internal fun HostSeed.toDto() = SeedRuleDto(
     urlPattern = urlPattern,
     method = method,
     statusCode = statusCode,
+    delayMillis = delayMillis,
     headers = headers.map { HeaderDto(it.name, it.value_) },
     bodySize = bodySize,
     bodyHash = bodyHash,

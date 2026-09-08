@@ -140,7 +140,12 @@ class MapLocalLayoutTest {
             GroupNode(
                 group("g1", name = "Auth", enabled = false),
                 listOf(
-                    rule("r2", name = "Login").copy(method = "POST", statusCode = 201, headers = listOf(ResponseHeader("Content-Type", "application/json"))),
+                    rule("r2", name = "Login").copy(
+                        method = "POST",
+                        statusCode = 201,
+                        delayMillis = 750,
+                        headers = listOf(ResponseHeader("Content-Type", "application/json")),
+                    ),
                     rule("r3", name = "Me"),
                 ),
             ),
@@ -168,9 +173,21 @@ class MapLocalLayoutTest {
 
     @Test
     fun legacyPreNameLineMigratesToUntitled() {
-        // Drop the trailing name field from a prefix-less 9-field line -> an 8-field pre-name legacy line.
-        val nineFields = MapLocalLayoutCodec.encode(listOf(RuleNode(rule("rN", name = "Dropped")))).removePrefix("R|")
-        val eightFields = nineFields.substringBeforeLast('|')
+        val current = MapLocalLayoutCodec.encode(listOf(RuleNode(rule("rN", name = "Dropped")))).removePrefix("R|")
+        val eightFields = current.substringBeforeLast('|').substringBeforeLast('|')
         assertEquals("Untitled", MapLocalLayoutCodec.decode(eightFields).findRule("rN")?.name)
+    }
+
+    @Test
+    fun legacyPreDelayLineDefaultsToNoDelay() {
+        val current = MapLocalLayoutCodec.encode(
+            listOf(RuleNode(rule("rD", name = "Existing").copy(delayMillis = 500))),
+        ).removePrefix("R|")
+        val preDelay = current.substringBeforeLast('|')
+
+        val decoded = MapLocalLayoutCodec.decode(preDelay).findRule("rD")
+
+        assertEquals("Existing", decoded?.name)
+        assertEquals(0, decoded?.delayMillis)
     }
 }

@@ -76,6 +76,7 @@ class DaemonLayoutAdoptionTest {
                     urlPattern = "https://example.com/profile",
                     method = "GET",
                     statusCode = 500,
+                    delayMillis = 700,
                     headers = listOf(ResponseHeader("Content-Type", "application/json")),
                     inline = true,
                 ),
@@ -135,6 +136,7 @@ class DaemonLayoutAdoptionTest {
                 urlPattern = rule.urlPattern,
                 method = rule.method,
                 statusCode = rule.statusCode,
+                delayMillis = rule.delayMillis,
                 headers = rule.headers + Header(name = "Content-Length", value_ = "4"),
                 bodySize = 4,
             )
@@ -144,7 +146,7 @@ class DaemonLayoutAdoptionTest {
     }
 
     private val seeds: List<SeedNode> = listOf(
-        RuleNode(SeedRuleDef(id = "poll", urlPattern = "https://example.com/poll", method = "GET")),
+        RuleNode(SeedRuleDef(id = "poll", urlPattern = "https://example.com/poll", method = "GET", delayMillis = 900)),
     )
 
     @Test

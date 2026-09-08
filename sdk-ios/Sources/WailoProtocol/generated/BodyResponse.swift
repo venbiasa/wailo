@@ -14,6 +14,10 @@ public struct BodyResponse {
     public var code: Int32
     public var headers: [Header] = []
     public var body: Foundation.Data
+    /**
+     * Fixed latency applied by the device after the fixture arrives, before the app receives it.
+     */
+    public var delay_ms: Int32
     public var unknownFields: UnknownFields = .init()
 
     public init(
@@ -21,12 +25,14 @@ public struct BodyResponse {
         found: Bool,
         code: Int32,
         body: Foundation.Data,
+        delay_ms: Int32,
         configure: (inout Self) -> Swift.Void = { _ in }
     ) {
         self.correlation_id = correlation_id
         self.found = found
         self.code = code
         self.body = body
+        self.delay_ms = delay_ms
         configure(&self)
     }
 
@@ -61,6 +67,7 @@ extension BodyResponse : Proto3Codable {
         var code: Int32 = 0
         var headers: [Header] = []
         var body: Foundation.Data = .init()
+        var delay_ms: Int32 = 0
 
         let token = try protoReader.beginMessage()
         while let tag = try protoReader.nextTag(token: token) {
@@ -70,6 +77,7 @@ extension BodyResponse : Proto3Codable {
             case 3: code = try protoReader.decode(Int32.self, encoding: .variable)
             case 4: try protoReader.decode(into: &headers)
             case 5: body = try protoReader.decode(Foundation.Data.self)
+            case 6: delay_ms = try protoReader.decode(Int32.self, encoding: .variable)
             default: try protoReader.readUnknownField(tag: tag)
             }
         }
@@ -80,6 +88,7 @@ extension BodyResponse : Proto3Codable {
         self.code = code
         self.headers = headers
         self.body = body
+        self.delay_ms = delay_ms
     }
 
     public func encode(to protoWriter: ProtoWriter) throws {
@@ -88,6 +97,7 @@ extension BodyResponse : Proto3Codable {
         try protoWriter.encode(tag: 3, value: self.code, encoding: .variable)
         try protoWriter.encode(tag: 4, value: self.headers)
         try protoWriter.encode(tag: 5, value: self.body)
+        try protoWriter.encode(tag: 6, value: self.delay_ms, encoding: .variable)
         try protoWriter.writeUnknownFields(unknownFields)
     }
 
@@ -103,6 +113,7 @@ extension BodyResponse : Codable {
         self.code = try container.decode(Int32.self, forKey: "code")
         self.headers = try container.decodeProtoArray(Header.self, forKey: "headers")
         self.body = try container.decode(stringEncoded: Foundation.Data.self, forKey: "body")
+        self.delay_ms = try container.decode(Int32.self, firstOfKeys: "delayMs", "delay_ms")
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -124,6 +135,9 @@ extension BodyResponse : Codable {
         }
         if includeDefaults || !self.body.isEmpty {
             try container.encode(stringEncoded: self.body, forKey: "body")
+        }
+        if includeDefaults || self.delay_ms != 0 {
+            try container.encode(self.delay_ms, forKey: preferCamelCase ? "delayMs" : "delay_ms")
         }
     }
 

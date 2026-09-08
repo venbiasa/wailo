@@ -65,14 +65,15 @@ import org.jetbrains.compose.resources.vectorResource
 
 /**
  * The response a rule editor authors, independent of which feature owns the rule: what it matches
- * ([urlPattern]/[method]) and what it answers with ([statusCode]/[headers], plus the body the editor
- * hands back separately as bytes). Map Local and Seed both fill this in; only Map Local adds a name
- * on top of it.
+ * ([urlPattern]/[method]) and what it answers with ([statusCode]/[delayMillis]/[headers], plus the body
+ * the editor hands back separately as bytes). Map Local and Seed both fill this in; only Map Local adds
+ * a name on top of it.
  */
 internal data class ResponseDraft(
     val urlPattern: String,
     val method: String,
     val statusCode: Int,
+    val delayMillis: Int = 0,
     val headers: List<ResponseHeader>,
 )
 
@@ -116,6 +117,7 @@ internal fun ResponseRuleEditor(
     var urlPattern by remember { mutableStateOf(initial.urlPattern) }
     var method by remember { mutableStateOf(initial.method) }
     var statusCode by remember { mutableStateOf(initial.statusCode.toString()) }
+    var delayMillis by remember { mutableStateOf(initial.delayMillis.toString()) }
     val headers = remember { initial.headers.toMutableStateList() }
     var editorTab by remember { mutableStateOf(EditorTab.Body) }
     var saving by remember { mutableStateOf(false) }
@@ -123,14 +125,16 @@ internal fun ResponseRuleEditor(
     // Validate on Save, not while typing: nothing flashes red until the user actually attempts a save.
     // [showErrors] flips on the first invalid attempt; from then on the offending fields reveal their
     // error live (computed instantly) so they clear as the user fixes them. A named rule needs a name to
-    // identify it in the list; the status code must be a real HTTP status (100–599); a URL pattern is
-    // required to match against.
+    // identify it in the list; the status code must be a real HTTP status (100–599); delay is a
+    // non-negative millisecond count; and a URL pattern is required to match against.
     var showErrors by remember { mutableStateOf(false) }
     val nameInvalid = named && name.isBlank()
     val statusCodeInvalid = statusCode.toIntOrNull().let { it == null || it !in VALID_STATUS_CODES }
+    val delayInvalid = delayMillis.toIntOrNull().let { it == null || it < 0 }
     val urlInvalid = urlPattern.isBlank()
     val nameError = showErrors && nameInvalid
     val statusCodeError = showErrors && statusCodeInvalid
+    val delayError = showErrors && delayInvalid
     val urlError = showErrors && urlInvalid
 
     val scope = rememberCoroutineScope()
@@ -165,7 +169,7 @@ internal fun ResponseRuleEditor(
                 // condition until it does — the same answer each case settles on, so nothing flickers.
                 ?: return@derivedStateOf if (openedClean) SaveState.Saved else SaveState.Fresh
             val differs = name != last.name || urlPattern != last.urlPattern || method != last.method ||
-                statusCode != last.statusCode ||
+                statusCode != last.statusCode || delayMillis != last.delayMillis ||
                 // Copied out before comparing, never compared in place: SnapshotStateList implements
                 // MutableList without AbstractList's structural equals, so holding one up against a stored
                 // copy is an identity check that can never hold.
@@ -215,6 +219,7 @@ internal fun ResponseRuleEditor(
                 urlPattern = initial.urlPattern,
                 method = initial.method,
                 statusCode = initial.statusCode.toString(),
+                delayMillis = initial.delayMillis.toString(),
                 headers = initial.headers,
                 bodyRevision = editorState.revision,
                 imageBytes = imageBytes,
@@ -257,9 +262,8 @@ internal fun ResponseRuleEditor(
 
     fun save() {
         if (saving) return
-        // Validate on submit: reveal the field errors and abort if anything's off (an unnamed rule, an
-        // out-of-range status code, or a missing URL pattern), otherwise persist.
-        if (nameInvalid || statusCodeInvalid || urlInvalid) {
+        // Validate on submit: reveal the field errors and abort if anything's off, otherwise persist.
+        if (nameInvalid || statusCodeInvalid || delayInvalid || urlInvalid) {
             showErrors = true
             return
         }
@@ -268,6 +272,7 @@ internal fun ResponseRuleEditor(
             urlPattern = urlPattern.trim(),
             method = method,
             statusCode = statusCode.toIntOrNull() ?: 200,
+            delayMillis = delayMillis.toIntOrNull() ?: 0,
             // Drop half-authored rows (no name); trim so stray spaces don't ride into the wire header.
             headers = headers.filter { it.name.isNotBlank() }.map { ResponseHeader(it.name.trim(), it.value.trim()) },
         )
@@ -280,6 +285,7 @@ internal fun ResponseRuleEditor(
         val typedUrl = urlPattern
         val typedMethod = method
         val typedStatus = statusCode
+        val typedDelay = delayMillis
         val typedHeaders = headers.toList()
         scope.launch {
             try {
@@ -297,7 +303,16 @@ internal fun ResponseRuleEditor(
                     }
                 }
                 onSave(typedName.trim(), draft, bytes)
-                saved = SavedRule(typedName, typedUrl, typedMethod, typedStatus, typedHeaders, bodyRevision, bodyImage)
+                saved = SavedRule(
+                    typedName,
+                    typedUrl,
+                    typedMethod,
+                    typedStatus,
+                    typedDelay,
+                    typedHeaders,
+                    bodyRevision,
+                    bodyImage,
+                )
             } finally {
                 // The page outlives the save, so a failed one has to hand the button back.
                 saving = false
@@ -375,9 +390,7 @@ internal fun ResponseRuleEditor(
                     isError = urlError,
                 )
             }
-            // Both fields hug their content and sit together at the start of the row rather than
-            // stretching across it — Method fits the selected verb, Status code fits three digits (a
-            // min width keeps it from collapsing as you type).
+            // Compact fields hug their content at the start of the row rather than stretching across it.
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 LabeledField("Method") {
                     MethodDropdown(method = method, onSelect = { method = it })
@@ -392,6 +405,18 @@ internal fun ResponseRuleEditor(
                         modifier = Modifier.widthIn(min = 64.dp),
                         placeholder = "200",
                         isError = statusCodeError,
+                    )
+                }
+                LabeledField(
+                    "Delay (ms)",
+                    error = if (delayError) "0 or more" else null,
+                ) {
+                    CompactOutlinedTextField(
+                        value = delayMillis,
+                        onValueChange = { next -> delayMillis = next.filter { it.isDigit() } },
+                        modifier = Modifier.widthIn(min = 80.dp),
+                        placeholder = "0",
+                        isError = delayError,
                     )
                 }
             }
@@ -455,6 +480,7 @@ private class SavedRule(
     val urlPattern: String,
     val method: String,
     val statusCode: String,
+    val delayMillis: String,
     val headers: List<ResponseHeader>,
     val bodyRevision: Int,
     val imageBytes: ByteArray?,

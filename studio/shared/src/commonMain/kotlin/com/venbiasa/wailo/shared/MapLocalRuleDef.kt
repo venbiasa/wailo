@@ -13,7 +13,8 @@ import kotlin.random.Random
  * [method] restricts the rule to that single HTTP method; blank means any. [statusCode] and [headers]
  * shape the synthesized response; [headers] carries Content-Type (there is no separate field for it) —
  * if none is set the daemon infers Content-Type from the body, and it always sets Content-Length from
- * the served bytes, so a hand-entered length is ignored.
+ * the served bytes, so a hand-entered length is ignored. [delayMillis] adds fixed latency before the
+ * response reaches the intercepted caller.
  *
  * [inline] and [filePath] are what remains of the original design, where a rule could serve the user's
  * own file re-read per request. Serving moved to the daemon, which made every rule a snapshot, so an
@@ -28,6 +29,7 @@ data class MapLocalRuleDef(
     val method: String = "",
     val filePath: String = "",
     val statusCode: Int = 200,
+    val delayMillis: Int = 0,
     val headers: List<ResponseHeader> = emptyList(),
     val inline: Boolean = false,
 ) : LayoutRule<MapLocalRuleDef> {

@@ -412,7 +412,7 @@ class WailoClient(
         }
         return try {
             val response = future.get(bodyTimeoutMs, TimeUnit.MILLISECONDS)
-            if (response != null && response.found) {
+            if (response != null && response.found && waitForResponseDelay(response.delay_ms)) {
                 WailoMappedResponse(code = response.code, headers = response.headers, body = response.body)
             } else {
                 null
@@ -462,9 +462,19 @@ class WailoClient(
         } ?: return WailoResponseDecision.Proceed(null)
         return if (decision.action == BreakpointAction.BREAKPOINT_ACTION_ABORT) {
             WailoResponseDecision.Abort
+        } else if (!waitForResponseDelay(decision.delay_ms)) {
+            WailoResponseDecision.Proceed(null)
         } else {
             WailoResponseDecision.Proceed(decision.edited_response)
         }
+    }
+
+    private fun waitForResponseDelay(delayMillis: Int): Boolean = try {
+        if (delayMillis > 0) Thread.sleep(delayMillis.toLong())
+        true
+    } catch (_: InterruptedException) {
+        Thread.currentThread().interrupt()
+        false
     }
 
     // Stream a breakpoint hit and block on the desktop's decision. No timeout — a human is deciding —

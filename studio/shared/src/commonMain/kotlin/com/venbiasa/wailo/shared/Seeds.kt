@@ -12,7 +12,8 @@ import kotlin.random.Random
  * as the breakpoint's decision. Order is priority *and* sequence: the armed queue is walked top-down, the
  * first match wins, and it is then spent — so two seeds for the same URL answer two successive requests
  * differently. This type is only the panel's copy; the daemon owns the library that actually answers, and
- * spends it with or without a window open (ADR-0067). `HostSeed` is that copy.
+ * spends it with or without a window open (ADR-0067). [delayMillis] adds fixed latency before the
+ * response reaches the intercepted caller. `HostSeed` is that copy.
  */
 data class SeedRuleDef(
     override val id: String,
@@ -20,6 +21,7 @@ data class SeedRuleDef(
     val urlPattern: String = "",
     val method: String = "",
     val statusCode: Int = 200,
+    val delayMillis: Int = 0,
     val headers: List<ResponseHeader> = emptyList(),
 ) : LayoutRule<SeedRuleDef> {
     override fun withEnabled(enabled: Boolean): SeedRuleDef = copy(enabled = enabled)

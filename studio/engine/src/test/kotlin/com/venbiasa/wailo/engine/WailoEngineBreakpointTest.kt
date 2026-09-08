@@ -175,6 +175,7 @@ class WailoEngineBreakpointTest {
                 engine.resumeBreakpoint(
                     "c1",
                     editedRequest = HttpRequest(method = "POST", url = "https://example.com/edited"),
+                    delayMillis = 275,
                 )
                 for (frame in incoming) {
                     if (frame !is Frame.Binary) continue
@@ -192,6 +193,7 @@ class WailoEngineBreakpointTest {
         assertEquals(BreakpointAction.BREAKPOINT_ACTION_PROCEED, decision.action)
         assertEquals("POST", decision.edited_request?.method)
         assertEquals("https://example.com/edited", decision.edited_request?.url)
+        assertEquals(275, decision.delay_ms)
         assertTrue(engine.pausedExchanges.value.isEmpty(), "a resumed hold must leave the paused list")
     }
 

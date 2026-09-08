@@ -39,6 +39,7 @@ class DaemonIntegrationTest {
                     HostMapLocalRule(
                         id = "shared",
                         urlPattern = "https://example.com/*",
+                        delayMillis = 325,
                         body = "fixture".toByteArray(),
                     ),
                 )
@@ -51,6 +52,8 @@ class DaemonIntegrationTest {
 
                 assertFalse(second.capturing.value)
                 assertEquals("shared", harness.host.mapLocalRules.value.single().id)
+                assertEquals(325, second.mapLocalRules.value.single().delayMillis)
+                assertEquals(325, harness.host.mapLocalRules.value.single().delayMillis)
                 assertFalse(harness.host.engine.capturing.value)
             } finally {
                 first.close()
@@ -737,12 +740,14 @@ class DaemonIntegrationTest {
                     HostSeed(
                         id = "shared",
                         urlPattern = "https://example.com/*",
+                        delayMillis = 475,
                         body = "canned".toByteArray(),
                     ),
                 )
                 withTimeout(5_000) {
                     while (observer.seeds.value.none { it.id == "shared" }) delay(25)
                 }
+                assertEquals(475, observer.seeds.value.single().delayMillis)
                 assertEquals("canned", observer.readRuleBody(RULE_FAMILY_SEEDS, "shared").decodeToString())
                 // Nothing is armed until an explicit fill, so the observer can tell "authored" from "in play".
                 assertTrue(observer.seedQueue.value.isEmpty())

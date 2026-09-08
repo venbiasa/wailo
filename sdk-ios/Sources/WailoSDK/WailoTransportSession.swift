@@ -300,8 +300,12 @@ final class WailoTransportSession: CaptureSink, WailoBodyFetcher, WailoBreakpoin
             self.pendingBreakpoints[correlationId] = { decision in
                 guard let decision else { completion(.proceed(nil)); return }
                 switch decision.action {
-                case .BREAKPOINT_ACTION_ABORT: completion(.abort)
-                default: completion(.proceed(decision.edited_response))
+                case .BREAKPOINT_ACTION_ABORT:
+                    completion(.abort)
+                default:
+                    self.afterResponseDelay(decision.delay_ms) {
+                        completion(.proceed(decision.edited_response))
+                    }
                 }
             }
             self.sendControl(Envelope {
@@ -369,10 +373,22 @@ final class WailoTransportSession: CaptureSink, WailoBodyFetcher, WailoBreakpoin
 
     private func resolvePending(_ response: BodyResponse) {
         guard let completion = pending.removeValue(forKey: response.correlation_id) else { return }
-        if response.found {
-            completion(WailoMappedResponse(code: Int(response.code), headers: response.headers, body: response.body))
-        } else {
+        guard response.found else {
             completion(nil)
+            return
+        }
+        let result = WailoMappedResponse(code: Int(response.code), headers: response.headers, body: response.body)
+        afterResponseDelay(response.delay_ms) {
+            completion(result)
+        }
+    }
+
+    private func afterResponseDelay(_ milliseconds: Int32, perform action: @escaping () -> Void) {
+        let delay = max(0, Int(milliseconds))
+        if delay == 0 {
+            action()
+        } else {
+            queue.asyncAfter(deadline: .now() + .milliseconds(delay), execute: action)
         }
     }
 

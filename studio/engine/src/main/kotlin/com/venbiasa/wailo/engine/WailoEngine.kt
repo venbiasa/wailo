@@ -122,11 +122,12 @@ private sealed interface HoldRoute {
     class Local(val deliver: (BreakpointDecision) -> Unit) : HoldRoute
 }
 
-/** A synthesized Map Local response the desktop serves for a matched request (ADR-0019). */
+/** A synthesized Map Local response and the latency its capture endpoint applies (ADR-0019). */
 class ServedBody(
     val code: Int,
     val headers: List<Header>,
     val body: ByteArray,
+    val delayMillis: Int = 0,
 )
 
 /**
@@ -853,6 +854,7 @@ class WailoEngine(
                 code = served.code,
                 headers = served.headers,
                 body = served.body.toByteString(),
+                delay_ms = served.delayMillis,
             )
         } else {
             BodyResponse(correlation_id = request.correlation_id, found = false)
@@ -880,7 +882,8 @@ class WailoEngine(
 
     /**
      * Release a paused exchange, letting the device proceed — with [editedRequest] on a request-phase
-     * hit or [editedResponse] on a response-phase hit (null = proceed with the device's original). A
+     * hit or [editedResponse] on a response-phase hit (null = proceed with the device's original).
+     * [delayMillis] is applied by the capture endpoint before a response-phase proceed is delivered.
      * Returns false if the correlation id is unknown (already released by a disconnect), so a headless
      * caller does not report a successful decision for a hold that no longer exists.
      */
@@ -888,6 +891,7 @@ class WailoEngine(
         correlationId: String,
         editedRequest: HttpRequest? = null,
         editedResponse: HttpResponse? = null,
+        delayMillis: Int = 0,
     ): Boolean =
         sendDecision(
             BreakpointDecision(
@@ -895,6 +899,7 @@ class WailoEngine(
                 action = BreakpointAction.BREAKPOINT_ACTION_PROCEED,
                 edited_request = editedRequest,
                 edited_response = editedResponse,
+                delay_ms = delayMillis,
             ),
         )
 

@@ -90,6 +90,7 @@ object SeedLayoutCodec {
         enc(rule.method),
         rule.statusCode.toString(),
         encodeHeaders(rule.headers),
+        rule.delayMillis.toString(),
     ).joinToString(FIELD_SEP)
 
     private fun decodeRule(parts: List<String>): SeedRuleDef? {
@@ -100,6 +101,7 @@ object SeedLayoutCodec {
             urlPattern = dec(parts[2]),
             method = dec(parts[3]),
             statusCode = parts[4].toIntOrNull() ?: 200,
+            delayMillis = parts.getOrNull(6)?.toIntOrNull()?.coerceAtLeast(0) ?: 0,
             headers = decodeHeaders(parts[5]),
         )
     }

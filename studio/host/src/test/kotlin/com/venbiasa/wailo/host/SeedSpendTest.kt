@@ -20,12 +20,14 @@ class SeedSpendTest {
         url: String,
         method: String = "",
         status: Int = 200,
+        delayMillis: Int = 0,
         body: ByteArray = """{"ok":true}""".toByteArray(),
     ) = HostSeed(
         id = id,
         urlPattern = url,
         method = method,
         statusCode = status,
+        delayMillis = delayMillis,
         body = body,
     )
 
@@ -76,7 +78,7 @@ class SeedSpendTest {
     fun anEmptyBodyStillAnswersTheHold() = runBlocking {
         var served: HttpResponse? = null
         val queue = listOf(seed("a", "https://x/poll", body = ByteArray(0)))
-        val result = spendSeedOn(queue, hold()) { _, response ->
+        val result = spendSeedOn(queue, hold()) { _, response, _ ->
             served = response
             true
         }
@@ -103,6 +105,7 @@ class SeedSpendTest {
             id = "s",
             urlPattern = "https://x/*",
             statusCode = 201,
+            delayMillis = 625,
             headers = listOf(
                 Header(name = "Content-Type", value_ = "application/json"),
                 // Authored by hand and now wrong for the bytes actually sent.
@@ -111,8 +114,10 @@ class SeedSpendTest {
             body = """{"ok":true}""".toByteArray(),
         )
         var served: HttpResponse? = null
-        val spent = spendSeedOn(listOf(seed), hold()) { _, response ->
+        var delayMillis = 0
+        val spent = spendSeedOn(listOf(seed), hold()) { _, response, delay ->
             served = response
+            delayMillis = delay
             true
         }
         assertTrue(spent!!.isEmpty())
@@ -121,5 +126,6 @@ class SeedSpendTest {
         assertEquals("application/json", response.headers.single { it.name == "Content-Type" }.value_)
         assertEquals("11", response.headers.single { it.name == "Content-Length" }.value_)
         assertEquals("""{"ok":true}""", response.body.utf8())
+        assertEquals(625, delayMillis)
     }
 }

@@ -16,6 +16,7 @@ class RuleArchiveTest {
         urlPattern = "https://api.example.com/$id",
         method = "GET",
         statusCode = 201,
+        delayMillis = 650,
         headers = listOf(ResponseHeader("Content-Type", "application/json")),
         inline = true,
     )
@@ -52,6 +53,7 @@ class RuleArchiveTest {
         assertEquals("https://api.example.com/r1", restored.urlPattern)
         assertEquals("GET", restored.method)
         assertEquals(201, restored.statusCode)
+        assertEquals(650, restored.delayMillis)
         assertEquals(listOf(ResponseHeader("Content-Type", "application/json")), restored.headers)
         assertFalse(nodes.findRule("r4")!!.enabled)
     }
@@ -82,6 +84,7 @@ class RuleArchiveTest {
         val decoded = RuleArchiveCodec.decode(forwardCompatible)
         assertNotNull(decoded)
         assertEquals(listOf("r1"), decoded.mapLocalLayout().allRules().map { it.id })
+        assertEquals(0, decoded.mapLocalLayout().findRule("r1")?.delayMillis)
     }
 
     @Test
@@ -207,7 +210,7 @@ class RuleArchiveTest {
             RuleNode(BreakpointRuleDef(id = "bp1", urlPattern = "https://x/*", onRequest = true, onResponse = false)),
         )
         val seeds = listOf<SeedNode>(
-            RuleNode(SeedRuleDef(id = "s1", urlPattern = "https://y/*", statusCode = 503)),
+            RuleNode(SeedRuleDef(id = "s1", urlPattern = "https://y/*", statusCode = 503, delayMillis = 900)),
         )
         val archive = RuleArchive(
             breakpoints = ArchivedSection(nodes = breakpoints.toArchivedNodes { it.toArchived() }),
@@ -224,5 +227,6 @@ class RuleArchiveTest {
         assertFalse(bp.onResponse)
         val seed = decoded.seeds!!.nodes.toLayoutNodes { it.toRuleDef() }.findRule("s1")!!
         assertEquals(503, seed.statusCode)
+        assertEquals(900, seed.delayMillis)
     }
 }

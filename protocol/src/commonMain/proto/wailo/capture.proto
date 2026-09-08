@@ -116,6 +116,8 @@ message BodyResponse {
   int32 code = 3;
   repeated Header headers = 4;
   bytes body = 5;
+  // Fixed latency applied by the device after the fixture arrives, before the app receives it.
+  int32 delay_ms = 6;
 }
 
 // --- Breakpoints (desktop <-> device control channel) ---
@@ -185,4 +187,6 @@ message BreakpointDecision {
   BreakpointAction action = 2;
   HttpRequest edited_request = 3;
   HttpResponse edited_response = 4;
+  // Fixed latency applied by the capture endpoint before a response-phase PROCEED is delivered.
+  int32 delay_ms = 5;
 }

@@ -237,7 +237,8 @@ final class WailoClientLoopbackTests: XCTestCase {
                 let decision = Envelope {
                     $0.message = .breakpoint_decision(BreakpointDecision(
                         correlation_id: hit.correlation_id,
-                        action: .BREAKPOINT_ACTION_PROCEED
+                        action: .BREAKPOINT_ACTION_PROCEED,
+                        delay_ms: 0
                     ) {
                         $0.edited_request = HttpRequest(
                             method: "POST",
@@ -281,6 +282,79 @@ final class WailoClientLoopbackTests: XCTestCase {
         }
         XCTAssertEqual(edited?.method, "POST")
         XCTAssertEqual(edited?.url, "https://edited.test/x")
+        server.stop()
+    }
+
+    func testResponseBreakpointDecisionAppliesDelay() throws {
+        let server = LoopbackWebSocketServer()
+        let port = try server.start()
+        let helloReceived = expectation(description: "hello")
+        helloReceived.assertForOverFulfill = false
+        server.onEnvelope = { [weak server] envelope in
+            switch envelope.message {
+            case .hello:
+                helloReceived.fulfill()
+            case let .breakpoint_hit(hit):
+                let decision = Envelope {
+                    $0.message = .breakpoint_decision(BreakpointDecision(
+                        correlation_id: hit.correlation_id,
+                        action: .BREAKPOINT_ACTION_PROCEED,
+                        delay_ms: 150
+                    ) {
+                        $0.edited_response = HttpResponse(
+                            code: 202,
+                            message: "",
+                            body: Data(),
+                            body_size: 0,
+                            body_truncated: false
+                        )
+                    })
+                }
+                if let data = try? ProtoEncoder().encode(decision) { server?.push(data) }
+            default:
+                break
+            }
+        }
+
+        let client = WailoClient(
+            hello: Hello(device_name: "test", app_id: "com.test", platform: "ios"),
+            url: loopbackURL(port)
+        )
+        client.start()
+        defer { client.stopAndWaitForTeardown() }
+        wait(for: [helloReceived], timeout: 10)
+
+        let resolved = expectation(description: "decision resolved")
+        var decided: WailoResponseDecision?
+        let started = Date()
+        client.pauseResponse(
+            ruleId: "bp",
+            request: HttpRequest(
+                method: "GET",
+                url: "https://bp.test/x",
+                body: Data(),
+                body_size: 0,
+                body_truncated: false
+            ),
+            response: HttpResponse(
+                code: 500,
+                message: "",
+                body: Data(),
+                body_size: 0,
+                body_truncated: false
+            )
+        ) { decision in
+            decided = decision
+            resolved.fulfill()
+        }
+        wait(for: [resolved], timeout: 10)
+
+        guard case let .proceed(edited) = decided else {
+            XCTFail("expected proceed with edits, got \(String(describing: decided))")
+            return
+        }
+        XCTAssertEqual(edited?.code, 202)
+        XCTAssertGreaterThanOrEqual(Date().timeIntervalSince(started), 0.12)
         server.stop()
     }
 
@@ -344,7 +418,8 @@ final class WailoClientLoopbackTests: XCTestCase {
                         correlation_id: request.correlation_id,
                         found: true,
                         code: 201,
-                        body: Data("mapped!".utf8)
+                        body: Data("mapped!".utf8),
+                        delay_ms: 150
                     ) {
                         $0.headers = [Header(name: "Content-Type", value: "text/plain")]
                     })
@@ -365,6 +440,7 @@ final class WailoClientLoopbackTests: XCTestCase {
 
         let fetched = expectation(description: "body fetched")
         var mapped: WailoMappedResponse?
+        let started = Date()
         client.fetchBody(ruleId: "r1", url: "https://x.test/y", method: "GET") { result in
             mapped = result
             fetched.fulfill()
@@ -373,6 +449,7 @@ final class WailoClientLoopbackTests: XCTestCase {
 
         XCTAssertEqual(mapped?.code, 201)
         XCTAssertEqual(mapped.map { String(decoding: $0.body, as: UTF8.self) }, "mapped!")
+        XCTAssertGreaterThanOrEqual(Date().timeIntervalSince(started), 0.12)
         server.stop()
     }
 

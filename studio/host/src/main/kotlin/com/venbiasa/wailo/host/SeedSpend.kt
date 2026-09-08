@@ -9,8 +9,8 @@ import okio.ByteString.Companion.toByteString
 
 /**
  * A canned response that answers a held exchange on the host (ADR-0041). UI-free twin of the desktop
- * `SeedRuleDef`: match on a URL wildcard + optional method, answer with status / headers / body. Never
- * pushed to a device — a hold is already a desktop round-trip, so the seed is resolved here.
+ * `SeedRuleDef`: match on a URL wildcard + optional method, answer with status / delay / headers / body.
+ * Never pushed to a device — a hold is already a desktop round-trip, so the seed is resolved here.
  *
  * The bytes ride along rather than being fetched through a callback, because the daemon owns the seed
  * library now and every frontend reads it from there (ADR-0067) — and holds the only copy of them
@@ -22,6 +22,7 @@ class HostSeed(
     val urlPattern: String = "",
     val method: String = "",
     val statusCode: Int = 200,
+    val delayMillis: Int = 0,
     headers: List<Header> = emptyList(),
     body: ByteArray = ByteArray(0),
     /** The daemon's body described rather than carried, exactly as on `HostMapLocalRule` (ADR-0086). */
@@ -65,17 +66,17 @@ suspend fun spendSeedOn(
     engine: WailoEngine,
     queue: List<HostSeed>,
     hold: PausedExchange,
-): List<HostSeed>? = spendSeedOn(queue, hold) { correlationId, response ->
-    engine.resumeBreakpoint(correlationId, null, response)
+): List<HostSeed>? = spendSeedOn(queue, hold) { correlationId, response, delayMillis ->
+    engine.resumeBreakpoint(correlationId, null, response, delayMillis)
 }
 
 suspend fun spendSeedOn(
     queue: List<HostSeed>,
     hold: PausedExchange,
-    resume: suspend (correlationId: String, response: HttpResponse) -> Boolean,
+    resume: suspend (correlationId: String, response: HttpResponse, delayMillis: Int) -> Boolean,
 ): List<HostSeed>? {
     if (hold.phase != BreakpointPhase.BREAKPOINT_PHASE_RESPONSE) return null
     val seed = queue.firstMatch(hold.request?.url.orEmpty(), hold.request?.method.orEmpty()) ?: return null
-    if (!resume(hold.correlationId, seed.toResponse())) return null
+    if (!resume(hold.correlationId, seed.toResponse(), seed.delayMillis)) return null
     return queue.consume(seed)
 }

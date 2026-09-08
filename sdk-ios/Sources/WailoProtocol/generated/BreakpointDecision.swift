@@ -14,15 +14,21 @@ public struct BreakpointDecision {
     public var action: BreakpointAction
     public var edited_request: HttpRequest?
     public var edited_response: HttpResponse?
+    /**
+     * Fixed latency applied by the capture endpoint before a response-phase PROCEED is delivered.
+     */
+    public var delay_ms: Int32
     public var unknownFields: UnknownFields = .init()
 
     public init(
         correlation_id: String,
         action: BreakpointAction,
+        delay_ms: Int32,
         configure: (inout Self) -> Swift.Void = { _ in }
     ) {
         self.correlation_id = correlation_id
         self.action = action
+        self.delay_ms = delay_ms
         configure(&self)
     }
 
@@ -56,6 +62,7 @@ extension BreakpointDecision : Proto3Codable {
         var action: BreakpointAction? = nil
         var edited_request: HttpRequest? = nil
         var edited_response: HttpResponse? = nil
+        var delay_ms: Int32 = 0
 
         let token = try protoReader.beginMessage()
         while let tag = try protoReader.nextTag(token: token) {
@@ -64,6 +71,7 @@ extension BreakpointDecision : Proto3Codable {
             case 2: action = try protoReader.decode(BreakpointAction.self)
             case 3: edited_request = try protoReader.decode(HttpRequest.self)
             case 4: edited_response = try protoReader.decode(HttpResponse.self)
+            case 5: delay_ms = try protoReader.decode(Int32.self, encoding: .variable)
             default: try protoReader.readUnknownField(tag: tag)
             }
         }
@@ -73,6 +81,7 @@ extension BreakpointDecision : Proto3Codable {
         self.action = try BreakpointAction.defaultIfMissing(action)
         self.edited_request = edited_request
         self.edited_response = edited_response
+        self.delay_ms = delay_ms
     }
 
     public func encode(to protoWriter: ProtoWriter) throws {
@@ -80,6 +89,7 @@ extension BreakpointDecision : Proto3Codable {
         try protoWriter.encode(tag: 2, value: self.action)
         try protoWriter.encode(tag: 3, value: self.edited_request)
         try protoWriter.encode(tag: 4, value: self.edited_response)
+        try protoWriter.encode(tag: 5, value: self.delay_ms, encoding: .variable)
         try protoWriter.writeUnknownFields(unknownFields)
     }
 
@@ -94,6 +104,7 @@ extension BreakpointDecision : Codable {
         self.action = try container.decode(BreakpointAction.self, forKey: "action")
         self.edited_request = try container.decodeIfPresent(HttpRequest.self, firstOfKeys: "editedRequest", "edited_request")
         self.edited_response = try container.decodeIfPresent(HttpResponse.self, firstOfKeys: "editedResponse", "edited_response")
+        self.delay_ms = try container.decode(Int32.self, firstOfKeys: "delayMs", "delay_ms")
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -109,6 +120,9 @@ extension BreakpointDecision : Codable {
         }
         try container.encodeIfPresent(self.edited_request, forKey: preferCamelCase ? "editedRequest" : "edited_request")
         try container.encodeIfPresent(self.edited_response, forKey: preferCamelCase ? "editedResponse" : "edited_response")
+        if includeDefaults || self.delay_ms != 0 {
+            try container.encode(self.delay_ms, forKey: preferCamelCase ? "delayMs" : "delay_ms")
+        }
     }
 
 }

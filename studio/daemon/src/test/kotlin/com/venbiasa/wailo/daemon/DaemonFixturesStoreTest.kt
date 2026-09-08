@@ -21,6 +21,7 @@ class DaemonFixturesStoreTest {
             val rule = HostMapLocalRule(
                 id = "login",
                 urlPattern = "https://example.com/login",
+                delayMillis = 600,
                 bodySize = body.size,
                 bodyHash = bodyDigest(body),
             )
@@ -40,6 +41,7 @@ class DaemonFixturesStoreTest {
             val node = loaded.resolvedNodes().single()
             assertEquals(DaemonRuleGroup("g1", "Checkout", enabled = false), node.group)
             assertEquals("login", node.rules.single().id)
+            assertEquals(600, node.rules.single().delayMillis)
             assertEquals(body.size, node.rules.single().bodySize)
             assertEquals(bodyDigest(body), node.rules.single().bodyHash)
             assertFalse(Files.readString(file).contains(body.encodeBase64()))

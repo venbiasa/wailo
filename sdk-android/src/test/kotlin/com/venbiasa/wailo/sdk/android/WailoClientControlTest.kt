@@ -10,6 +10,7 @@ import com.venbiasa.wailo.protocol.Envelope
 import com.venbiasa.wailo.protocol.Header
 import com.venbiasa.wailo.protocol.Hello
 import com.venbiasa.wailo.protocol.HttpRequest
+import com.venbiasa.wailo.protocol.HttpResponse
 import com.venbiasa.wailo.protocol.MapLocalRule
 import com.venbiasa.wailo.protocol.RuleSet
 import io.ktor.server.application.install
@@ -155,6 +156,7 @@ class WailoClientControlTest {
                                             code = 200,
                                             headers = listOf(Header("Content-Type", "application/json")),
                                             body = "mocked".encodeUtf8(),
+                                            delay_ms = 150,
                                         ),
                                     ).encode(),
                                 ),
@@ -168,11 +170,14 @@ class WailoClientControlTest {
         val client = WailoClient(hello = hello(), host = "localhost", port = port).also { it.start() }
         try {
             withTimeout(10_000) { helloSeen.await() }
+            val started = System.nanoTime()
             val mapped = withContext(Dispatchers.IO) {
                 client.fetchBody(ruleId = "r1", url = "https://api.example.com/x", method = "GET")
             }
+            val elapsedMillis = (System.nanoTime() - started) / 1_000_000
             assertEquals(200, mapped?.code)
             assertEquals("mocked", mapped?.body?.utf8())
+            assertTrue("Body response returned after ${elapsedMillis}ms", elapsedMillis >= 120)
         } finally {
             client.stop()
             server.stop(0, 0)
@@ -219,6 +224,59 @@ class WailoClientControlTest {
             val proceed = decision as WailoRequestDecision.Proceed
             assertEquals("PUT", proceed.edited?.method)
             assertEquals("https://api.example.com/edited", proceed.edited?.url)
+        } finally {
+            client.stop()
+            server.stop(0, 0)
+        }
+    }
+
+    @Test
+    fun responseBreakpointAppliesDecisionDelay() = runBlocking {
+        val helloSeen = CompletableDeferred<Unit>()
+        val port = 18997
+        val server = embeddedServer(CIO, port = port) {
+            install(WebSockets)
+            routing {
+                webSocket("/") {
+                    for (frame in incoming) {
+                        if (frame !is Frame.Binary) continue
+                        val env = Envelope.ADAPTER.decode(frame.readBytes())
+                        env.hello?.let { helloSeen.complete(Unit) }
+                        env.breakpoint_hit?.let { hit ->
+                            send(
+                                Frame.Binary(
+                                    true,
+                                    Envelope(
+                                        breakpoint_decision = BreakpointDecision(
+                                            correlation_id = hit.correlation_id,
+                                            action = BreakpointAction.BREAKPOINT_ACTION_PROCEED,
+                                            edited_response = HttpResponse(code = 202),
+                                            delay_ms = 150,
+                                        ),
+                                    ).encode(),
+                                ),
+                            )
+                        }
+                    }
+                }
+            }
+        }.also { it.start(wait = false) }
+
+        val client = WailoClient(hello = hello(), host = "localhost", port = port).also { it.start() }
+        try {
+            withTimeout(10_000) { helloSeen.await() }
+            val started = System.nanoTime()
+            val decision = withContext(Dispatchers.IO) {
+                client.pauseResponse(
+                    ruleId = "b1",
+                    request = HttpRequest(method = "GET", url = "https://api.example.com/x"),
+                    response = HttpResponse(code = 500),
+                )
+            }
+            val elapsedMillis = (System.nanoTime() - started) / 1_000_000
+            val proceed = decision as WailoResponseDecision.Proceed
+            assertEquals(202, proceed.edited?.code)
+            assertTrue("Breakpoint response returned after ${elapsedMillis}ms", elapsedMillis >= 120)
         } finally {
             client.stop()
             server.stop(0, 0)

@@ -543,6 +543,7 @@ internal class WailoMcpService(
         val pattern = arguments.requiredString("url_pattern")
         val body = arguments.optionalBody()
         val statusCode = arguments.int("status_code", 200).inRange("status_code", 100..599)
+        val delayMillis = arguments.int("delay_ms", 0).inRange("delay_ms", 0..Int.MAX_VALUE)
         val groupId = arguments.string("group_id")
         val method = arguments.method()
         backend.upsertMapLocalRule(
@@ -553,6 +554,7 @@ internal class WailoMcpService(
                 urlPattern = pattern,
                 method = method.value,
                 statusCode = statusCode,
+                delayMillis = delayMillis,
                 headers = arguments.headers(),
                 body = body ?: ByteArray(0),
             ),
@@ -565,6 +567,7 @@ internal class WailoMcpService(
                 "method" to method.value,
                 "body_bytes" to (body?.size ?: 0),
                 "status_code" to statusCode,
+                "delay_ms" to delayMillis,
                 "group_id" to backend.groupIdByRule(RULE_FAMILY_MAP_LOCAL)[id].orEmpty(),
             ),
         )
@@ -666,6 +669,7 @@ internal class WailoMcpService(
         "url_pattern" to rule.urlPattern,
         "method" to rule.method,
         "status_code" to rule.statusCode,
+        "delay_ms" to rule.delayMillis,
         "headers" to rule.headers.map(::headerData),
         "body_bytes" to rule.bodySize,
         // Blank for an ungrouped rule. A rule in a group that is switched off already reads enabled
@@ -818,6 +822,7 @@ internal class WailoMcpService(
         val id = arguments.requiredString("id")
         val body = arguments.optionalBody()
         val statusCode = arguments.int("status_code", 200).inRange("status_code", 100..599)
+        val delayMillis = arguments.int("delay_ms", 0).inRange("delay_ms", 0..Int.MAX_VALUE)
         backend.upsertSeed(
             HostSeed(
                 id = id,
@@ -825,6 +830,7 @@ internal class WailoMcpService(
                 urlPattern = arguments.requiredString("url_pattern"),
                 method = arguments.string("method").orEmpty(),
                 statusCode = statusCode,
+                delayMillis = delayMillis,
                 headers = arguments.headers(),
                 body = body ?: ByteArray(0),
             ),
@@ -837,6 +843,7 @@ internal class WailoMcpService(
                 "id" to id,
                 "body_bytes" to (body?.size ?: 0),
                 "status_code" to statusCode,
+                "delay_ms" to delayMillis,
                 "armed" to false,
                 "group_id" to backend.groupIdByRule(RULE_FAMILY_SEEDS)[id].orEmpty(),
             ),
@@ -856,6 +863,7 @@ internal class WailoMcpService(
         "url_pattern" to seed.urlPattern,
         "method" to seed.method,
         "status_code" to seed.statusCode,
+        "delay_ms" to seed.delayMillis,
         "headers" to seed.headers.map(::headerData),
         "body_bytes" to seed.bodySize,
         // Being in the library is not being in play: a seed answers one hold and is then spent, so this

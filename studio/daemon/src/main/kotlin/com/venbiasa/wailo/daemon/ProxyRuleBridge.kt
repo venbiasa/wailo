@@ -66,6 +66,7 @@ internal class HostProxyRules(private val host: HeadlessHost) : ProxyRules {
         val decision = await(client, BreakpointPhase.BREAKPOINT_PHASE_RESPONSE, outgoing, mapped)
             ?: return RequestVerdict.Abort
         if (decision.action == BreakpointAction.BREAKPOINT_ACTION_ABORT) return RequestVerdict.Abort
+        if (!waitForDelay(decision.delay_ms)) return RequestVerdict.Abort
         return RequestVerdict.Respond(decision.edited_response ?: mapped)
     }
 
@@ -73,6 +74,7 @@ internal class HostProxyRules(private val host: HeadlessHost) : ProxyRules {
         val decision = await(client, BreakpointPhase.BREAKPOINT_PHASE_RESPONSE, request, response)
             ?: return ResponseVerdict.Proceed()
         if (decision.action == BreakpointAction.BREAKPOINT_ACTION_ABORT) return ResponseVerdict.Abort
+        if (!waitForDelay(decision.delay_ms)) return ResponseVerdict.Abort
         return ResponseVerdict.Proceed(decision.edited_response)
     }
 
@@ -130,12 +132,21 @@ internal class HostProxyRules(private val host: HeadlessHost) : ProxyRules {
         } ?: return null
         val provider = host.engine.bodyProvider ?: return null
         val served = runBlocking { provider.serve(rule.id, request.url, request.method) } ?: return null
+        if (!waitForDelay(served.delayMillis)) return null
         return HttpResponse(
             code = served.code,
             headers = served.headers,
             body = served.body.toByteString(),
             body_size = served.body.size.toLong(),
         )
+    }
+
+    private fun waitForDelay(delayMillis: Int): Boolean = try {
+        if (delayMillis > 0) Thread.sleep(delayMillis.toLong())
+        true
+    } catch (_: InterruptedException) {
+        Thread.currentThread().interrupt()
+        false
     }
 
     private companion object {

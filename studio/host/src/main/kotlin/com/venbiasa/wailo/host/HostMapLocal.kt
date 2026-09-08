@@ -23,6 +23,7 @@ class HostMapLocalRule(
      */
     val method: String = "",
     val statusCode: Int = 200,
+    val delayMillis: Int = 0,
     headers: List<Header> = emptyList(),
     body: ByteArray = ByteArray(0),
     /**
@@ -57,6 +58,7 @@ class HostMapLocalRule(
             code = statusCode,
             headers = normalizedHeaders(headers, bodyBytes.size),
             body = bodyBytes.copyOf(),
+            delayMillis = delayMillis,
         )
     }
 }

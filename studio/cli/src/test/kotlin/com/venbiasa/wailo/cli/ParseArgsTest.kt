@@ -77,6 +77,7 @@ class ParseArgsTest {
         assertNull(parseArgs(arrayOf("serve", "--port", "0")))
         assertNull(parseArgs(arrayOf("wait_exchange", "--timeout", "-1")))
         assertNull(parseArgs(arrayOf("list_exchanges", "--limit", "0")))
+        assertNull(parseArgs(arrayOf("set_seed", "--delay-ms", "-1")))
     }
 
     // A seed is authored exactly like a Map Local rule, so it reuses the same flags rather than growing
@@ -90,6 +91,7 @@ class ParseArgsTest {
                 "--url-pattern", "https://example.com/poll",
                 "--method", "GET",
                 "--status", "202",
+                "--delay-ms", "750",
                 "--header", "Content-Type: application/json",
                 "--body-text", """{"state":"pending"}""",
             ),
@@ -98,6 +100,7 @@ class ParseArgsTest {
         assertEquals("https://example.com/poll", parsed.urlPattern)
         assertEquals("GET", parsed.method)
         assertEquals(202, parsed.statusCode)
+        assertEquals(750, parsed.delayMillis)
         assertEquals(listOf("Content-Type: application/json"), parsed.headers)
         assertEquals("""{"state":"pending"}""", parsed.bodyText)
     }
