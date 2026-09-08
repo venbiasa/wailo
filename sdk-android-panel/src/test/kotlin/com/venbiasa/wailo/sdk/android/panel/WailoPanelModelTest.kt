@@ -33,7 +33,7 @@ class WailoPanelModelTest {
         )
 
         assertEquals("Connected", model.statusTitle)
-        assertEquals("adb", model.transportLabel)
+        assertEquals("ADB", model.transportLabel)
         assertTrue(model.statusDetail.contains("adb reverse"))
         // The loopback link is authenticated by the cable, not by a key — saying "Paired" here would
         // claim something the handshake never proved.
@@ -128,6 +128,21 @@ class WailoPanelModelTest {
         assertFalse(model.canApply)
         model.editPort("8899")
         assertTrue(model.canApply)
+    }
+
+    @Test
+    fun `Use discovery can clear a filled suggestion before it is connected`() {
+        val model = model()
+        assertFalse(model.canUseDiscovery)
+
+        model.editHost("10.0.0.2")
+        model.editPort("8899")
+        assertTrue(model.canUseDiscovery)
+
+        model.useDiscovery()
+        assertEquals("", model.host)
+        assertEquals("", model.port)
+        assertFalse(model.canUseDiscovery)
     }
 
     @Test

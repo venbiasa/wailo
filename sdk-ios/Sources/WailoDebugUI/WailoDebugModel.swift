@@ -101,7 +101,8 @@ final class WailoDebugModel: ObservableObject {
 
     var transportLabel: String? {
         guard isStarted else { return nil }
-        return isUsb ? "USB" : "LAN"
+        if isUsb { return "USB" }
+        return isSimulatorConnection ? "Simulator" : "Wi-Fi"
     }
 
     var statusDetail: String {
@@ -117,6 +118,9 @@ final class WailoDebugModel: ObservableObject {
         if isUsb { return "Studio is attached over the cable; the Wi-Fi connection is paused until it unplugs." }
         switch connectionPhase {
         case .connected:
+            if isSimulatorConnection {
+                return "Reached through this Mac. The Simulator connects without pairing."
+            }
             return isUsingDiscovery ? "Found over Bonjour." : "Pinned to a manual address."
         case .authenticating:
             return "Studio proved its identity; this device is proving its Studio-scoped relationship."
@@ -168,6 +172,12 @@ final class WailoDebugModel: ObservableObject {
 
     var canApply: Bool {
         !host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !isTargetActive
+    }
+
+    var canUseDiscovery: Bool {
+        return !isUsingDiscovery
+            || !host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || !port.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     /// Whether the field already names what is being dialled. Connect has nothing left to do then, and
@@ -311,8 +321,17 @@ final class WailoDebugModel: ObservableObject {
     /// Whether a paired Studio is what the SDK is actually talking to. USB and the Simulator connect
     /// without pairing, so "connected" alone must not be read as "pairing worked".
     var isPairedConnection: Bool {
-        guard isConnected, !isUsb else { return false }
+        guard isConnected, !isUsb, !isSimulatorConnection else { return false }
         return pairings.contains { !$0.refused }
+    }
+
+    private var isSimulatorConnection: Bool {
+        #if targetEnvironment(simulator)
+        guard let host = WailoAddress(activeAddress)?.host.lowercased() else { return false }
+        return ["localhost", "127.0.0.1", "::1", "[::1]"].contains(host)
+        #else
+        return false
+        #endif
     }
 
     var cameraAvailability: WailoCameraAvailability { WailoCamera.availability }

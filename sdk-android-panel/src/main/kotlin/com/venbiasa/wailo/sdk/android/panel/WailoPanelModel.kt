@@ -198,7 +198,7 @@ internal class WailoPanelModel(initial: WailoStatus = Wailo.status.value) {
         }
 
     val transportLabel: String?
-        get() = if (!isStarted) null else if (status.handshakeWaived) "adb" else "Wi-Fi"
+        get() = if (!isStarted) null else if (status.handshakeWaived) "ADB" else "Wi-Fi"
 
     val statusDetail: String
         get() = when {
@@ -229,6 +229,7 @@ internal class WailoPanelModel(initial: WailoStatus = Wailo.status.value) {
         get() = status.connected && !status.handshakeWaived && status.pairings.any { !it.refused }
 
     val canApply: Boolean get() = host.isNotBlank() && !isTargetActive
+    val canUseDiscovery: Boolean get() = !isUsingDiscovery || host.isNotBlank() || port.isNotBlank()
 
     /**
      * Whether the field already names what is being dialled. Connect has nothing left to do then, and an

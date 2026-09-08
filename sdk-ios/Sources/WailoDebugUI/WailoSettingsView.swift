@@ -76,7 +76,14 @@ struct WailoSettingsView: View {
                             .foregroundColor(WailoTokens.onSurfaceVariant)
                     }
                     Spacer()
-                    model.transportLabel.map(Chip.init)
+                    HStack(spacing: WailoTokens.Spacing.x1) {
+                        if let transport = model.transportLabel {
+                            Chip(transport)
+                        }
+                        if model.isPairedConnection {
+                            Chip("Paired", tone: WailoTokens.success)
+                        }
+                    }
                 }
                 .padding(WailoTokens.Spacing.x4)
 
@@ -105,14 +112,18 @@ struct WailoSettingsView: View {
             VStack(alignment: .leading, spacing: WailoTokens.Spacing.x3) {
                 pairingForm
 
-                if let message = model.pairingError ?? model.refusal {
+                if let message = model.pairingError {
                     Text(message)
                         .font(WailoTokens.Typography.bodySmall)
                         .foregroundColor(WailoTokens.error)
                         .fixedSize(horizontal: false, vertical: true)
                 }
 
-                Text("Only Wi-Fi needs this, and only when Studio is set to accept paired devices. USB and the Simulator reach Studio through this machine, so they connect without pairing.")
+                Text("\(WailoPairingCode.length) characters; expires after two minutes.")
+                    .font(WailoTokens.Typography.labelSmall)
+                    .foregroundColor(WailoTokens.onSurfaceDisabled)
+
+                Text("Pairing is only needed over Wi-Fi when Studio accepts only paired devices. USB and the Simulator reach Studio through this machine, so they connect without pairing.")
                     .font(WailoTokens.Typography.bodySmall)
                     .foregroundColor(WailoTokens.onSurfaceVariant)
                     .fixedSize(horizontal: false, vertical: true)
@@ -162,6 +173,7 @@ struct WailoSettingsView: View {
             ForEach(model.pairableDesktops) { desktop in
                 CodeTargetRow(
                     name: desktop.name,
+                    address: desktop.address,
                     selected: desktop.studioId == model.codeTarget?.studioId
                 ) {
                     model.codeTarget = desktop
@@ -215,7 +227,7 @@ struct WailoSettingsView: View {
                 ActionButton(
                     title: "Use discovery",
                     style: .ghost,
-                    enabled: !model.isUsingDiscovery,
+                    enabled: model.canUseDiscovery,
                     action: model.useDiscovery
                 )
             }
@@ -231,10 +243,10 @@ struct WailoSettingsView: View {
     private var addressFields: some View {
         HStack(alignment: .top, spacing: WailoTokens.Spacing.x3) {
             LabeledField(
-                label: "Desktop IP",
+                label: "Desktop address",
                 placeholder: "192.168.1.20",
                 text: $model.host,
-                keyboard: .numbersAndPunctuation,
+                keyboard: .URL,
                 isInvalid: model.hostError != nil
             )
             LabeledField(
@@ -370,6 +382,7 @@ private struct Hairline: View {
 private struct CodeTargetRow: View {
 
     let name: String
+    let address: String
     let selected: Bool
     let onSelect: () -> Void
 
@@ -380,9 +393,14 @@ private struct CodeTargetRow: View {
                     .strokeBorder(WailoTokens.outline, lineWidth: 1)
                     .background(Circle().fill(selected ? WailoTokens.accent : Color.clear))
                     .frame(width: 12, height: 12)
-                Text(name)
-                    .font(WailoTokens.Typography.bodySmall)
-                    .foregroundColor(WailoTokens.onSurface)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(name)
+                        .font(WailoTokens.Typography.bodySmall)
+                        .foregroundColor(WailoTokens.onSurface)
+                    Text(address)
+                        .font(WailoTokens.Typography.labelSmall)
+                        .foregroundColor(WailoTokens.onSurfaceVariant)
+                }
                 Spacer()
             }
             .contentShape(Rectangle())
@@ -569,15 +587,25 @@ private struct WailoScannerSheet: View {
 private struct Chip: View {
 
     let title: String
+    let tone: Color?
+
+    init(_ title: String, tone: Color? = nil) {
+        self.title = title
+        self.tone = tone
+    }
 
     var body: some View {
         Text(title)
             .font(WailoTokens.Typography.labelSmall)
-            .foregroundColor(WailoTokens.onSurfaceVariant)
+            .foregroundColor(tone ?? WailoTokens.onSurfaceVariant)
             .padding(.horizontal, WailoTokens.Spacing.x2)
             .padding(.vertical, WailoTokens.Spacing.x1)
             .background(WailoTokens.surfaceVariant)
             .cornerRadius(WailoTokens.Radius.sm)
+            .overlay(
+                RoundedRectangle(cornerRadius: WailoTokens.Radius.sm)
+                    .stroke(tone ?? Color.clear, lineWidth: 1)
+            )
     }
 }
 

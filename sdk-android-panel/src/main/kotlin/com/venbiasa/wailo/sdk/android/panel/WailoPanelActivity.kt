@@ -6,9 +6,7 @@ import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.compose.foundation.layout.imePadding
-import androidx.compose.foundation.layout.systemBarsPadding
-import androidx.compose.ui.Modifier
+import androidx.activity.enableEdgeToEdge
 
 /**
  * The on-device panel for re-pointing Wailo at a different desktop, and for pairing with one over Wi-Fi.
@@ -20,11 +18,10 @@ import androidx.compose.ui.Modifier
 class WailoPanelActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        enableEdgeToEdge()
         super.onCreate(savedInstanceState)
         setContent {
-            // Insets are handled here rather than by the window: a host targeting SDK 35 or later gets
-            // edge-to-edge forced on, which would otherwise put the title under the status bar.
-            WailoPanelScreen(Modifier.systemBarsPadding().imePadding(), onClose = ::finish)
+            WailoPanelActivityScreen(onClose = ::finish)
         }
     }
 }
