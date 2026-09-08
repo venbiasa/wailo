@@ -1,6 +1,7 @@
 package com.venbiasa.wailo.shared.ui
 
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -319,6 +320,86 @@ class CodeEditorSurfaceTest {
         scrollPastTheArrayOpener()
 
         assertEquals(0, onAllNodesWithText(ARRAY_OPENER).fetchSemanticsNodes().size)
+    }
+
+    @OptIn(ExperimentalTestApi::class)
+    @Test
+    fun findInOneDiffPaneKeepsBothRowGridsLevel() = runComposeUiTest {
+        val leftLine = "left row"
+        val rightLine = "right row"
+        setContent {
+            WailoTheme(darkTheme = false) {
+                val leftState = rememberCodeEditorState("$leftLine\nleft second")
+                val rightState = rememberCodeEditorState("$rightLine\nright second")
+                val leftList = rememberLazyListState()
+                val rightList = rememberLazyListState()
+                val hScroll = rememberScrollState()
+                val findBarSlot = remember { SynchronizedFindBarSlot() }
+                Row(Modifier.size(640.dp, 300.dp)) {
+                    CodeEditor(
+                        state = leftState,
+                        language = CodeLanguage.PlainText,
+                        readOnly = true,
+                        modifier = Modifier.weight(1f).fillMaxSize(),
+                        decor = CodeEditorDecor(
+                            listState = leftList,
+                            hScroll = hScroll,
+                            wrap = true,
+                            lineNumber = { it + 1 },
+                            otherLength = { rightState.lineAt(it).length },
+                            otherMaxLength = rightState.maxLineLength,
+                            rowTint = { null },
+                            spanRange = { null },
+                            spanTint = Color.Transparent,
+                            verticalScrollbar = false,
+                            foldSpans = emptyMap(),
+                            foldArrows = emptyMap(),
+                            foldedRows = emptySet(),
+                            onToggleFold = {},
+                            findBarSlot = findBarSlot,
+                        ),
+                    )
+                    CodeEditor(
+                        state = rightState,
+                        language = CodeLanguage.PlainText,
+                        readOnly = true,
+                        modifier = Modifier.weight(1f).fillMaxSize(),
+                        decor = CodeEditorDecor(
+                            listState = rightList,
+                            hScroll = hScroll,
+                            wrap = true,
+                            lineNumber = { it + 1 },
+                            otherLength = { leftState.lineAt(it).length },
+                            otherMaxLength = leftState.maxLineLength,
+                            rowTint = { null },
+                            spanRange = { null },
+                            spanTint = Color.Transparent,
+                            verticalScrollbar = true,
+                            foldSpans = emptyMap(),
+                            foldArrows = emptyMap(),
+                            foldedRows = emptySet(),
+                            onToggleFold = {},
+                            findBarSlot = findBarSlot,
+                        ),
+                    )
+                }
+            }
+        }
+
+        fun topOf(text: String) = onNodeWithText(text).getUnclippedBoundsInRoot().top
+        val initialTop = topOf(leftLine)
+        assertEquals(initialTop, topOf(rightLine))
+
+        onNodeWithText(leftLine).performClick()
+        onNode(isFocused()).performKeyInput { withKeyDown(Key.CtrlLeft) { pressKey(Key.F) } }
+        waitForIdle()
+
+        assertEquals(topOf(leftLine), topOf(rightLine), "opening Find must move both row grids together")
+
+        onNodeWithContentDescription("Close find").performClick()
+        waitForIdle()
+        assertEquals(initialTop, topOf(leftLine))
+        assertEquals(initialTop, topOf(rightLine))
     }
 
     /**

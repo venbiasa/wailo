@@ -34,6 +34,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
@@ -148,6 +149,9 @@ private const val MAX_CONTENT_WIDTH_PX = 200_000f
  * is this side's own openers (mapped to its closing bracket), so the gutter offers a control only where this
  * document really opens a block and the `⋯ }` chip is only drawn over a real bracket. [foldedRows] is shared,
  * since one arrow folds both columns.
+ *
+ * [findBarSlot] reserves the same top strip in both panes while either pane is finding, so their row grids
+ * keep the same visual origin.
  */
 internal class CodeEditorDecor(
     val listState: LazyListState,
@@ -166,7 +170,26 @@ internal class CodeEditorDecor(
     val foldArrows: Map<Int, Char>,
     val foldedRows: Set<Int>,
     val onToggleFold: (Int) -> Unit,
+    val findBarSlot: SynchronizedFindBarSlot? = null,
 )
+
+internal class SynchronizedFindBarSlot {
+    private var openOwners by mutableStateOf(emptySet<Any>())
+
+    var heightPx by mutableStateOf(0)
+        private set
+
+    val visible: Boolean
+        get() = openOwners.isNotEmpty()
+
+    fun setOpen(owner: Any, open: Boolean) {
+        openOwners = if (open) openOwners + owner else openOwners - owner
+    }
+
+    fun recordHeight(height: Int) {
+        if (height > 0) heightPx = height
+    }
+}
 
 /**
  * The code editor (ADR-0023): a [LazyColumn] of highlighted lines over the state's [EditorBuffer], so only
@@ -246,6 +269,12 @@ internal fun CodeEditor(
     // Bumped by every find that landed on a match, so a diff pane can put the hit on screen even though the
     // query field — not the pane — holds focus. See the reveal effect below.
     var findReveals by remember { mutableStateOf(0) }
+    val findBarSlot = decor?.findBarSlot
+    val findBarOwner = remember { Any() }
+    DisposableEffect(findBarSlot, findBarOwner, findOpen) {
+        findBarSlot?.setOpen(findBarOwner, findOpen)
+        onDispose { findBarSlot?.setOpen(findBarOwner, false) }
+    }
     var viewportWidthPx by remember { mutableStateOf(0) }
     var viewportHeightPx by remember { mutableStateOf(0) }
     // Soft wrap on by default: long lines reflow onto extra visual rows at the viewport edge instead of
@@ -695,6 +724,13 @@ internal fun CodeEditor(
                 onReplaceAll = { runReplaceAll() },
                 onClose = { closeFind() },
                 focusSignal = findFocusRequests,
+                modifier = Modifier.onSizeChanged { findBarSlot?.recordHeight(it.height) },
+            )
+        } else if (findBarSlot?.visible == true && findBarSlot.heightPx > 0) {
+            Box(
+                Modifier.fillMaxWidth()
+                    .height(with(density) { findBarSlot.heightPx.toDp() })
+                    .background(scheme.surfaceContainer),
             )
         }
         Box(
@@ -1275,6 +1311,7 @@ private fun FindBar(
     onReplaceAll: () -> Unit,
     onClose: () -> Unit,
     focusSignal: Int,
+    modifier: Modifier = Modifier,
 ) {
     val scheme = MaterialTheme.colorScheme
     val queryFocus = remember { FocusRequester() }
@@ -1301,7 +1338,7 @@ private fun FindBar(
     }
 
     Row(
-        Modifier.fillMaxWidth()
+        modifier.fillMaxWidth()
             .background(scheme.surfaceContainer)
             .padding(horizontal = 8.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,

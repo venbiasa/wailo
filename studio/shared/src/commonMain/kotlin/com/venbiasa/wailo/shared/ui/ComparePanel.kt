@@ -664,6 +664,7 @@ private fun DiffPanes(
     }
 
     val hScroll = rememberScrollState()
+    val findBarSlot = remember { SynchronizedFindBarSlot() }
     val language = if (json) CodeLanguage.Json else CodeLanguage.PlainText
     val toggleFold: (Int) -> Unit = { if (!folded.remove(it)) folded.add(it) }
     val foldedRows = folded.toSet()
@@ -699,6 +700,7 @@ private fun DiffPanes(
                     foldArrows = leftArrows,
                     foldedRows = foldedRows,
                     onToggleFold = toggleFold,
+                    findBarSlot = findBarSlot,
                 ),
             )
             ColumnDivider()
@@ -722,6 +724,7 @@ private fun DiffPanes(
                     foldArrows = rightArrows,
                     foldedRows = foldedRows,
                     onToggleFold = toggleFold,
+                    findBarSlot = findBarSlot,
                 ),
             )
         }
