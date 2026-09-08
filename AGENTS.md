@@ -105,7 +105,14 @@ it directly, which hands a device the root but must never mint one (ADR-0076). T
 takeover is the daemon's too: snapshot before
 writing, restore from that snapshot alone, and keep the record on disk so a killed daemon is undone by the
 next one — never re-read the machine's current settings to "restore" them, since by then they are Wailo's
-(ADR-0075). `proxy` knows the *shape* of interception (`ProxyRules`) but never a
+(ADR-0075). So is getting a *device* onto the listener: `ProxyTargetProvisioner` drives `adb` and
+`xcrun simctl` to point a booted emulator, simulator, or ADB-connected Android phone at Wailo and install
+or stage the root, so the CLI and MCP can set one up with no window open and an `xcrun` call never appears
+in `desktopApp` (ADR-0090). It reports which trust
+store took the root — `system`, `user`, or `none` with the reason — and never claims one it did not confirm,
+because "installed" is a useless answer to someone debugging an APK they did not compile. MCP exposes a
+read-only setup guide and requires `confirm=true` on every proxy mutation. `proxy` knows the
+*shape* of interception (`ProxyRules`) but never a
 rule: the daemon's `HostProxyRules` evaluates the real sets, in ADR-0033's precedence, against the same
 registries the device snapshots come from. That matching order now exists twice — here and in
 `sdk-android`, which cannot depend on it — so a change to one is a change to both (ADR-0072).
@@ -161,6 +168,10 @@ cd studio && ./cli/build/install/wailo-cli/bin/wailo-cli proxy_ca --out /tmp/wai
 cd studio && ./cli/build/install/wailo-cli/bin/wailo-cli set_proxy_decrypt --host api.example.com # unlock one host; --off relocks all
 cd studio && ./cli/build/install/wailo-cli/bin/wailo-cli set_proxy_lan --off # keep the proxy to this machine; wide is the default (ADR-0077)
 cd studio && ./cli/build/install/wailo-cli/bin/wailo-cli set_system_proxy --on # point this Mac at Wailo; restored on stop (ADR-0075)
+cd studio && ./cli/build/install/wailo-cli/bin/wailo-cli proxy_setup_guide # dynamic blockers and manual phone steps
+cd studio && ./cli/build/install/wailo-cli/bin/wailo-cli proxy_targets # booted simulators/emulators and ADB-connected phones (ADR-0090)
+cd studio && ./cli/build/install/wailo-cli/bin/wailo-cli setup_proxy_target --id emulator-5554 # route it + install the root; reports which trust store took it
+cd studio && ./cli/build/install/wailo-cli/bin/wailo-cli clear_proxy_target --id emulator-5554 # give that device its network back
 cd studio && ./cli/build/install/wailo-cli/bin/wailo-cli set_mcp_access --off # revoke AI tool access (ADR-0059)
 cd studio && ./cli/build/install/wailo-cli/bin/wailo-cli set_seed --id s1 --url-pattern 'https://…/poll' --body-text '{}'
 cd studio && ./cli/build/install/wailo-cli/bin/wailo-cli fill_seeds # arm the library + sweep waiting holds (ADR-0067)
@@ -198,6 +209,12 @@ same goes for a test: a scratch state directory buys nothing here, which is why 
 can only reach the real `networksetup` through `forThisMachine()` and a test has to pass its own machine
 (ADR-0083). Never restore that default — a suite that takes the Mac over strands it with no route out and
 no record to recover from.
+
+`setup_proxy_target` is the same kind of command for the same reason: it reconfigures a real simulator,
+emulator, or Android phone and records the undo in the real `~/.wailo/proxy-targets.json`, because the
+device outlives this daemon (ADR-0090). A scratch run that provisions one must release it, or leave a
+device pointed at a listener that is gone — and `ProxyTargetProvisioner` likewise only reaches `adb`/`simctl` through
+`forThisMachine()`, so a test drives stand-in tools or nothing.
 
 Starting a daemon now also puts a menu bar item on screen (ADR-0065), which a scripted or CI run does not
 want: set `WAILO_NO_MENUBAR=1` alongside `WAILO_HOME` to suppress it.

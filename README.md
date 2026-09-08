@@ -115,8 +115,8 @@ of that, so stop it when you're done, or keep it to this machine with `set_proxy
 
 On this Mac, Studio's **Settings → Proxy** does the whole setup: switch it on, then "Send this Mac's
 traffic through Wailo" configures the system proxy for you and puts your settings back afterwards
-(including if Wailo is killed). A machine already behind a proxy keeps working — Wailo forwards through
-whatever was there.
+(or the next daemon restores it after a forced kill). A machine already behind a proxy keeps working —
+Wailo forwards through whatever was there.
 
 HTTPS starts locked, and stays locked until you do two separate things (ADR-0071):
 
@@ -126,10 +126,12 @@ HTTPS starts locked, and stays locked until you do two separate things (ADR-0071
 2. **Unlock the hosts you want to read**, by name. Everything else stays an opaque tunnel and shows as a
    locked row, so "not decrypted" never looks like traffic Wailo missed.
 
-For a phone, point the device's Wi-Fi proxy at the address shown in Settings, then **browse to that same
-address on the device**: the proxy serves its own setup page with the certificate and the install steps for
-that platform (ADR-0076). No file transfer, no AirDrop. An app that pins its certificates will still refuse
-— that is the app working correctly.
+Open **Devices → Without the SDK** for target-first setup. A booted Android emulator or iOS Simulator is
+one click. An ADB-connected Android phone is also one click for routing; on an ordinary unrooted phone,
+Wailo stages the root in Downloads and names the approval that still has to happen. For an iPhone or a
+manual Android phone, enter the shown Wi-Fi proxy and scan the setup QR. The page serves the certificate,
+platform steps, and routing/trust checks at `wailo.test` (ADR-0076/0090). Certificate-pinned apps still
+refuse by design.
 
 Everything above is also in the CLI:
 
@@ -140,6 +142,10 @@ $CLI set_proxy_lan --off              # keep it to this machine; on (the default
 $CLI proxy_ca --out /tmp/wailo.pem    # mint + export the local root
 $CLI set_proxy_decrypt --host api.example.com   # --off relocks everything
 $CLI proxy_status
+$CLI proxy_setup_guide
+$CLI proxy_targets
+$CLI setup_proxy_target --id emulator-5554
+$CLI clear_proxy_target --id emulator-5554
 ```
 
 Proxied rows are ticked in the traffic list's **Proxy** column and obey the same Capture Filter, Map
@@ -157,8 +163,10 @@ cd studio
 
 The committed [`.cursor/mcp.json`](.cursor/mcp.json) already points Cursor at that distribution.
 Restart Cursor, then enable **wailo** under **Customize → MCPs**. Its tools cover traffic and device
-inspection, waits, capture controls, Map Local, Capture Filter, breakpoint rules, and live hold
-resume/edit/abort.
+inspection, waits, capture controls, Map Local, Capture Filter, breakpoint rules, live hold
+resume/edit/abort, and the full proxy workflow. Proxy mutations are explicit tools; their structured
+results report network exposure, confirmed trust, stale roots, pending cleanup, and remaining manual work.
+Call `get_proxy_setup_guide` first; every proxy mutation requires `confirm=true`.
 
 Claude Code reads the committed [`.mcp.json`](.mcp.json). Run `claude` from the repo and approve the
 project server when prompted; `claude mcp list` then reports its connection status.
