@@ -392,23 +392,21 @@ internal fun WailoViewer(
                                 // A row's "Map Local…" seeds a fresh draft (exact URL + method + the
                                 // captured body's bytes — JSON or image) and opens the tool panel — no
                                 // separate window (ADR-0021).
-                                onMapLocalFromUrl = { url, method, responseHeaders, seed ->
+                                onMapLocalFromUrl = { url, method, code, responseHeaders, seed ->
                                     mapLocalDraft = MapLocalRuleDef(
                                         id = MapLocalRuleDef.newId(),
                                         urlPattern = url,
                                         method = method,
                                         inline = true,
-                                        // Start the mock close to the observed response: its real headers,
-                                        // minus the ones that describe the live transfer rather than the
-                                        // payload (see seededHeaders).
+                                        // Start the mock close to the observed response: the code it came
+                                        // back with and its real headers, minus the ones that describe the
+                                        // live transfer rather than the payload (see seededHeaders).
+                                        statusCode = code.takeIf { it > 0 } ?: 200,
                                         headers = seededHeaders(responseHeaders),
                                     )
                                     mapLocalBodySeed = seed
                                     openPanel = ToolPanel.MapLocal
                                 },
-                                // Same seam for Seed, plus the observed status code — a seed replays this
-                                // exchange back into a hold, so the code it came back with is part of what
-                                // is being replayed, where a Map Local rule starts at 200.
                                 onSeedFromUrl = { url, method, code, responseHeaders, seed ->
                                     seedDraft = SeedRuleDef(
                                         id = SeedRuleDef.newId(),

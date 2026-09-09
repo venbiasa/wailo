@@ -98,7 +98,7 @@ internal fun TrafficList(
     onToggleAllowHost: (String) -> Unit,
     onToggleBlockHost: (String) -> Unit,
     onToggleDecryptHost: (String) -> Unit,
-    onMapLocalFromUrl: (String, String, List<Header>, ByteArray?) -> Unit,
+    onMapLocalFromUrl: (String, String, Int, List<Header>, ByteArray?) -> Unit,
     onSeedFromUrl: (String, String, Int, List<Header>, ByteArray?) -> Unit,
     onBreakpointFromUrl: (String, String) -> Unit,
 ) {
@@ -313,7 +313,7 @@ private fun TrafficRow(
     onToggleAllowHost: (String) -> Unit,
     onToggleBlockHost: (String) -> Unit,
     onToggleDecryptHost: (String) -> Unit,
-    onMapLocalFromUrl: (String, String, List<Header>, ByteArray?) -> Unit,
+    onMapLocalFromUrl: (String, String, Int, List<Header>, ByteArray?) -> Unit,
     onSeedFromUrl: (String, String, Int, List<Header>, ByteArray?) -> Unit,
     onBreakpointFromUrl: (String, String) -> Unit,
 ) {
@@ -372,23 +372,22 @@ private fun TrafficRow(
         if (url.isNotEmpty()) {
             // All three seed a new rule with this row's exact URL and method, so the panel opens on the
             // values that were right-clicked rather than asking for them again. Map Local and Seed also
-            // carry this response's captured headers and its body's raw bytes (the editor decodes them as
-            // JSON text or previews them as an image per the Content-Type), so the rule opens ready to
-            // tweak; the bytes are copied on select, not per row.
+            // carry this response's observed status code, its captured headers and its body's raw bytes
+            // (the editor decodes them as JSON text or previews them as an image per the Content-Type), so
+            // the rule opens ready to tweak; the bytes are copied on select, not per row.
             add(
                 ContextMenuAction("Map Local\u2026") {
                     rowScope.launch {
                         onMapLocalFromUrl(
                             url,
                             ruleMethod,
+                            code ?: 0,
                             response?.headers ?: emptyList(),
                             bodyLoader.capturedBody(entry.responseBody),
                         )
                     }
                 },
             )
-            // Seed carries the observed status code as well, where Map Local starts at 200: a seed exists
-            // to replay this exchange into a hold, so an observed 500 or 429 is usually the whole point.
             add(
                 ContextMenuAction("Seed\u2026") {
                     rowScope.launch {
