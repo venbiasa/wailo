@@ -16,6 +16,7 @@ import java.util.concurrent.TimeUnit
 import kotlin.test.Test
 import kotlin.test.assertContains
 import kotlin.test.assertEquals
+import kotlin.test.assertTrue
 
 class WailoMcpProtocolTest {
 
@@ -49,6 +50,10 @@ class WailoMcpProtocolTest {
             assertContains(tools, """"name":"get_proxy_ca"""")
             assertContains(tools, """"name":"setup_proxy_target"""")
             assertContains(tools, """"confirm"""")
+            assertTrue(
+                tools.toByteArray().size < MAX_TOOL_MANIFEST_BYTES,
+                "tools/list exceeded the MCP context budget",
+            )
 
             clientOutput.sendJson(
                 """{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"status","arguments":{}}}""",
@@ -57,6 +62,8 @@ class WailoMcpProtocolTest {
             assertContains(status, """"id":3""")
             assertContains(status, """"capture_port":8899""")
             assertContains(status, """"reachable_address":"192.168.1.20:9090"""")
+            assertContains(status, """"decrypt_host_count":0""")
+            assertTrue(!status.contains(""""decrypt_hosts""""))
 
             clientOutput.sendJson(
                 """{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"get_proxy_setup_guide","arguments":{}}}""",
@@ -108,6 +115,7 @@ class WailoMcpProtocolTest {
 
     private companion object {
         const val PIPE_BUFFER_SIZE = 1 shl 20
+        const val MAX_TOOL_MANIFEST_BYTES = 64 * 1_024
     }
 }
 

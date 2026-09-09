@@ -63,7 +63,7 @@ internal class WailoMcpService(
                 "search_traffic" -> searchTraffic(arguments)
                 "get_exchange" -> getExchange(arguments)
                 "wait_for_exchange" -> waitForExchange(arguments)
-                "list_devices" -> listDevices()
+                "list_devices" -> listDevices(arguments)
                 "wait_for_device" -> waitForDevice(arguments)
                 "list_holds" -> listHolds(arguments)
                 "wait_for_hold" -> waitForHold(arguments)
@@ -72,7 +72,7 @@ internal class WailoMcpService(
                 "set_max_retained" -> setMaxRetained(arguments)
                 "proxy_status" -> proxyStatus()
                 "get_proxy_setup_guide" -> proxySetupGuide()
-                "list_proxy_targets" -> listProxyTargets()
+                "list_proxy_targets" -> listProxyTargets(arguments)
                 "set_proxy" -> setProxy(arguments)
                 "set_proxy_port" -> setProxyPort(arguments)
                 "set_proxy_lan" -> setProxyLan(arguments)
@@ -86,7 +86,7 @@ internal class WailoMcpService(
                 "clear_proxy_target" -> clearProxyTarget(arguments)
                 "set_map_local" -> setMapLocal(arguments)
                 "remove_map_local" -> removeMapLocal(arguments)
-                "list_map_local" -> listMapLocal()
+                "list_map_local" -> listMapLocal(arguments)
                 "get_map_local" -> getMapLocal(arguments)
                 "set_map_local_enabled" -> setMapLocalEnabled(arguments)
                 "set_capture_filter" -> setCaptureFilter(arguments)
@@ -94,11 +94,11 @@ internal class WailoMcpService(
                 "list_capture_filter" -> listCaptureFilter()
                 "set_breakpoint" -> setBreakpoint(arguments)
                 "remove_breakpoint" -> removeBreakpoint(arguments)
-                "list_breakpoints" -> listBreakpoints()
+                "list_breakpoints" -> listBreakpoints(arguments)
                 "set_breakpoints_enabled" -> setBreakpointsEnabled(arguments)
                 "set_seed" -> setSeed(arguments)
                 "remove_seed" -> removeSeed(arguments)
-                "list_seeds" -> listSeeds()
+                "list_seeds" -> listSeeds(arguments)
                 "get_seed" -> getSeed(arguments)
                 "set_seeds_enabled" -> setSeedsEnabled(arguments)
                 "set_rule_group" -> setRuleGroup(arguments)
@@ -137,7 +137,7 @@ internal class WailoMcpService(
             "seeds_enabled" to backend.seedsEnabled,
             "seed_count" to backend.seeds.size,
             "armed_seed_count" to backend.seedQueue.size,
-            "proxy" to proxyData(backend.proxyStatus),
+            "proxy" to proxySummaryData(backend.proxyStatus),
             // The hosts the user singled out — a standing hint about which traffic is worth looking at
             // first, available here because it is daemon state rather than a Studio preference (ADR-0084).
             "bookmarked_hosts" to backend.bookmarkedHosts,
@@ -153,31 +153,35 @@ internal class WailoMcpService(
     }
 
     private fun listExchanges(arguments: ToolArguments): McpToolResponse {
-        val limit = arguments.int("limit", DEFAULT_LIST_LIMIT).inRange("limit", 1..MAX_LIST_LIMIT)
-        val rows = backend.exchanges.takeLast(limit)
-        return exchangeListResult(rows)
+        val page = arguments.exchangePage(backend.exchanges)
+        return exchangeListResult(page)
     }
 
     private fun searchTraffic(arguments: ToolArguments): McpToolResponse {
         val filter = arguments.trafficFilter()
-        val limit = arguments.int("limit", DEFAULT_LIST_LIMIT).inRange("limit", 1..MAX_LIST_LIMIT)
         val rows = backend.searchTraffic(
             urlContains = filter.urlContains,
             urlPattern = filter.urlPattern,
             method = filter.method,
             statusCode = filter.statusCode,
             appId = filter.appId,
-        ).takeLast(limit)
-        return exchangeListResult(rows)
+        )
+        return exchangeListResult(arguments.exchangePage(rows))
     }
 
     private suspend fun getExchange(arguments: ToolArguments): McpToolResponse {
         val id = arguments.requiredString("id")
-        val bodyLimit = arguments.int("body_bytes", DEFAULT_BODY_LIMIT).inRange("body_bytes", 0..MAX_BODY_LIMIT)
         val row = backend.findExchangeById(id) ?: throw ToolFailure("Exchange not found: $id")
+        val bodyLimit = responseBodyLimit(
+            requested = arguments.bodyLimit(),
+            bodyCount = listOfNotNull(row.exchange.request, row.exchange.response).size,
+        )
         return success(
             "${row.exchange.request?.method.orEmpty()} ${shown(row.exchange.request?.url.orEmpty())}",
-            mapOf("exchange" to exchangeDetail(row, bodyLimit)),
+            mapOf(
+                "body_bytes_per_body" to bodyLimit,
+                "exchange" to exchangeDetail(row, bodyLimit),
+            ),
         )
     }
 
@@ -199,8 +203,9 @@ internal class WailoMcpService(
         return success("Matched ${row.exchange.id}", mapOf("exchange" to exchangeSummary(row)))
     }
 
-    private fun listDevices(): McpToolResponse {
-        val devices = backend.connectedDevices.value.map {
+    private fun listDevices(arguments: ToolArguments): McpToolResponse {
+        val page = arguments.page(backend.connectedDevices.value)
+        val devices = page.items.map {
             mapOf(
                 "connection_id" to it.connectionId,
                 "name" to it.deviceName,
@@ -210,7 +215,10 @@ internal class WailoMcpService(
                 "loopback" to it.loopback,
             )
         }
-        return success("${devices.size} connected device(s)", mapOf("devices" to devices))
+        return success(
+            "${devices.size} of ${page.total} connected device(s)",
+            page.data("devices", devices),
+        )
     }
 
     private suspend fun waitForDevice(arguments: ToolArguments): McpToolResponse {
@@ -244,9 +252,16 @@ internal class WailoMcpService(
     }
 
     private fun listHolds(arguments: ToolArguments): McpToolResponse {
-        val bodyLimit = arguments.int("body_bytes", DEFAULT_BODY_LIMIT).inRange("body_bytes", 0..MAX_BODY_LIMIT)
-        val holds = backend.holds.map { holdDetail(it, bodyLimit) }
-        return success("${holds.size} paused exchange(s)", mapOf("holds" to holds))
+        val page = arguments.page(backend.holds)
+        val bodyLimit = responseBodyLimit(
+            requested = arguments.bodyLimit(),
+            bodyCount = page.items.sumOf { listOfNotNull(it.request, it.response).size },
+        )
+        val holds = page.items.map { holdDetail(it, bodyLimit) }
+        return success(
+            "${holds.size} of ${page.total} paused exchange(s)",
+            mapOf("body_bytes_per_body" to bodyLimit) + page.data("holds", holds),
+        )
     }
 
     private suspend fun waitForHold(arguments: ToolArguments): McpToolResponse {
@@ -261,7 +276,7 @@ internal class WailoMcpService(
             throw ToolFailure("phase must be request or response")
         }
         val timeout = arguments.int("timeout_seconds", 30).inRange("timeout_seconds", 1..MAX_WAIT_SECONDS)
-        val bodyLimit = arguments.int("body_bytes", DEFAULT_BODY_LIMIT).inRange("body_bytes", 0..MAX_BODY_LIMIT)
+        val requestedBodyLimit = arguments.bodyLimit()
         val hold = backend.waitForHold(timeout.seconds) {
             val request = it.request
             val matchesUrl = when {
@@ -273,7 +288,17 @@ internal class WailoMcpService(
                 (method == null || request?.method.equals(method, ignoreCase = true)) &&
                 (phase == null || phase == it.phaseName())
         } ?: throw ToolFailure("Timed out after ${timeout}s waiting for a matching hold")
-        return success("Matched hold ${hold.correlationId}", mapOf("hold" to holdDetail(hold, bodyLimit)))
+        val bodyLimit = responseBodyLimit(
+            requested = requestedBodyLimit,
+            bodyCount = listOfNotNull(hold.request, hold.response).size,
+        )
+        return success(
+            "Matched hold ${hold.correlationId}",
+            mapOf(
+                "body_bytes_per_body" to bodyLimit,
+                "hold" to holdDetail(hold, bodyLimit),
+            ),
+        )
     }
 
     private suspend fun clearCapture(): McpToolResponse {
@@ -363,20 +388,21 @@ internal class WailoMcpService(
         )
     }
 
-    private suspend fun listProxyTargets(): McpToolResponse {
+    private suspend fun listProxyTargets(arguments: ToolArguments): McpToolResponse {
         val scan = backend.proxyTargets()
-        val targets = scan.targets.map(::targetData)
-        val data = mapOf(
-            "supported" to scan.supported,
-            "targets" to targets,
-            "error" to scan.error,
-        )
+        val page = arguments.page(scan.targets)
+        val targets = page.items.map(::targetData)
+        val data = buildMap {
+            put("supported", scan.supported)
+            putAll(page.data("targets", targets))
+            put("error", scan.error)
+        }
         val error = scan.error
         val text = when {
             error != null -> error
             !scan.supported -> "No adb or xcrun simctl is available."
-            targets.isEmpty() -> "No configurable target is connected."
-            else -> "${targets.size} configurable target(s)"
+            page.total == 0 -> "No configurable target is connected."
+            else -> "${targets.size} of ${page.total} configurable target(s)"
         }
         return McpToolResponse(text, data, isError = scan.error != null)
     }
@@ -479,6 +505,19 @@ internal class WailoMcpService(
             if (status.systemProxy) add("This Mac's HTTP and HTTPS traffic is routed through Wailo.")
             if ("*" in status.decryptHosts) add("TLS decryption is unlocked for every host.")
         },
+    )
+
+    private fun proxySummaryData(status: ProxyStatus): Map<String, Any?> = mapOf(
+        "running" to status.running,
+        "port" to status.port,
+        "connections" to status.connections,
+        "exchanges" to status.exchanges,
+        "error" to status.error,
+        "lan" to status.lan,
+        "reachable_address" to status.reachableAddress,
+        "system_proxy" to status.systemProxy,
+        "ca_installed" to status.caInstalled,
+        "decrypt_host_count" to status.decryptHosts.size,
     )
 
     private fun certificateResult(
@@ -636,8 +675,12 @@ internal class WailoMcpService(
 
     private fun listRuleGroups(arguments: ToolArguments): McpToolResponse {
         val family = arguments.ruleFamily()
-        val groups = backend.ruleGroups(family).map { it.summary() }
-        return success("${groups.size} $family group(s)", mapOf("family" to family, "groups" to groups))
+        val page = arguments.page(backend.ruleGroups(family))
+        val groups = page.items.map { it.summary() }
+        return success(
+            "${groups.size} of ${page.total} $family group(s)",
+            mapOf("family" to family) + page.data("groups", groups),
+        )
     }
 
     private fun DaemonRuleGroup.summary(): Map<String, Any?> =
@@ -658,8 +701,8 @@ internal class WailoMcpService(
     }
 
     /**
-     * Deliberately body-free, like [exchangeSummary]: fixtures are a curated set that grows, so carrying
-     * every body here would make the cheap "what is loaded?" call scale with total fixture size.
+     * Deliberately body- and header-free, like [exchangeSummary]: fixture lists grow, while [getMapLocal]
+     * carries the potentially large values for the one rule being inspected.
      */
     private fun mapLocalSummary(rule: HostMapLocalRule): Map<String, Any?> = mapOf(
         "id" to rule.id,
@@ -670,28 +713,24 @@ internal class WailoMcpService(
         "method" to rule.method,
         "status_code" to rule.statusCode,
         "delay_ms" to rule.delayMillis,
-        "headers" to rule.headers.map(::headerData),
         "body_bytes" to rule.bodySize,
         // Blank for an ungrouped rule. A rule in a group that is switched off already reads enabled
         // false above, since the daemon folds the group's switch in before anyone sees the rule.
         "group_id" to backend.groupIdByRule(RULE_FAMILY_MAP_LOCAL)[rule.id].orEmpty(),
     )
 
-    private fun listMapLocal(): McpToolResponse {
-        val rules = backend.mapLocalRules.map(::mapLocalSummary)
+    private fun listMapLocal(arguments: ToolArguments): McpToolResponse {
+        val page = arguments.page(backend.mapLocalRules)
+        val rules = page.items.map(::mapLocalSummary)
         return success(
-            "${rules.size} Map Local rule(s)",
-            mapOf(
-                "enabled" to backend.mapLocalEnabled,
-                "rules" to rules,
-                "groups" to backend.ruleGroups(RULE_FAMILY_MAP_LOCAL).map { it.summary() },
-            ),
+            "${rules.size} of ${page.total} Map Local rule(s)",
+            mapOf("enabled" to backend.mapLocalEnabled) + page.data("rules", rules),
         )
     }
 
     private suspend fun getMapLocal(arguments: ToolArguments): McpToolResponse {
         val id = arguments.requiredString("id")
-        val bodyLimit = arguments.int("body_bytes", DEFAULT_BODY_LIMIT).inRange("body_bytes", 0..MAX_BODY_LIMIT)
+        val bodyLimit = arguments.bodyLimit()
         val rule = backend.mapLocalRules.firstOrNull { it.id == id }
             ?: throw ToolFailure("Map Local rule not found: $id")
         // Fetched here rather than arriving with the rule: a layout names its bodies (ADR-0086), so the
@@ -704,7 +743,10 @@ internal class WailoMcpService(
                 // non-matching pattern from the device side.
                 "map_local_enabled" to backend.mapLocalEnabled,
                 "rule" to mapLocalSummary(rule) +
-                    mapOf("body" to ruleBodyData(body, rule.bodySize, rule.headers, bodyLimit)),
+                    mapOf(
+                        "headers" to rule.headers.map(::headerData),
+                        "body" to ruleBodyData(body, rule.bodySize, rule.headers, bodyLimit),
+                    ),
             ),
         )
     }
@@ -789,9 +831,10 @@ internal class WailoMcpService(
         return success("Breakpoint $id removed", mapOf("id" to id, "removed" to true))
     }
 
-    private fun listBreakpoints(): McpToolResponse {
+    private fun listBreakpoints(arguments: ToolArguments): McpToolResponse {
         val groups = backend.groupIdByRule(RULE_FAMILY_BREAKPOINTS)
-        val rules = backend.breakpointRules.map {
+        val page = arguments.page(backend.breakpointRules)
+        val rules = page.items.map {
             mapOf(
                 "id" to it.id,
                 "enabled" to it.enabled,
@@ -803,12 +846,8 @@ internal class WailoMcpService(
             )
         }
         return success(
-            "${rules.size} breakpoint rule(s)",
-            mapOf(
-                "enabled" to backend.breakpointsEnabled,
-                "rules" to rules,
-                "groups" to backend.ruleGroups(RULE_FAMILY_BREAKPOINTS).map { it.summary() },
-            ),
+            "${rules.size} of ${page.total} breakpoint rule(s)",
+            mapOf("enabled" to backend.breakpointsEnabled) + page.data("rules", rules),
         )
     }
 
@@ -856,7 +895,7 @@ internal class WailoMcpService(
         return success("Seed $id removed", mapOf("id" to id, "removed" to true))
     }
 
-    /** Body-free for the same reason as [mapLocalSummary]; `get_seed` is where the bytes are. */
+    /** Body- and header-free for the same reason as [mapLocalSummary]; [getSeed] carries both on demand. */
     private fun seedSummary(seed: HostSeed, armed: Set<String>): Map<String, Any?> = mapOf(
         "id" to seed.id,
         "enabled" to seed.enabled,
@@ -864,7 +903,6 @@ internal class WailoMcpService(
         "method" to seed.method,
         "status_code" to seed.statusCode,
         "delay_ms" to seed.delayMillis,
-        "headers" to seed.headers.map(::headerData),
         "body_bytes" to seed.bodySize,
         // Being in the library is not being in play: a seed answers one hold and is then spent, so this
         // is the only field that says whether the next matching hold will actually get this response.
@@ -872,22 +910,22 @@ internal class WailoMcpService(
         "group_id" to backend.groupIdByRule(RULE_FAMILY_SEEDS)[seed.id].orEmpty(),
     )
 
-    private fun listSeeds(): McpToolResponse {
+    private fun listSeeds(arguments: ToolArguments): McpToolResponse {
         val armed = backend.seedQueue.mapTo(mutableSetOf()) { it.id }
-        val seeds = backend.seeds.map { seedSummary(it, armed) }
+        val page = arguments.page(backend.seeds)
+        val seeds = page.items.map { seedSummary(it, armed) }
         return success(
-            "${seeds.size} seed(s), ${armed.size} armed",
+            "${seeds.size} of ${page.total} seed(s), ${armed.size} armed",
             mapOf(
                 "enabled" to backend.seedsEnabled,
-                "seeds" to seeds,
-                "groups" to backend.ruleGroups(RULE_FAMILY_SEEDS).map { it.summary() },
-            ),
+                "armed_count" to armed.size,
+            ) + page.data("seeds", seeds),
         )
     }
 
     private suspend fun getSeed(arguments: ToolArguments): McpToolResponse {
         val id = arguments.requiredString("id")
-        val bodyLimit = arguments.int("body_bytes", DEFAULT_BODY_LIMIT).inRange("body_bytes", 0..MAX_BODY_LIMIT)
+        val bodyLimit = arguments.bodyLimit()
         val seed = backend.seeds.firstOrNull { it.id == id } ?: throw ToolFailure("Seed not found: $id")
         val armed = backend.seedQueue.mapTo(mutableSetOf()) { it.id }
         val body = backend.readRuleBody(RULE_FAMILY_SEEDS, id, bodyLimit)
@@ -896,7 +934,10 @@ internal class WailoMcpService(
             mapOf(
                 "seeds_enabled" to backend.seedsEnabled,
                 "seed" to seedSummary(seed, armed) +
-                    mapOf("body" to ruleBodyData(body, seed.bodySize, seed.headers, bodyLimit)),
+                    mapOf(
+                        "headers" to seed.headers.map(::headerData),
+                        "body" to ruleBodyData(body, seed.bodySize, seed.headers, bodyLimit),
+                    ),
             ),
         )
     }
@@ -964,9 +1005,12 @@ internal class WailoMcpService(
         )
     }
 
-    private fun exchangeListResult(rows: List<CapturedExchange>): McpToolResponse {
-        val summaries = rows.map(::exchangeSummary)
-        return success("${rows.size} exchange(s)", mapOf("exchanges" to summaries))
+    private fun exchangeListResult(page: McpCursorPage<CapturedExchange>): McpToolResponse {
+        val summaries = page.items.map(::exchangeSummary)
+        return success(
+            "${summaries.size} of ${page.total} exchange(s)",
+            page.data("exchanges", summaries),
+        )
     }
 
     private fun exchangeSummary(row: CapturedExchange): Map<String, Any?> = mapOf(
@@ -1010,12 +1054,12 @@ internal class WailoMcpService(
     /**
      * Fetch as much of a captured body as redaction needs, which is not the same as what the agent asked
      * for: [renderBody] redacts before it truncates, because a JSON body cut to the output limit first
-     * would no longer parse and would fall back to the coarser text sweep. Past [MAX_BODY_LIMIT] that
+     * would no longer parse and would fall back to the coarser text sweep. Past [MCP_MAX_BODY_BYTES] that
      * fallback is what happens anyway — the alternative is pulling a payload of unbounded size across
      * the control channel to redact a prefix of it.
      */
     private suspend fun spooled(ref: BodyRef?, limit: Int): ByteArray =
-        if (ref == null) ByteArray(0) else backend.readBody(ref, maxOf(limit, MAX_BODY_LIMIT))
+        if (ref == null) ByteArray(0) else backend.readBody(ref, maxOf(limit, MCP_MAX_BODY_BYTES))
 
     private fun BodyRef?.capturedBytes(): Long = this?.size ?: 0L
 
@@ -1144,10 +1188,6 @@ internal class WailoMcpService(
     private companion object {
         const val ACCESS_REFUSED = "Wailo AI tool access is turned off. Turn it on in Wailo Studio " +
             "under Settings \u2192 AI tool access, or run `wailo-cli set_mcp_access --on`."
-        const val DEFAULT_LIST_LIMIT = 50
-        const val MAX_LIST_LIMIT = 500
-        const val DEFAULT_BODY_LIMIT = 4_096
-        const val MAX_BODY_LIMIT = 1_000_000
         const val MAX_WAIT_SECONDS = 300
     }
 }
@@ -1161,6 +1201,21 @@ private data class TrafficFilter(
     val method: String?,
     val statusCode: Int?,
     val appId: String?,
+)
+
+private data class McpPage<T>(
+    val items: List<T>,
+    val total: Int,
+    val offset: Int,
+) {
+    val hasMore: Boolean get() = offset + items.size < total
+}
+
+private data class McpCursorPage<T>(
+    val items: List<T>,
+    val total: Int,
+    val hasMore: Boolean,
+    val nextBeforeId: String?,
 )
 
 private class ToolArguments(private val values: Map<String, Any?>) {
@@ -1249,6 +1304,56 @@ private class ToolArguments(private val values: Map<String, Any?>) {
             appId = if (includeApp) string("app_id") else null,
         )
     }
+}
+
+private fun <T> ToolArguments.page(rows: List<T>): McpPage<T> {
+    val limit = int("limit", MCP_DEFAULT_PAGE_LIMIT).inRange("limit", 1..MCP_MAX_PAGE_LIMIT)
+    val offset = int("offset", 0).inRange("offset", 0..Int.MAX_VALUE)
+    val items = rows.drop(offset).take(limit)
+    return McpPage(items, rows.size, offset)
+}
+
+private fun ToolArguments.exchangePage(rows: List<CapturedExchange>): McpCursorPage<CapturedExchange> {
+    val limit = int("limit", MCP_DEFAULT_PAGE_LIMIT).inRange("limit", 1..MCP_MAX_PAGE_LIMIT)
+    val beforeId = string("before_id")
+    val end = if (beforeId == null) {
+        rows.size
+    } else {
+        rows.indexOfFirst { it.exchange.id == beforeId }
+            .takeIf { it >= 0 }
+            ?: throw ToolFailure("before_id is not present in the current results: $beforeId")
+    }
+    val items = rows.subList(0, end).takeLast(limit)
+    val hasMore = end > items.size
+    return McpCursorPage(
+        items = items,
+        total = rows.size,
+        hasMore = hasMore,
+        nextBeforeId = items.firstOrNull()?.exchange?.id?.takeIf { hasMore },
+    )
+}
+
+private fun ToolArguments.bodyLimit(): Int =
+    int("body_bytes", MCP_DEFAULT_BODY_BYTES).inRange("body_bytes", 0..MCP_MAX_BODY_BYTES)
+
+private fun responseBodyLimit(requested: Int, bodyCount: Int): Int =
+    minOf(requested, MCP_MAX_RESPONSE_BODY_BYTES / maxOf(1, bodyCount))
+
+private fun McpPage<*>.data(name: String, values: List<*>): Map<String, Any?> = buildMap {
+    put("total", total)
+    put("returned", items.size)
+    put("offset", offset)
+    put("has_more", hasMore)
+    if (hasMore) put("next_offset", offset + items.size)
+    put(name, values)
+}
+
+private fun McpCursorPage<*>.data(name: String, values: List<*>): Map<String, Any?> = buildMap {
+    put("total", total)
+    put("returned", items.size)
+    put("has_more", hasMore)
+    nextBeforeId?.let { put("next_before_id", it) }
+    put(name, values)
 }
 
 private class ToolFailure(message: String) : IllegalArgumentException(message)

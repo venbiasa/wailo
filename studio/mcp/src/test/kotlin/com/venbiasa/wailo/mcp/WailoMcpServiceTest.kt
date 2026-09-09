@@ -1,7 +1,11 @@
 package com.venbiasa.wailo.mcp
 
+import com.venbiasa.wailo.engine.CapturedExchange
 import com.venbiasa.wailo.engine.WailoEngine
 import com.venbiasa.wailo.host.HeadlessHost
+import com.venbiasa.wailo.protocol.HttpExchange
+import com.venbiasa.wailo.protocol.HttpRequest
+import com.venbiasa.wailo.protocol.HttpResponse
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -71,6 +75,132 @@ class WailoMcpServiceTest {
             ),
             names.toSet(),
         )
+    }
+
+    @Test
+    fun growingReadSurfacesDeclareBoundedPagination() {
+        val pagedTools = setOf(
+            "list_devices",
+            "list_holds",
+            "list_proxy_targets",
+            "list_map_local",
+            "list_breakpoints",
+            "list_seeds",
+            "list_rule_groups",
+        )
+
+        pagedTools.forEach { name ->
+            val properties = WailoMcpTools.definitions.single { it.name == name }.inputSchema.properties()
+            assertEquals(MCP_MAX_PAGE_LIMIT, properties.getValue("limit")["maximum"], name)
+            assertEquals(Int.MAX_VALUE, properties.getValue("offset")["maximum"], name)
+        }
+
+        setOf("list_exchanges", "search_traffic").forEach { name ->
+            val properties = WailoMcpTools.definitions.single { it.name == name }.inputSchema.properties()
+            assertEquals(MCP_MAX_PAGE_LIMIT, properties.getValue("limit")["maximum"], name)
+            assertTrue("before_id" in properties, name)
+            assertFalse("offset" in properties, name)
+        }
+    }
+
+    @Test
+    fun bodyReadSchemasShareOneBoundedLimit() {
+        val bodyTools = setOf("get_exchange", "list_holds", "wait_for_hold", "get_map_local", "get_seed")
+
+        bodyTools.forEach { name ->
+            val body = WailoMcpTools.definitions.single { it.name == name }
+                .inputSchema
+                .properties()
+                .getValue("body_bytes")
+            assertEquals(MCP_MAX_BODY_BYTES, body["maximum"], name)
+            assertTrue(body.getValue("description").toString().contains(MCP_DEFAULT_BODY_BYTES.toString()), name)
+        }
+    }
+
+    @Test
+    fun ruleListsPageByPriorityAndExplainHowToContinue() = runBlocking {
+        val host = HeadlessHost.wrap(WailoEngine())
+        val service = WailoMcpService(host, 8899)
+        try {
+            repeat(MCP_DEFAULT_PAGE_LIMIT + 5) { index ->
+                service.call(
+                    "set_map_local",
+                    mapOf("id" to "fixture-$index", "url_pattern" to "https://example.com/$index"),
+                )
+            }
+            val expected = host.mapLocalRules.value.map { it.id }
+
+            val first = service.call("list_map_local", emptyMap())
+            assertEquals(expected.take(MCP_DEFAULT_PAGE_LIMIT), first.rules().map { it["id"] })
+            assertEquals(expected.size, first.data["total"])
+            assertEquals(MCP_DEFAULT_PAGE_LIMIT, first.data["returned"])
+            assertEquals(true, first.data["has_more"])
+            assertEquals(MCP_DEFAULT_PAGE_LIMIT, first.data["next_offset"])
+
+            val second = service.call("list_map_local", mapOf("offset" to MCP_DEFAULT_PAGE_LIMIT))
+            assertEquals(expected.drop(MCP_DEFAULT_PAGE_LIMIT), second.rules().map { it["id"] })
+            assertEquals(false, second.data["has_more"])
+            assertFalse(second.data.containsKey("next_offset"))
+
+            assertTrue(service.call("list_map_local", mapOf("limit" to 0)).isError)
+            assertTrue(service.call("list_map_local", mapOf("offset" to -1)).isError)
+        } finally {
+            host.stop()
+        }
+    }
+
+    @Test
+    fun exchangeCursorDoesNotDriftWhenNewTrafficArrives() = runBlocking {
+        val host = HeadlessHost.wrap(WailoEngine())
+        var rows = (1..25).map(::capturedExchange)
+        val backend = object : McpBackend by LocalMcpBackend(host, 8899) {
+            override val exchanges: List<CapturedExchange> get() = rows
+        }
+        val service = WailoMcpService(backend)
+        try {
+            val first = service.call("list_exchanges", mapOf("limit" to 10))
+            assertEquals((16..25).map { "exchange-$it" }, first.exchanges().map { it["id"] })
+            val cursor = first.data["next_before_id"] as String
+
+            rows = rows + (26..30).map(::capturedExchange)
+
+            val second = service.call("list_exchanges", mapOf("limit" to 10, "before_id" to cursor))
+            assertEquals((6..15).map { "exchange-$it" }, second.exchanges().map { it["id"] })
+            assertTrue(first.exchanges().map { it["id"] }.intersect(second.exchanges().map { it["id"] }.toSet()).isEmpty())
+            assertTrue(service.call("list_exchanges", mapOf("before_id" to "missing")).isError)
+        } finally {
+            host.stop()
+        }
+    }
+
+    @Test
+    fun exchangeBodiesShareOneRawByteBudget() = runBlocking {
+        val host = HeadlessHost.wrap(WailoEngine())
+        val row = CapturedExchange(
+            deviceName = "phone",
+            appId = "app",
+            platform = "android",
+            exchange = HttpExchange(
+                id = "two-bodies",
+                request = HttpRequest(method = "POST", url = "https://example.com"),
+                response = HttpResponse(code = 200),
+            ),
+        )
+        val backend = object : McpBackend by LocalMcpBackend(host, 8899) {
+            override val exchanges = listOf(row)
+            override fun findExchangeById(id: String): CapturedExchange? = row.takeIf { it.exchange.id == id }
+        }
+        val service = WailoMcpService(backend)
+        try {
+            val detail = service.call(
+                "get_exchange",
+                mapOf("id" to "two-bodies", "body_bytes" to MCP_MAX_BODY_BYTES),
+            )
+
+            assertEquals(MCP_MAX_RESPONSE_BODY_BYTES / 2, detail.data["body_bytes_per_body"])
+        } finally {
+            host.stop()
+        }
     }
 
     @Test
@@ -237,13 +367,18 @@ class WailoMcpServiceTest {
                 ),
             )
 
-            val listed = service.call("list_map_local", emptyMap()).rules().single()
+            val list = service.call("list_map_local", emptyMap())
+            val listed = list.rules().single()
             assertFalse(listed.containsKey("body"))
+            assertFalse(listed.containsKey("headers"))
+            assertFalse(list.data.containsKey("groups"))
             assertEquals("Profile 500", listed["name"])
             assertEquals(425, listed["delay_ms"])
             assertEquals(11, listed["body_bytes"])
 
-            val full = service.call("get_map_local", mapOf("id" to "fixture")).body()
+            val detail = service.call("get_map_local", mapOf("id" to "fixture"))
+            val full = detail.body()
+            assertTrue(detail.rule().containsKey("headers"))
             assertEquals("utf8", full["encoding"])
             assertEquals("hello world", full["data"])
             assertEquals(false, full["output_truncated"])
@@ -253,6 +388,35 @@ class WailoMcpServiceTest {
             assertEquals(true, bounded["output_truncated"])
 
             assertTrue(service.call("get_map_local", mapOf("id" to "missing")).isError)
+        } finally {
+            host.stop()
+        }
+    }
+
+    @Test
+    fun bodyReadsUseTheSmallDefaultAndRejectOversizedReplies() = runBlocking {
+        val host = HeadlessHost.wrap(WailoEngine())
+        val service = WailoMcpService(host, 8899)
+        try {
+            service.call(
+                "set_map_local",
+                mapOf(
+                    "id" to "large",
+                    "url_pattern" to "https://example.com/large",
+                    "headers" to listOf(mapOf("name" to "Content-Type", "value" to "text/plain")),
+                    "body_text" to "x".repeat(MCP_DEFAULT_BODY_BYTES + 1),
+                ),
+            )
+
+            val body = service.call("get_map_local", mapOf("id" to "large")).body()
+            assertEquals(MCP_DEFAULT_BODY_BYTES, body["data"].toString().length)
+            assertEquals(true, body["output_truncated"])
+            assertTrue(
+                service.call(
+                    "get_map_local",
+                    mapOf("id" to "large", "body_bytes" to MCP_MAX_BODY_BYTES + 1),
+                ).isError,
+            )
         } finally {
             host.stop()
         }
@@ -425,7 +589,10 @@ private fun McpToolResponse.rules(): List<Map<String, Any?>> = data["rules"] as 
 
 @Suppress("UNCHECKED_CAST")
 private fun McpToolResponse.body(): Map<String, Any?> =
-    (data["rule"] as Map<String, Any?>)["body"] as Map<String, Any?>
+    rule()["body"] as Map<String, Any?>
+
+@Suppress("UNCHECKED_CAST")
+private fun McpToolResponse.rule(): Map<String, Any?> = data["rule"] as Map<String, Any?>
 
 @Suppress("UNCHECKED_CAST")
 private fun McpToolResponse.seeds(): List<Map<String, Any?>> = data["seeds"] as List<Map<String, Any?>>
@@ -433,3 +600,18 @@ private fun McpToolResponse.seeds(): List<Map<String, Any?>> = data["seeds"] as 
 @Suppress("UNCHECKED_CAST")
 private fun McpToolResponse.seedBody(): Map<String, Any?> =
     (data["seed"] as Map<String, Any?>)["body"] as Map<String, Any?>
+
+@Suppress("UNCHECKED_CAST")
+private fun McpToolResponse.exchanges(): List<Map<String, Any?>> =
+    data["exchanges"] as List<Map<String, Any?>>
+
+@Suppress("UNCHECKED_CAST")
+private fun Map<String, Any>.properties(): Map<String, Map<String, Any>> =
+    this["properties"] as Map<String, Map<String, Any>>
+
+private fun capturedExchange(index: Int): CapturedExchange = CapturedExchange(
+    deviceName = "phone",
+    appId = "app",
+    platform = "android",
+    exchange = HttpExchange(id = "exchange-$index"),
+)

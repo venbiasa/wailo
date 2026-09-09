@@ -71,8 +71,9 @@ internal object WailoMcpServer {
             .serverInfo("wailo", "0.1.0")
             .instructions(
                 "Wailo captures HTTP(S) traffic from instrumented Android and iOS apps. " +
-                    "Call status first, configure Map Local, Capture Filter, breakpoint, or seed rules as " +
-                    "needed, then inspect or wait for exchanges. To script a sequence of answers, set " +
+                    "Use status when you need an overview; other tools can be called directly. Configure " +
+                    "Map Local, Capture Filter, breakpoint, or seed rules as needed, then inspect or wait " +
+                    "for exchanges. To script a sequence of answers, set " +
                     "breakpoints, write seeds, then fill_seeds. " +
                     "For SDK-less traffic, read get_proxy_setup_guide before making an explicit proxy " +
                     "change; mutations require confirm=true and setup_proxy_target returns the confirmed " +
@@ -102,32 +103,34 @@ internal object WailoMcpTools {
         readTool(
             "status",
             "Check whether Wailo is listening and summarize the capture port, devices, exchanges, holds, " +
-                "active rule counts, and whether secrets are being redacted. Call this first.",
+                "active rule counts, and whether secrets are being redacted. Use it for orientation; " +
+                "other tools do not require a status call first. Call proxy_status for full proxy details.",
             objectSchema(),
         ),
         readTool(
             "list_exchanges",
-            "List the newest captured HTTP exchanges as compact metadata without bodies.",
-            objectSchema("limit" to integer("Maximum rows, newest last", minimum = 1, maximum = 500)),
+            "List captured HTTP exchanges as compact metadata without bodies. The first page contains " +
+                "the newest exchanges, ordered oldest to newest.",
+            newestPagedObjectSchema(),
         ),
         readTool(
             "search_traffic",
             "Search captured traffic by URL substring or wildcard URL pattern, method, status, and app id. Use either url_contains or url_pattern, not both.",
-            objectSchema(
+            newestPagedObjectSchema(
                 "url_contains" to string("Case-insensitive URL substring"),
                 "url_pattern" to string("Full-URL wildcard pattern where * matches any characters"),
                 "method" to string("HTTP method"),
                 "status_code" to integer("HTTP response status", minimum = 100, maximum = 599),
                 "app_id" to string("Application identifier"),
-                "limit" to integer("Maximum rows, newest last", minimum = 1, maximum = 500),
             ),
         ),
         readTool(
             "get_exchange",
-            "Get one captured exchange with request and response headers and bounded body data. Text MIME bodies are UTF-8; other bodies are Base64.",
+            "Get one captured exchange with request and response headers and bounded body data. Returned " +
+                "bodies share a 64 KiB raw-byte budget. Text MIME bodies are UTF-8; others are Base64.",
             objectSchema(
                 "id" to string("Exchange id"),
-                "body_bytes" to integer("Maximum bytes returned from each body", minimum = 0, maximum = 1_000_000),
+                "body_bytes" to bodyBytes("each body"),
                 required = listOf("id"),
             ),
         ),
@@ -142,7 +145,11 @@ internal object WailoMcpTools {
                 "timeout_seconds" to integer("Wait timeout", minimum = 1, maximum = 300),
             ),
         ),
-        readTool("list_devices", "List SDK clients currently connected to this Wailo process.", objectSchema()),
+        readTool(
+            "list_devices",
+            "List SDK clients currently connected to this Wailo process.",
+            pagedObjectSchema("from the first connected device"),
+        ),
         readTool(
             "wait_for_device",
             "Wait until an already-connected or new SDK client matches an app id or case-insensitive device-name substring.",
@@ -154,19 +161,24 @@ internal object WailoMcpTools {
         ),
         readTool(
             "list_holds",
-            "List requests or responses currently paused by breakpoint rules, including bounded bodies.",
-            objectSchema("body_bytes" to integer("Maximum bytes returned from each body", minimum = 0, maximum = 1_000_000)),
+            "List requests or responses currently paused by breakpoint rules. Body previews share a " +
+                "64 KiB raw-byte page budget.",
+            pagedObjectSchema(
+                "from the first paused exchange",
+                "body_bytes" to bodyBytes("each body"),
+            ),
         ),
         readTool(
             "wait_for_hold",
-            "Wait until an already-paused or new breakpoint hold matches URL, method, or phase.",
+            "Wait until an already-paused or new breakpoint hold matches URL, method, or phase. Returned " +
+                "bodies share a 64 KiB raw-byte budget.",
             objectSchema(
                 "url_contains" to string("Case-insensitive URL substring"),
                 "url_pattern" to string("Full-URL wildcard pattern where * matches any characters"),
                 "method" to string("HTTP method"),
                 "phase" to enumString("Breakpoint phase", "request", "response"),
                 "timeout_seconds" to integer("Wait timeout", minimum = 1, maximum = 300),
-                "body_bytes" to integer("Maximum bytes returned from each body", minimum = 0, maximum = 1_000_000),
+                "body_bytes" to bodyBytes("each body"),
             ),
         ),
         McpToolDefinition(
@@ -205,7 +217,7 @@ internal object WailoMcpTools {
             "list_proxy_targets",
             "List booted simulators, emulators, and ADB-connected Android phones, including routing, " +
                 "confirmed trust store, stale-certificate, pending-cleanup, and required-action state.",
-            objectSchema(),
+            pagedObjectSchema("from the first detected target"),
         ),
         McpToolDefinition(
             "set_proxy",
@@ -349,9 +361,9 @@ internal object WailoMcpTools {
         ),
         readTool(
             "list_map_local",
-            "List all in-memory Map Local fixtures and the global enabled state, without body data. Call " +
-                "get_map_local for one fixture's body.",
-            objectSchema(),
+            "List compact Map Local fixture metadata and the global enabled state. Call get_map_local for " +
+                "one fixture's headers and body, or list_rule_groups for group metadata.",
+            pagedObjectSchema("from the highest-priority fixture"),
         ),
         readTool(
             "get_map_local",
@@ -359,7 +371,7 @@ internal object WailoMcpTools {
                 "serves. Text MIME bodies are UTF-8; other bodies are Base64.",
             objectSchema(
                 "id" to string("Rule id"),
-                "body_bytes" to integer("Maximum bytes returned from the fixture body", minimum = 0, maximum = 1_000_000),
+                "body_bytes" to bodyBytes("the fixture body"),
                 required = listOf("id"),
             ),
         ),
@@ -407,7 +419,11 @@ internal object WailoMcpTools {
             "Remove a breakpoint rule by id and update connected devices.",
             objectSchema("id" to string("Rule id"), required = listOf("id")),
         ),
-        readTool("list_breakpoints", "List breakpoint rules and the global enabled state.", objectSchema()),
+        readTool(
+            "list_breakpoints",
+            "List compact breakpoint rules and the global enabled state. Call list_rule_groups for group metadata.",
+            pagedObjectSchema("from the highest-priority breakpoint"),
+        ),
         McpToolDefinition(
             "set_breakpoints_enabled",
             "Globally enable or disable all registered breakpoint rules without deleting them.",
@@ -439,10 +455,10 @@ internal object WailoMcpTools {
         ),
         readTool(
             "list_seeds",
-            "List the seed library and the global enabled state, without body data. armed says whether a " +
-                "seed is still waiting to answer a hold; a seed that has been spent stays in the library " +
-                "with armed false until the next fill_seeds.",
-            objectSchema(),
+            "List compact seed metadata and the global enabled state. Call get_seed for one seed's headers " +
+                "and body, or list_rule_groups for group metadata. armed says whether a seed is waiting " +
+                "to answer a hold; a spent seed stays in the library with armed false until fill_seeds.",
+            pagedObjectSchema("from the highest-priority seed"),
         ),
         readTool(
             "get_seed",
@@ -450,7 +466,7 @@ internal object WailoMcpTools {
                 "Text MIME bodies are UTF-8; other bodies are Base64.",
             objectSchema(
                 "id" to string("Seed id"),
-                "body_bytes" to integer("Maximum bytes returned from the seed body", minimum = 0, maximum = 1_000_000),
+                "body_bytes" to bodyBytes("the seed body"),
                 required = listOf("id"),
             ),
         ),
@@ -488,7 +504,11 @@ internal object WailoMcpTools {
         readTool(
             "list_rule_groups",
             "List one panel's rule groups with their enabled state.",
-            objectSchema("family" to ruleFamily(), required = listOf("family")),
+            pagedObjectSchema(
+                "from the first group",
+                "family" to ruleFamily(),
+                required = listOf("family"),
+            ),
         ),
         McpToolDefinition(
             "set_rule_order",
@@ -552,6 +572,12 @@ internal object WailoMcpTools {
         McpToolDefinition(name, description, schema, readOnly = true)
 }
 
+internal const val MCP_DEFAULT_PAGE_LIMIT = 20
+internal const val MCP_MAX_PAGE_LIMIT = 100
+internal const val MCP_DEFAULT_BODY_BYTES = 1_024
+internal const val MCP_MAX_BODY_BYTES = 65_536
+internal const val MCP_MAX_RESPONSE_BODY_BYTES = 65_536
+
 private fun objectSchema(
     vararg properties: Pair<String, Map<String, Any>>,
     required: List<String> = emptyList(),
@@ -561,6 +587,43 @@ private fun objectSchema(
     if (required.isNotEmpty()) put("required", required)
     put("additionalProperties", false)
 }
+
+private fun pagedObjectSchema(
+    offsetDescription: String,
+    vararg properties: Pair<String, Map<String, Any>>,
+    required: List<String> = emptyList(),
+): Map<String, Any> = objectSchema(
+    *properties,
+    "limit" to pageLimit(),
+    "offset" to integer(
+        "Rows to skip $offsetDescription; defaults to 0",
+        minimum = 0,
+        maximum = Int.MAX_VALUE,
+    ),
+    required = required,
+)
+
+private fun newestPagedObjectSchema(
+    vararg properties: Pair<String, Map<String, Any>>,
+): Map<String, Any> = objectSchema(
+    *properties,
+    "limit" to pageLimit(),
+    "before_id" to string(
+        "Return matches older than this exchange id. Use next_before_id from the previous page.",
+    ),
+)
+
+private fun pageLimit(): Map<String, Any> = integer(
+    "Maximum rows returned; defaults to $MCP_DEFAULT_PAGE_LIMIT",
+    minimum = 1,
+    maximum = MCP_MAX_PAGE_LIMIT,
+)
+
+private fun bodyBytes(subject: String): Map<String, Any> = integer(
+    "Maximum bytes returned from $subject; defaults to $MCP_DEFAULT_BODY_BYTES",
+    minimum = 0,
+    maximum = MCP_MAX_BODY_BYTES,
+)
 
 private fun string(description: String): Map<String, Any> = mapOf(
     "type" to "string",
