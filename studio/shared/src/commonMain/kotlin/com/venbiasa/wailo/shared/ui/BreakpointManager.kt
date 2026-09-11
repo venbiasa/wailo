@@ -164,7 +164,7 @@ private fun BreakpointRuleContent(rule: BreakpointRuleDef) {
         style = monoSmall(),
         color = MaterialTheme.colorScheme.onSurface,
         maxLines = 1,
-        overflow = TextOverflow.Ellipsis,
+        overflow = TextOverflow.MiddleEllipsis,
     )
     Text(
         ruleSummary(rule),
