@@ -43,11 +43,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.venbiasa.wailo.shared.BreakpointNode
 import com.venbiasa.wailo.shared.BreakpointRuleDef
-import com.venbiasa.wailo.shared.RuleGroup
-import com.venbiasa.wailo.shared.assignRuleToGroup
 import com.venbiasa.wailo.shared.findRule
 import com.venbiasa.wailo.shared.groupOf
-import com.venbiasa.wailo.shared.groups
 import com.venbiasa.wailo.shared.resources.Res
 import com.venbiasa.wailo.shared.resources.ic_arrow_back
 import com.venbiasa.wailo.shared.resources.ic_arrow_drop_down
@@ -69,7 +66,7 @@ import org.jetbrains.compose.resources.vectorResource
  * The list drags and groups exactly like Map Local's and Seed's, but its order is arrangement rather than
  * priority: every matching rule pauses the exchange, so there is no first match to promote (ADR-0098
  * keeps the grips anyway — a set you can arrange is easier to read than one you can't). A rule joins a
- * group by being dragged into it, or through the picker in its editor.
+ * group by being dragged into it, which is also why its editor offers no group field.
  *
  * [enabled] is the feature master (ADR-0030): off dims the list and disables every rule/group switch (and
  * the editor's), their remembered state kept, while the host pushes no rules — so breakpoints go inert
@@ -142,16 +139,14 @@ internal fun BreakpointManager(
         key(target.id) {
             BreakpointRuleEditor(
                 initial = target,
-                groups = nodes.groups(),
-                initialGroupId = nodes.groupOf(target.id)?.id,
                 enabled = (persisted ?: target).enabled,
                 enabledToggleable = enabled && groupEnabled,
                 onToggleEnabled = { next ->
                     if (nodes.findRule(target.id) != null) onLayoutChange(nodes.setRuleEnabled(target.id, next))
                     else editing = target.copy(enabled = next)
                 },
-                onSave = { rule, groupId ->
-                    onLayoutChange(nodes.upsertRule(rule).assignRuleToGroup(rule.id, groupId))
+                onSave = { rule ->
+                    onLayoutChange(nodes.upsertRule(rule))
                     editing = null
                 },
                 onBack = { editing = null },
@@ -183,25 +178,21 @@ private fun BreakpointRuleContent(rule: BreakpointRuleDef) {
 }
 
 /**
- * The breakpoint rule editor page: the rule's name and group, its match (URL pattern + method), and which
- * phase(s) it pauses. [enabled]/[onToggleEnabled] drive the header switch (committed by the host, gated by
+ * The breakpoint rule editor page: the rule's name, its match (URL pattern + method), and which phase(s)
+ * it pauses. [enabled]/[onToggleEnabled] drive the header switch (committed by the host, gated by
  * [enabledToggleable] when the rule sits in an off group). Save is blocked until the rule has a name and a
  * URL pattern and at least one phase is chosen — a rule that pauses on neither phase never fires.
  *
- * [groups]/[initialGroupId] back the group picker, and [onSave] reports the chosen group beside the rule.
- * Filing a rule from here reaches a group that is scrolled far from the rule, or collapsed, without the
- * drag that would otherwise be the only way in; it lands the rule at the end of the group, since where
- * inside it the rule sits is what the drag is for.
+ * A rule's group is not editable here: the list files rules by drag, so offering a second way in would
+ * mean two controls for one placement, and the picker could not express where in the group it lands.
  */
 @Composable
 private fun BreakpointRuleEditor(
     initial: BreakpointRuleDef,
-    groups: List<RuleGroup>,
-    initialGroupId: String?,
     enabled: Boolean,
     enabledToggleable: Boolean,
     onToggleEnabled: (Boolean) -> Unit,
-    onSave: (BreakpointRuleDef, String?) -> Unit,
+    onSave: (BreakpointRuleDef) -> Unit,
     onBack: () -> Unit,
     onClose: () -> Unit,
 ) {
@@ -209,7 +200,6 @@ private fun BreakpointRuleEditor(
     var name by remember { mutableStateOf(initial.name) }
     var urlPattern by remember { mutableStateOf(initial.urlPattern) }
     var method by remember { mutableStateOf(initial.method) }
-    var groupId by remember { mutableStateOf(initialGroupId) }
     var onRequest by remember { mutableStateOf(initial.onRequest) }
     var onResponse by remember { mutableStateOf(initial.onResponse) }
     var showError by remember { mutableStateOf(false) }
@@ -230,7 +220,6 @@ private fun BreakpointRuleEditor(
                     onRequest = onRequest,
                     onResponse = onResponse,
                 ),
-                groupId,
             )
         } else {
             showError = true
@@ -313,18 +302,8 @@ private fun BreakpointRuleEditor(
                     isError = showError && urlPattern.isBlank(),
                 )
             }
-            // The method picker hugs its content; the group's name is free text, so it takes the rest.
-            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                EditorField("Method") {
-                    MethodDropdown(method = method, onSelect = { method = it })
-                }
-                EditorField("Group", Modifier.weight(1f)) {
-                    GroupDropdown(
-                        groups = groups,
-                        groupId = groupId,
-                        onSelect = { groupId = it },
-                    )
-                }
+            EditorField("Method") {
+                MethodDropdown(method = method, onSelect = { method = it })
             }
             EditorField("Pause on") {
                 Row(
@@ -370,11 +349,10 @@ private fun BreakpointRuleEditor(
 @Composable
 private fun EditorField(
     label: String,
-    modifier: Modifier = Modifier,
     error: String? = null,
     content: @Composable () -> Unit,
 ) {
-    Column(modifier) {
+    Column {
         Text(label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Spacer(Modifier.height(4.dp))
         content()
@@ -419,56 +397,20 @@ private val MethodOptions = listOf("", "GET", "POST", "PUT", "PATCH", "DELETE", 
 
 private fun methodLabel(method: String): String = method.ifBlank { "Any" }
 
+// A field-shaped click target rather than a real text field, so it lines up with the inputs above it
+// (see CompactFieldDecoration) while staying read-only.
 @Composable
 private fun MethodDropdown(method: String, onSelect: (String) -> Unit) {
-    CompactPicker(
-        selectedLabel = methodLabel(method),
-        options = MethodOptions.map { it to methodLabel(it) },
-        onSelect = onSelect,
-    )
-}
-
-// The group a rule is filed into, chosen rather than dragged. A null id is the top level, which leads the
-// menu as the "not in a group" default the way a blank method does.
-@Composable
-private fun GroupDropdown(
-    groups: List<RuleGroup>,
-    groupId: String?,
-    onSelect: (String?) -> Unit,
-) {
-    val selected = groups.firstOrNull { it.id == groupId }
-    CompactPicker(
-        selectedLabel = if (selected == null) NoGroupLabel else groupLabel(selected),
-        options = listOf<Pair<String?, String>>(null to NoGroupLabel) + groups.map { it.id to groupLabel(it) },
-        onSelect = onSelect,
-        modifier = Modifier.fillMaxWidth(),
-    )
-}
-
-private const val NoGroupLabel = "None"
-
-private fun groupLabel(group: RuleGroup): String = group.name.ifBlank { "New group" }
-
-// The compact read-only picker behind both the method and the group field: a field-shaped click target
-// that opens a menu of value-to-label [options]. Both go through one composable so they keep the same
-// height and hit behaviour as the text fields beside them (see CompactFieldDecoration).
-@Composable
-private fun <T> CompactPicker(
-    selectedLabel: String,
-    options: List<Pair<T, String>>,
-    onSelect: (T) -> Unit,
-    modifier: Modifier = Modifier,
-) {
     var expanded by remember { mutableStateOf(false) }
     val interactionSource = remember { MutableInteractionSource() }
-    Box(modifier) {
+    Box {
         Box(
             Modifier
                 .clip(RoundedCornerShape(4.dp))
                 .clickable(interactionSource = interactionSource, indication = null) { expanded = true },
         ) {
             CompactFieldDecoration(
-                value = selectedLabel,
+                value = methodLabel(method),
                 interactionSource = interactionSource,
                 trailingIcon = {
                     Icon(
@@ -480,21 +422,19 @@ private fun <T> CompactPicker(
                 },
                 innerTextField = {
                     Text(
-                        selectedLabel,
+                        methodLabel(method),
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurface,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
                     )
                 },
             )
         }
         DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-            options.forEach { (value, label) ->
+            MethodOptions.forEach { option ->
                 DropdownMenuItem(
-                    text = { Text(label) },
+                    text = { Text(methodLabel(option)) },
                     onClick = {
-                        onSelect(value)
+                        onSelect(option)
                         expanded = false
                     },
                 )

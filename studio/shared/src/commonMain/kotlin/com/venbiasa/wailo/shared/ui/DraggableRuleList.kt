@@ -126,8 +126,9 @@ private const val AutoScrollMaxPxPerSecond = 1500f
  *
  * [reorderable] drops the drag handles for a list whose order must not read as adjustable. No panel passes
  * false today — the breakpoints list keeps its grips even though its order is arrangement rather than match
- * priority (ADR-0098) — so this is the switch for the next one that needs it. Groups organize and gate
- * rules either way; without the grips, a rule can only change groups through its own editor.
+ * priority (ADR-0098) — so this is the switch for the next one that needs it. Note what it also costs: the
+ * drag is the only gesture that files a rule into a group, so a grip-free list can create groups it cannot
+ * fill.
  */
 @Composable
 internal fun <T : LayoutRule<T>> GroupedRuleListPage(

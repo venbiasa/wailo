@@ -76,14 +76,6 @@ fun <T : LayoutRule<T>> List<LayoutNode<T>>.allRules(): List<T> = buildList {
 /** The rule with [ruleId] anywhere in the layout, or null. */
 fun <T : LayoutRule<T>> List<LayoutNode<T>>.findRule(ruleId: String): T? = allRules().firstOrNull { it.id == ruleId }
 
-/** Every group in layout order — what a picker offers when a rule's group is chosen rather than dragged. */
-fun <T : LayoutRule<T>> List<LayoutNode<T>>.groups(): List<RuleGroup> = mapNotNull { node ->
-    when (node) {
-        is GroupNode -> node.group
-        is RuleNode -> null
-    }
-}
-
 /** The group holding [ruleId], or null if the rule is loose / not found. */
 fun <T : LayoutRule<T>> List<LayoutNode<T>>.groupOf(ruleId: String): RuleGroup? {
     forEach { node -> if (node is GroupNode && node.rules.any { it.id == ruleId }) return node.group }
@@ -186,29 +178,6 @@ fun <T : LayoutRule<T>> List<LayoutNode<T>>.setRuleEnabled(ruleId: String, enabl
         } else {
             node
         }
-    }
-}
-
-/**
- * File [ruleId] into [groupId], or out to the top level when it is null or blank — changing a rule's group
- * without the drag that normally does it, so a group that is collapsed or scrolled far from the rule is
- * still reachable from the rule's own editor. The rule lands at the end of wherever it is going, which for
- * an ordered panel is the lowest match priority: the same slot a newly added rule takes, so filing one
- * never promotes it past rules already in the group.
- *
- * A rule that is already there is returned untouched, so re-saving a rule cannot quietly move it, and a
- * [groupId] no group answers to is a no-op rather than a rule pulled out and dropped.
- */
-fun <T : LayoutRule<T>> List<LayoutNode<T>>.assignRuleToGroup(ruleId: String, groupId: String?): List<LayoutNode<T>> {
-    val target = groupId?.takeIf { it.isNotBlank() }
-    if (findRule(ruleId) == null) return this
-    if (groupOf(ruleId)?.id == target) return this
-    if (target != null && groupNode(target) == null) return this
-    val reduced = removeRule(ruleId)
-    return if (target == null) {
-        moveRule(ruleId, TopLevelAt(reduced.size))
-    } else {
-        moveRule(ruleId, InGroupAt(target, reduced.groupNode(target)?.rules?.size ?: 0))
     }
 }
 

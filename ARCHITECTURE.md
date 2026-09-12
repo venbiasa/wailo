@@ -228,8 +228,9 @@ any change; `desktopApp` owns UI persistence and file IO, then sends state chang
 list (ADR-0026/0028), and each has an independent feature master that makes it inert without erasing what's
 configured (ADR-0030). All three drag and reorder, but only Map Local and Seed resolve by first match, so
 only their order is a priority: every matching breakpoint rule fires, and arranging that list is for
-reading it (ADR-0098, superseding ADR-0042's grip-free breakpoints). A breakpoint rule can also pick its
-group in its editor, for a group a drag would have to reach.
+reading it (ADR-0098, superseding ADR-0042's grip-free breakpoints). Dragging is also the only way a rule
+joins a group, which is why taking the breakpoint handles away had left its groups unfillable from
+Studio at all.
 
 All three rule panels are also reachable from a captured row's right-click, which opens the panel on an
 editor pre-filled from that exchange rather than asking for the URL again. Map Local and Seed both carry

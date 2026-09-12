@@ -7,10 +7,12 @@ relations: supersedes ADR-0042 (restores the drag handles it removed); completes
 ---
 # ADR-0098 — A breakpoint rule is named, and its list is arranged by hand
 
-- Status: Accepted; implemented in `shared` (`BreakpointRuleDef.name`, `assignRuleToGroup`, `groups()`,
-  the `BreakpointManager` row and editor, `ArchivedBreakpointRule.name`), `host`
-  (`HostBreakpointRule.name`), `daemon` (`BreakpointRuleDto.name`), `desktopApp` (both directions of the
-  layout seam), and the two headless frontends (`set_breakpoint --name`, MCP `name` + `list_breakpoints`).
+- Status: Accepted; implemented in `shared` (`BreakpointRuleDef.name`, the `BreakpointManager` row and
+  editor, `ArchivedBreakpointRule.name`), `host` (`HostBreakpointRule.name`), `daemon`
+  (`BreakpointRuleDto.name`), `desktopApp` (both directions of the layout seam), and the two headless
+  frontends (`set_breakpoint --name`, MCP `name` + `list_breakpoints`). Amended the same day it landed:
+  the editor's group picker was dropped, leaving drag as the one way a rule joins a group (see the
+  alternative below), and the `assignRuleToGroup`/`groups()` layout ops it needed were removed with it.
 - Context: two gaps, both of which read as "breakpoints are Map Local's sibling, except where they
   aren't".
   - **No name.** A Map Local rule has carried an author-facing label since it had a list; a breakpoint rule
@@ -22,7 +24,8 @@ relations: supersedes ADR-0042 (restores the drag handles it removed); completes
     handles away, because every matching rule pauses the exchange and ordering them changes nothing. But
     dragging was also the only gesture that *files* a rule into a group. Studio kept the button that
     creates a group and lost the move that fills one — so a breakpoint group could only be populated from
-    the CLI or MCP, which have named a `group_id` since ADR-0081.
+    the CLI or MCP, which have named a `group_id` since ADR-0081. Whatever else the handles are worth,
+    that alone made them load-bearing.
 - Decision:
   - **A breakpoint rule carries a `name`,** defaulting to `Untitled`, required non-blank to save, and
     never part of matching — the same contract Map Local's has. It travels the whole authored path rather
@@ -44,29 +47,26 @@ relations: supersedes ADR-0042 (restores the drag handles it removed); completes
     matched against, and the arrangement is persisted daemon state, not a view preference, so it is worth
     the gesture. The cost it named — a user who infers a priority that isn't there — is smaller than a
     panel that is visibly the one sibling you cannot organize.
-  - **A rule's group can also be set in its editor,** from a picker listing `None` and the existing
-    groups, committed by Save with the rest of the rule. Drag is the better gesture when both ends are on
-    screen and it is the only one that says *where* inside a group; the picker covers what it is worst at —
-    a collapsed or far-scrolled group, and a rule authored from a traffic row that opens in the editor
-    already. The move is a pure layout op, `assignRuleToGroup`: it appends at the destination's end,
-    returns the layout untouched when the rule is already there, and refuses a group id nothing answers to.
+  - **Drag is the only way a rule joins a group,** so the editor has no group field. Restoring the handles
+    already closes the gap the picker was added for, and a second control for one placement is worse than
+    none: it cannot say *where* inside the group the rule lands, and two ways to move a rule means two
+    places to look when one disagrees with the list.
 - Alternatives considered:
-  - **Keep ADR-0042's grip-free list and let the picker be the only way to group.** Rejected — this is the
-    state being reversed. It answers the narrow question (order changes no behaviour) correctly and the
-    wider one wrongly: the missing grips are read as a missing feature every time the panel is opened
-    beside the two that have them.
+  - **A group picker in the editor beside the drag.** Shipped, then removed the same day — the reason it
+    was added (a group that is collapsed or scrolled far from the rule) is real but narrow, and it is
+    reachable by expanding the group or scrolling, whereas a picker permanently puts a second, weaker
+    control next to the gesture that does the job properly.
+  - **Keep ADR-0042's grip-free list and reach groups only from a picker.** Rejected — this is the state
+    being reversed. It answers the narrow question (order changes no behaviour) correctly and the wider
+    one wrongly: the missing grips are read as a missing feature every time the panel is opened beside
+    the two that have them.
   - **Give breakpoint order a meaning so the drag "earns" itself** — first match wins, later rules skipped.
     Still rejected, for ADR-0042's own reason: one URL can legitimately want a request-phase rule *and* a
     response-phase rule, and "only one breakpoint may fire" would silently drop the second.
-  - **Drag only, no picker.** Rejected: filing into a collapsed group or one scrolled off the panel is
-    exactly where a drag is worst, and a rule authored from a traffic row is already in the editor.
   - **Keep the URL as the row's title and add the name underneath.** Rejected: two long free-text lines
     stacked, and it keeps the row identified by the thing that does not distinguish two rules on one URL.
   - **Leave breakpoints nameless and keep tuning the truncation.** Rejected — the middle ellipsis was the
     symptom. A rule the author cannot label is a rule they have to re-read to recognize.
-  - **Put the group picker in the shared response-rule editor so all three panels get one.** Deferred, not
-    refused: `assignRuleToGroup` is generic over `LayoutRule`, so it is one call away if Map Local and Seed
-    want the same shortcut into a distant group.
 - Consequences:
   - Existing breakpoint rules read `Untitled` in the panel (or their id, when they came from the CLI or
     MCP) until renamed. Nothing about their matching changed, so nothing silently stops firing.
@@ -84,7 +84,6 @@ relations: supersedes ADR-0042 (restores the drag handles it removed); completes
   - Manual smoke: name a rule and confirm the row leads with the name and cuts the URL at the end; clear
     the name and confirm Save is blocked with the field's own error. Reorder rules by drag, drag one into
     a group and back out, drag a whole group, and confirm collapse, rename, and the group switch still
-    work. File a rule from the editor's picker instead and confirm it appends at the end of that group;
-    save again without touching the picker and confirm it does not move. Restart Studio and confirm the
-    name, the group, and the arrangement all came back from the daemon, then `wailo-cli list_breakpoints`
-    and confirm the same rule reads there. Check the panel in both light and dark.
+    work. Restart Studio and confirm the name, the group, and the arrangement all came back from the
+    daemon, then `wailo-cli list_breakpoints` and confirm the same rule reads there. Check the panel in
+    both light and dark.
