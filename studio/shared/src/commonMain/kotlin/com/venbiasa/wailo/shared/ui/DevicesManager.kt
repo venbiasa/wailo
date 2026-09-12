@@ -1,11 +1,8 @@
 package com.venbiasa.wailo.shared.ui
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -143,13 +140,12 @@ internal fun DevicesManager(
                 }
             }
 
-            // An open pairing offer takes over this panel and nothing else: the scrim is a child of the
-            // Devices surface, so the traffic list beside it stays lit and readable while the QR is up
-            // (the same scoping the `+ Add filter` modal uses, mirrored to this side). Dismissing cancels
-            // the offer rather than just hiding it — a live pairing window nobody can see is worse than none.
+            // An open pairing offer takes over this panel and nothing else, so the traffic list beside it
+            // stays lit and readable while the QR is up. Dismissing cancels the offer rather than just
+            // hiding it — a live pairing window nobody can see is worse than none.
             pairing.offer?.let { offer ->
                 val cancel = { onPairingAction(PairingAction.Cancel) }
-                Scrim(onDismiss = cancel)
+                PanelScrim(onDismiss = cancel)
                 PairingOfferCard(
                     offer = offer,
                     onCancel = cancel,
@@ -158,7 +154,7 @@ internal fun DevicesManager(
             }
 
             if (settingUp && pairing.offer == null) {
-                Scrim(onDismiss = { settingUp = false })
+                PanelScrim(onDismiss = { settingUp = false })
                 ProxySetupCard(
                     proxy = proxy,
                     targets = proxyTargets,
@@ -169,19 +165,6 @@ internal fun DevicesManager(
             }
         }
     }
-}
-
-@Composable
-private fun BoxScope.Scrim(onDismiss: () -> Unit) {
-    Box(
-        Modifier.matchParentSize()
-            .background(MaterialTheme.colorScheme.scrim.copy(alpha = 0.4f))
-            .clickable(
-                interactionSource = remember { MutableInteractionSource() },
-                indication = null,
-                onClick = onDismiss,
-            ),
-    )
 }
 
 /**

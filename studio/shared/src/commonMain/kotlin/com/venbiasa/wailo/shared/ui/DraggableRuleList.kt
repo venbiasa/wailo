@@ -1,12 +1,14 @@
 package com.venbiasa.wailo.shared.ui
 
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -19,16 +21,18 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -265,27 +269,66 @@ internal fun <T : LayoutRule<T>> GroupedRuleListPage(
                 )
             }
         }
-    }
 
-    pendingDeleteGroup?.let { group ->
-        val count = nodes.groupNode(group.id)?.rules?.size ?: 0
-        AlertDialog(
-            onDismissRequest = { pendingDeleteGroup = null },
-            title = { Text("Delete group?") },
-            text = {
-                Text(
-                    "\u201c${group.name.ifBlank { "New group" }}\u201d and its $count " +
-                        (if (count == 1) "rule" else "rules") + " will be deleted. This can\u2019t be undone.",
-                )
-            },
-            confirmButton = {
-                TextButton(onClick = {
+        // A child of this panel's Box, not a window dialog: the question is about one group in this list,
+        // so it has no business dimming the traffic beside it.
+        pendingDeleteGroup?.let { group ->
+            val dismiss = { pendingDeleteGroup = null }
+            PanelScrim(onDismiss = dismiss)
+            DeleteGroupCard(
+                group = group,
+                ruleCount = nodes.groupNode(group.id)?.rules?.size ?: 0,
+                onConfirm = {
                     onNodesChange(nodes.removeGroup(group.id))
                     pendingDeleteGroup = null
-                }) { Text("Delete") }
-            },
-            dismissButton = { TextButton(onClick = { pendingDeleteGroup = null }) { Text("Cancel") } },
-        )
+                },
+                onCancel = dismiss,
+                modifier = Modifier.align(Alignment.Center).padding(16.dp),
+            )
+        }
+    }
+}
+
+/**
+ * The confirmation a non-empty group's delete raises (ADR-0026). It states the count because the rules go
+ * with the group, which is the part a user can't see once the group is collapsed.
+ */
+@Composable
+private fun DeleteGroupCard(
+    group: RuleGroup,
+    ruleCount: Int,
+    onConfirm: () -> Unit,
+    onCancel: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Surface(
+        modifier = modifier.widthIn(max = 300.dp),
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.surface,
+        tonalElevation = 3.dp,
+        shadowElevation = 8.dp,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+    ) {
+        Column(
+            Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Text(
+                "Delete group?",
+                style = MaterialTheme.typography.titleSmall,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+            Text(
+                "\u201c${group.name.ifBlank { "New group" }}\u201d and its $ruleCount " +
+                    (if (ruleCount == 1) "rule" else "rules") + " will be deleted. This can\u2019t be undone.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = onConfirm) { Text("Delete") }
+                TextButton(onClick = onCancel) { Text("Cancel") }
+            }
+        }
     }
 }
 

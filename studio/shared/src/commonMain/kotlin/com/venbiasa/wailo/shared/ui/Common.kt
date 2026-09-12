@@ -4,12 +4,14 @@ import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.draggable
 import androidx.compose.foundation.gestures.rememberDraggableState
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -108,6 +110,24 @@ internal fun RowDivider(color: Color = MaterialTheme.colorScheme.outlineVariant)
 @Composable
 internal fun ColumnDivider(color: Color = MaterialTheme.colorScheme.outlineVariant) {
     Box(Modifier.fillMaxHeight().width(1.dp).background(color))
+}
+
+/**
+ * The dim behind a modal, sized to the Box it is dropped into rather than the window — so a modal a panel
+ * raises dims that panel and leaves the rest of the studio lit and usable. Every studio modal is scoped
+ * that way, so it belongs here rather than in whichever panel needed it first.
+ */
+@Composable
+internal fun BoxScope.PanelScrim(onDismiss: () -> Unit) {
+    Box(
+        Modifier.matchParentSize()
+            .background(MaterialTheme.colorScheme.scrim.copy(alpha = 0.4f))
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = onDismiss,
+            ),
+    )
 }
 
 // The two resize seams, one per axis: a visible grip in a wider invisible grab strip, with the matching
