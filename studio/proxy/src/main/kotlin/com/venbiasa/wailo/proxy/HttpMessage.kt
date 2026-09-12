@@ -75,6 +75,13 @@ internal fun List<Header>.withoutHopByHop(preserveUpgrade: Boolean = false): Lis
     return kept + Header("Connection", "Upgrade") + upgrade
 }
 
+/**
+ * Drops the coding header from a record whose bytes were decoded on the way in, so the headers and the
+ * body cannot contradict each other about what is stored.
+ */
+internal fun List<Header>.withoutContentEncoding(): List<Header> =
+    filterNot { it.name.equals("Content-Encoding", ignoreCase = true) }
+
 internal fun List<Header>.withoutContinueExpectation(): List<Header> =
     filterNot {
         it.name.equals("Expect", ignoreCase = true) &&
@@ -239,16 +246,40 @@ internal class ChunkedInputStream(private val source: InputStream) : InputStream
     }
 }
 
+/** The content codings the capture side can undo. The JDK ships neither brotli nor zstd. */
+private enum class CaptureCoding { None, Gzip, Deflate }
+
+// Null is "a coding, but not one of ours". A coding *list* (`gzip, br`) lands there too, which is the
+// safe direction: it reports the bytes as they arrived, which is true.
+private fun captureCoding(contentEncoding: String?): CaptureCoding? =
+    when (contentEncoding?.trim()?.lowercase()) {
+        null, "", "identity" -> CaptureCoding.None
+        "gzip", "x-gzip" -> CaptureCoding.Gzip
+        "deflate" -> CaptureCoding.Deflate
+        else -> null
+    }
+
+/**
+ * Whether a body under [contentEncoding] can be presented as plaintext — either because there is no
+ * coding or because [decodedForCapture] knows it.
+ *
+ * Callers ask so they never *claim* a decode they cannot perform. Recording compressed bytes is fine;
+ * recording them with the header that explains them stripped off is not, because the result is a body
+ * that reads as corrupt for no visible reason.
+ */
+internal fun canDecodeForCapture(contentEncoding: String?): Boolean = captureCoding(contentEncoding) != null
+
 /**
  * Present the entity as the bytes a human would want to read.
  *
  * The client still receives exactly what the origin sent — decoding happens on the inspection side of
- * the tee — so this cannot corrupt the transfer. An encoding we do not know is left alone and simply
- * spools compressed, which is better than refusing to record it.
+ * the tee — so this cannot corrupt the transfer. A coding we do not know is left alone and simply spools
+ * compressed, which is better than refusing to record it; [canDecodeForCapture] is how a caller finds out
+ * that is what happened.
  */
 internal fun decodedForCapture(entity: InputStream, contentEncoding: String?): InputStream =
-    when (contentEncoding?.trim()?.lowercase()) {
-        "gzip", "x-gzip" -> GZIPInputStream(entity)
-        "deflate" -> InflaterInputStream(entity, Inflater(true))
-        else -> entity
+    when (captureCoding(contentEncoding)) {
+        CaptureCoding.Gzip -> GZIPInputStream(entity)
+        CaptureCoding.Deflate -> InflaterInputStream(entity, Inflater(true))
+        CaptureCoding.None, null -> entity
     }

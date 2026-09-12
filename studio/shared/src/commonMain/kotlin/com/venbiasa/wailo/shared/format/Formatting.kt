@@ -202,6 +202,24 @@ internal fun requestHost(url: String): String =
     urlSegments(url).firstOrNull { it.part == UrlPart.Host }?.text ?: ""
 
 /**
+ * A file name to offer when saving a body: the URL's last path segment, which is the name the server
+ * gave the payload and so the one someone saving a captured asset expects to see. The query and
+ * fragment are dropped — they identify a request, not a file — and anything a file name can't safely
+ * carry becomes '-'. Falls back to the host and then to a generic name, so there is always something to
+ * put in the dialog.
+ */
+internal fun bodyFileBaseName(url: String): String {
+    val path = urlSegments(url).firstOrNull { it.part == UrlPart.Path }?.text.orEmpty()
+    val segment = path.trimEnd('/').substringAfterLast('/')
+    val cleaned = fileNameSafe(segment.ifBlank { requestHost(url) })
+    return cleaned.trim('-', '.').ifBlank { "body" }
+}
+
+/** Anything a file name can't safely carry becomes '-'. */
+internal fun fileNameSafe(text: String): String =
+    text.map { if (it.isLetterOrDigit() || it == '-' || it == '_' || it == '.') it else '-' }.joinToString("")
+
+/**
  * Whether [pattern] is a plausible capture-filter entry, gating the panel's manual add input so a stray
  * token (e.g. a lone "s") can't be added. Accepts a domain/IP (has a dot), an explicit wildcard pattern
  * (contains `*`), or the well-known single-label dev host `localhost`; only host characters are allowed

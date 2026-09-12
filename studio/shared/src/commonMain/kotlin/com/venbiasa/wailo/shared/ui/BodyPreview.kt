@@ -23,6 +23,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -32,6 +33,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.venbiasa.wailo.shared.BodyHandle
+import com.venbiasa.wailo.shared.BodySaver
 import com.venbiasa.wailo.shared.LocalBodyLoader
 import com.venbiasa.wailo.shared.prefix
 import com.venbiasa.wailo.shared.format.ImageFormat
@@ -41,7 +43,10 @@ import com.venbiasa.wailo.shared.format.formatBytes
 import com.venbiasa.wailo.shared.format.hexDumpLine
 import com.venbiasa.wailo.shared.format.parseFormUrlEncoded
 import com.venbiasa.wailo.shared.format.prettyPrintJson
+import com.venbiasa.wailo.shared.resources.Res
+import com.venbiasa.wailo.shared.resources.ic_download
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import okio.ByteString
 import org.jetbrains.compose.resources.decodeToImageBitmap
 
@@ -106,6 +111,14 @@ internal fun BodyLoadingNotice(text: String = "Loading body…", modifier: Modif
  * hidden — "the rest is missing" and "the rest is not on screen yet" are not the same claim. A null
  * [body] is that same distinction one step earlier: nothing has been read yet, so the pane says so
  * instead of reporting the body absent.
+ *
+ * A non-null [contentEncoding] means the capture never decoded these bytes, so they are shown as the dump
+ * they are, under a notice naming the coding. Without it a brotli response is an unexplained hex dump on
+ * a body the headers call JSON, which reads as Wailo having broken the response.
+ *
+ * Saving a body is deliberately not here: it acts on the bytes rather than on a view of them, so it lives
+ * in the pane header beside the tabs (see [SaveBodyButton]) and does not move as the user switches
+ * previewers.
  */
 @Composable
 internal fun BodyPreview(
@@ -114,13 +127,16 @@ internal fun BodyPreview(
     contentType: String?,
     declaredSize: Long,
     truncated: Boolean,
+    contentEncoding: String? = null,
     modifier: Modifier = Modifier,
 ) {
     if (body == null) {
         Box(modifier.padding(16.dp)) { BodyLoadingNotice() }
         return
     }
-    val analysis = remember(body, contentType, truncated) { analyzeBody(body, contentType, truncated) }
+    val analysis = remember(body, contentType, truncated, contentEncoding) {
+        analyzeBody(body, contentType, truncated, encoded = contentEncoding != null)
+    }
     if (analysis.isEmpty) {
         Box(modifier.padding(16.dp)) { MutedText("No body") }
         return
@@ -135,6 +151,14 @@ internal fun BodyPreview(
                 selected = selected,
                 onSelect = { selected = it },
                 modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 8.dp),
+            )
+        }
+        // Names the coding rather than the tool's limits first: the reader's question is why this JSON
+        // response is a hex dump, and the answer is that nobody has decompressed it yet.
+        if (contentEncoding != null) {
+            MutedText(
+                "(still $contentEncoding-encoded • Wailo decodes only gzip and deflate)",
+                Modifier.padding(start = 16.dp, end = 16.dp, top = 8.dp),
             )
         }
         // A truncated body is incomplete; say so once, above whichever text/hex previewer is showing.
@@ -157,9 +181,12 @@ internal fun BodyPreview(
                 PreviewKind.Html, PreviewKind.Xml, PreviewKind.Text -> TextPreview(body)
                 PreviewKind.Form -> FormPreview(body)
                 PreviewKind.Hex -> HexPreview(body)
-                PreviewKind.Image -> ImagePreview(body, analysis.imageFormat, declaredSize) {
-                    selected = PreviewKind.Hex
-                }
+                PreviewKind.Image -> ImagePreview(
+                    body = body,
+                    format = analysis.imageFormat,
+                    declaredSize = declaredSize,
+                    onUndecodable = { selected = PreviewKind.Hex },
+                )
             }
         }
     }
@@ -231,6 +258,45 @@ private fun HexPreview(body: ByteString) {
     }
 }
 
+/**
+ * Write a captured body to disk, reading it again in full so the file is the payload and not the preview.
+ *
+ * Lives in the pane header rather than in a previewer: what leaves is the bytes, and every previewer is
+ * showing the same ones. Reports only failure, and through [onFailure] rather than its own text, so the
+ * line can span the pane instead of squeezing the tab row it sits in — a file the user picked and a
+ * dialog they dismissed both explain themselves.
+ */
+@Composable
+internal fun SaveBodyButton(
+    body: ByteString,
+    handle: BodyHandle?,
+    fileName: String,
+    saver: BodySaver,
+    onFailure: (String) -> Unit,
+) {
+    val loader = LocalBodyLoader.current
+    val scope = rememberCoroutineScope()
+    var saving by remember(body) { mutableStateOf(false) }
+    PanelIconButton(
+        icon = Res.drawable.ic_download,
+        contentDescription = "Save body",
+        enabled = !saving,
+        onClick = {
+            saving = true
+            scope.launch {
+                // On screen is only as much as a previewer needs (PreviewByteLimit), so the body is read
+                // again in full rather than saving a file that stops where the view did. What was shown
+                // is the fallback, for a body authored in memory (no handle) and for one the daemon has
+                // since dropped (nothing to read).
+                val full = handle?.let { loader.prefix(it) }
+                val bytes = (if (full == null || full.size == 0) body else full).toByteArray()
+                onFailure(saver.save(fileName, bytes))
+                saving = false
+            }
+        },
+    )
+}
+
 @Composable
 private fun ImagePreview(
     body: ByteString,
@@ -241,7 +307,7 @@ private fun ImagePreview(
     val bitmap = remember(body) { runCatching { body.toByteArray().decodeToImageBitmap() }.getOrNull() }
     if (bitmap == null) {
         // Sniffed as an image but the decoder refused it (unsupported/corrupt) — fall back to Hex so
-        // the payload is never a dead end.
+        // the payload is never a dead end, even though the switch no longer offers it.
         LaunchedEffect(body) { onUndecodable() }
         Box(Modifier.fillMaxSize().padding(16.dp)) { MutedText("Couldn't decode image; showing raw bytes.") }
         return
@@ -254,7 +320,7 @@ private fun ImagePreview(
         }
         Text(
             caption,
-            Modifier.padding(start = 16.dp, end = 16.dp, top = 8.dp),
+            Modifier.padding(horizontal = 16.dp),
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )

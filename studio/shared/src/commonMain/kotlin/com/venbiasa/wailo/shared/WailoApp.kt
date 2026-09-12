@@ -186,12 +186,18 @@ fun WailoApp(
      * preview composed outside a running Studio should show.
      */
     bodyLoader: BodyLoader = BodyLoader { _, _, _ -> ByteArray(0) },
+    /**
+     * How a body view writes a captured payload out to a file — the host owns the save dialog and the
+     * write. Absent, a body view offers no download at all rather than one that leads nowhere.
+     */
+    bodySaver: BodySaver? = null,
 ) {
     WailoTheme(darkTheme = darkTheme) {
         val density = LocalDensity.current
         CompositionLocalProvider(
             LocalDensity provides Density(density.density, density.fontScale * textScale),
             LocalBodyLoader provides bodyLoader,
+            LocalBodySaver provides bodySaver,
             LocalStickyScopeRows provides StickyScopeRows.coerce(stickyScopeRows),
         ) {
             WailoViewer(

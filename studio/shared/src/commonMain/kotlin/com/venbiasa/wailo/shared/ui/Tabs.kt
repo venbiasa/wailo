@@ -43,6 +43,10 @@ internal data class TabItem<T>(
  * Quiet text tabs with a 2dp underline on the selected item, over a full-width hairline baseline —
  * the low-chrome idiom for dense inspectors. Generic over the choice type. [trailingLabel] is a
  * small muted caption pinned to the right of the row (used to mark the pane as Request/Response).
+ *
+ * [trailing] takes one action for the pane, beside that caption. It rides in the row's existing height
+ * (a 36dp icon button is no taller than the tab labels), which is the point: an inspector this dense has
+ * no vertical budget for a band of its own.
  */
 @Composable
 internal fun <T> UnderlineTabs(
@@ -51,6 +55,7 @@ internal fun <T> UnderlineTabs(
     onSelect: (T) -> Unit,
     modifier: Modifier = Modifier,
     trailingLabel: String? = null,
+    trailing: (@Composable () -> Unit)? = null,
 ) {
     Box(modifier) {
         Box(
@@ -101,11 +106,12 @@ internal fun <T> UnderlineTabs(
             if (trailingLabel != null) {
                 Text(
                     trailingLabel,
-                    Modifier.padding(start = 8.dp, end = 14.dp),
+                    Modifier.padding(start = 8.dp, end = if (trailing != null) 2.dp else 14.dp),
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
+            trailing?.invoke()
         }
     }
 }

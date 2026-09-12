@@ -66,6 +66,7 @@ import com.venbiasa.wailo.shared.DeviceInfo
 import com.venbiasa.wailo.shared.DeviceTransportKind
 import com.venbiasa.wailo.shared.BodyHandle
 import com.venbiasa.wailo.shared.BodyLoader
+import com.venbiasa.wailo.shared.BodySaver
 import com.venbiasa.wailo.shared.FlowEntry
 import com.venbiasa.wailo.shared.GroupNode
 import com.venbiasa.wailo.shared.MapLocalNode
@@ -882,9 +883,16 @@ private fun runWailo(engine: DaemonClient) = application {
             window.requestFocus()
             DesktopAppEvents.requestForeground()
         }
+        // `window` parents the save dialog, so it is remembered per window rather than rebuilt each
+        // recomposition — it rides in on a static CompositionLocal, which invalidates the whole tree
+        // below it when its value changes.
+        val bodySaver = remember(window) {
+            BodySaver { name, bytes -> saveBodyFile(window, name, bytes) }
+        }
         WailoApp(
             entries = entries,
             bodyLoader = bodyLoader,
+            bodySaver = bodySaver,
             zoneOffsetMillis = zoneOffsetMillis,
             darkTheme = darkTheme,
             onToggleDarkTheme = { setDarkTheme(!darkTheme) },
@@ -1401,6 +1409,25 @@ private suspend fun chooseMapLocalFile(owner: Frame?): PickedFile? {
     return withContext(Dispatchers.IO) {
         runCatching { PickedFile(file.readBytes(), guessContentType(file.name)) }.getOrNull()
     }
+}
+
+/**
+ * Writes a captured body where the user points, for the detail panel's download. A save dialog rather
+ * than a fixed folder, because an asset pulled out of a capture is usually on its way somewhere
+ * specific; the name the URL gave it is only the starting suggestion.
+ *
+ * Returns the line the viewer shows, which is blank unless the write actually failed — a dialog the user
+ * dismissed, or a file they chose and can now see, needs nothing said about it.
+ */
+private suspend fun saveBodyFile(owner: Frame?, suggestedName: String, bytes: ByteArray): String {
+    val file = awaitNativeFileDialog(
+        owner = owner,
+        title = "Save body",
+        mode = FileDialog.SAVE,
+        defaultFileName = suggestedName,
+    ) ?: return ""
+    val failure = withContext(Dispatchers.IO) { runCatching { file.writeBytes(bytes) }.exceptionOrNull() }
+    return failure?.let { "Could not save: ${it.message}" } ?: ""
 }
 
 /**

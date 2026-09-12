@@ -201,22 +201,42 @@ class ProxyServer private constructor(
             clientOut.write(CONTINUE_RESPONSE)
             clientOut.flush()
         }
-        val held = if (intent.holdRequest) hold(clientIn, requestFrame) else null
+        // A hold exists to show a body and take an edit back, so it decodes what it reads — and declines
+        // outright for a coding it cannot undo, rather than offering compressed bytes as the body. The
+        // entity then stays in the socket for the streaming relay, which records it as it arrived.
+        val requestCoding = head.header("Content-Encoding")
+        val scriptRequestBody = intent.transformRequest &&
+            requestCoding == null &&
+            (requestFrame.kind == FramingKind.None ||
+                (requestFrame.kind == FramingKind.Fixed && requestFrame.length <= MAX_SCRIPT_BODY_BYTES))
+        val held = if (
+            (intent.holdRequest && canDecodeForCapture(requestCoding)) ||
+            scriptRequestBody
+        ) {
+            hold(clientIn, requestFrame, requestCoding)
+        } else {
+            null
+        }
 
         var request = HttpRequest(
             method = head.first,
             url = target.url,
-            headers = forwardedHeaders,
+            // A held body was decoded, so the coding header no longer describes it. Dropping it here also
+            // corrects what is forwarded: `sendRequest` sends these headers with the bytes the hold left.
+            headers = if (held != null) forwardedHeaders.withoutContentEncoding() else forwardedHeaders,
             body = held?.bytes?.toByteString() ?: ByteString.EMPTY,
             body_size = held?.bytes?.size?.toLong() ?: requestFrame.length,
             // A body that outgrew the hold ceiling is offered as a fact, not an editing surface: the
             // daemon reads this and declines to stop an exchange it could only half show.
-            body_truncated = held?.complete == false,
+            body_truncated = held?.complete == false ||
+                (intent.transformRequest && requestFrame.kind != FramingKind.None && held == null),
         )
 
+        var requestBodyReplaced = held != null && requestCoding != null
         when (val verdict = runCatching { rules.onRequest(peer, request) }.getOrDefault(RequestVerdict.Proceed())) {
             is RequestVerdict.Abort -> {
-                val consumed = consumeRequest(held, clientIn, requestFrame, intent)
+                val consumed = consumeRequest(held, clientIn, requestFrame, intent, requestCoding)
+                request = request.recordedAfter(consumed)
                 respondDirectly(clientOut, 502, "Bad Gateway", ABORTED_MESSAGE)
                 record(
                     intent,
@@ -230,7 +250,8 @@ class ProxyServer private constructor(
             }
 
             is RequestVerdict.Respond -> {
-                val consumed = consumeRequest(held, clientIn, requestFrame, intent)
+                val consumed = consumeRequest(held, clientIn, requestFrame, intent, requestCoding)
+                request = request.recordedAfter(consumed)
                 val answered = writeResponse(clientOut, verdict.response)
                 record(
                     intent,
@@ -244,7 +265,10 @@ class ProxyServer private constructor(
                 return !consumed.spoiled && !head.wantsClose()
             }
 
-            is RequestVerdict.Proceed -> verdict.edited?.let { request = it }
+            is RequestVerdict.Proceed -> {
+                verdict.edited?.let { request = it }
+                requestBodyReplaced = requestBodyReplaced || verdict.bodyReplaced
+            }
         }
 
         val upstream = try {
@@ -273,8 +297,21 @@ class ProxyServer private constructor(
                 } else {
                     request
                 }
-                val sent = sendRequest(upstreamOut, head, route, outboundRequest, held, requestFrame, clientIn, intent)
+                val sent = sendRequest(
+                    upstreamOut,
+                    head,
+                    route,
+                    outboundRequest,
+                    held,
+                    requestFrame,
+                    clientIn,
+                    intent,
+                    requestBodyReplaced,
+                )
                 upstreamOut.flush()
+                // The head upstream is already written, so this only corrects the record — the client's
+                // own framing and coding reached the origin untouched.
+                request = request.recordedAfter(sent)
 
                 var responseHead = readHead(upstreamIn)
                     ?: throw IOException("Upstream closed before sending a response")
@@ -310,9 +347,19 @@ class ProxyServer private constructor(
                 }
                 val framing = responseFraming(head, responseHead)
                 // A response that says up front it is past the hold ceiling is relayed as usual, rather than
-                // read to the ceiling only to give up there.
-                val holdable = framing.kind != FramingKind.Fixed || framing.length <= MAX_HELD_BODY_BYTES
-                if (intent.holdResponse && holdable) {
+                // read to the ceiling only to give up there. A coding this cannot undo is declined for the
+                // reason a request hold is: the pane would show compressed bytes, and delivering them after
+                // the hold means stripping the header that explained them (`framedFor`) or re-compressing
+                // an edit to match it. Relayed instead, it is recorded honestly and reaches the client
+                // byte-exact.
+                val holdable = (framing.kind != FramingKind.Fixed || framing.length <= MAX_HELD_BODY_BYTES) &&
+                    canDecodeForCapture(responseHead.header("Content-Encoding"))
+                val scriptHoldable = intent.transformResponse &&
+                    responseHead.header("Content-Encoding") == null &&
+                    !responseHead.isEventStream() &&
+                    (framing.kind == FramingKind.None ||
+                        (framing.kind == FramingKind.Fixed && framing.length <= MAX_SCRIPT_BODY_BYTES))
+                if ((intent.holdResponse && holdable) || scriptHoldable) {
                     return holdResponse(
                         head,
                         request,
@@ -334,7 +381,32 @@ class ProxyServer private constructor(
                 ) {
                     upstream.socket.soTimeout = 0
                 }
-                clientOut.write(responseHead.raw)
+                var responseTemplate: HttpResponse? = null
+                if (intent.transformResponse) {
+                    val unavailable = responseHead.asResponse(
+                        bytes = framing.length,
+                        spoiled = framing.kind != FramingKind.None,
+                        decoded = false,
+                    )
+                    when (
+                        val verdict = runCatching { rules.onResponse(peer, request, unavailable) }
+                            .getOrDefault(ResponseVerdict.Proceed())
+                    ) {
+                        ResponseVerdict.Abort -> {
+                            respondDirectly(clientOut, 502, "Bad Gateway", ABORTED_MESSAGE)
+                            return false
+                        }
+                        is ResponseVerdict.Proceed -> {
+                            responseTemplate = verdict.edited?.let { edited ->
+                                edited.copy(
+                                    body = ByteString.EMPTY,
+                                    headers = edited.headers.preserveFramingFrom(unavailable.headers),
+                                )
+                            } ?: unavailable
+                        }
+                    }
+                }
+                clientOut.write(responseTemplate?.headBytes(responseHead.third) ?: responseHead.raw)
                 clientOut.flush()
                 val response = relayBody(
                     source = upstreamIn,
@@ -350,7 +422,10 @@ class ProxyServer private constructor(
                     exchange(
                         request = request,
                         startedAt = startedAt,
-                        response = responseHead.asResponse(response.bytes, response.spoiled, response.decoded),
+                        response = responseTemplate?.copy(
+                            body_size = response.bytes,
+                            body_truncated = response.spoiled,
+                        ) ?: responseHead.asResponse(response.bytes, response.spoiled, response.decoded),
                         requestBytes = sent.bytes,
                         requestSpoiled = sent.spoiled,
                         responseBytes = response.bytes,
@@ -374,6 +449,9 @@ class ProxyServer private constructor(
      * The body is decoded first and forwarded decoded, with the framing headers recomputed. An editor
      * cannot usefully show gzip, and re-compressing an edited body only to have the client inflate it
      * again would be work done to hide the fact that the exchange was stopped.
+     *
+     * Only reached for a coding the capture can actually undo — the hold gate declines the rest — which is
+     * what makes the decoded framing claimed below true rather than merely asserted.
      */
     private fun holdResponse(
         head: HttpHead,
@@ -478,6 +556,7 @@ class ProxyServer private constructor(
         framing: Framing,
         clientIn: InputStream,
         intent: Interception,
+        bodyReplaced: Boolean,
     ): Relayed {
         // Only a hold can have produced an edit, so with nothing held the body is still in the socket and
         // streaming it is both correct and the only way to leave the connection on a message boundary.
@@ -492,9 +571,14 @@ class ProxyServer private constructor(
                 contentEncoding = head.header("Content-Encoding"),
             )
         }
-        val bytes = request.body.takeIf { it.size > 0 }?.toByteArray() ?: held.bytes
+        val bytes = if (bodyReplaced) request.body.toByteArray() else held.bytes
         if (held.complete) {
-            upstreamOut.write(requestHead(head, target, request.headers.framedFor(bytes.size.toLong(), complete = true)))
+            val headers = if (bodyReplaced) {
+                request.headers.framedFor(bytes.size.toLong(), complete = true)
+            } else {
+                request.headers
+            }
+            upstreamOut.write(requestHead(head, target, headers))
             upstreamOut.write(bytes)
             return Relayed(spool(intent, bytes), bytes.size.toLong(), spoiled = false, decoded = false)
         }
@@ -697,6 +781,16 @@ class ProxyServer private constructor(
     )
 
     /**
+     * The request as it should be recorded now that its body has been captured.
+     *
+     * Capture decodes what it can, so a decoded body has outlived its `Content-Encoding`. Dropping the
+     * header is what lets a reader trust the pair: a surviving coding means the stored bytes really are
+     * still under it, which is how a viewer tells a body it cannot read from one it garbled.
+     */
+    private fun HttpRequest.recordedAfter(captured: Relayed): HttpRequest =
+        if (captured.decoded) copy(headers = headers.withoutContentEncoding()) else this
+
+    /**
      * An entity read into memory for a hold. [complete] is false once it outgrew [MAX_HELD_BODY_BYTES],
      * in which case [rest] is the same stream, positioned after [bytes] — the only way to finish sending
      * a body whose framing has already been consumed this far.
@@ -758,8 +852,14 @@ class ProxyServer private constructor(
      * and still captured — the origin is what is being skipped, not the request — which both records
      * what a Map Local rule was asked and leaves the connection on a message boundary.
      */
-    private fun consumeRequest(held: Held?, source: InputStream, framing: Framing, intent: Interception): Relayed {
-        if (held == null) return relayBody(source, null, framing, intent.record)
+    private fun consumeRequest(
+        held: Held?,
+        source: InputStream,
+        framing: Framing,
+        intent: Interception,
+        contentEncoding: String?,
+    ): Relayed {
+        if (held == null) return relayBody(source, null, framing, intent.record, contentEncoding)
         return Relayed(spool(intent, held.bytes), held.bytes.size.toLong(), !held.complete, decoded = false)
     }
 
@@ -940,6 +1040,7 @@ class ProxyServer private constructor(
          * which is recoverable, while refusing the request breaks a page to enforce a debugging aid.
          */
         private const val MAX_HELD_BODY_BYTES = 32 * 1024 * 1024
+        private const val MAX_SCRIPT_BODY_BYTES = 8L * 1024L * 1024L
 
         private const val TUNNEL_LOCKED_MESSAGE = "Connection Established (encrypted, not decrypted)"
 
@@ -1047,6 +1148,17 @@ private fun List<Header>.framedFor(size: Long, complete: Boolean): List<Header> 
 /** Framing for a body whose length is not known ahead of time, which is what re-chunking one means. */
 private fun List<Header>.chunkedFraming(): List<Header> =
     framedFor(0, complete = false) + Header("Transfer-Encoding", "chunked")
+
+private fun List<Header>.preserveFramingFrom(original: List<Header>): List<Header> {
+    val framing = setOf("content-length", "transfer-encoding", "content-encoding")
+    return filterNot { it.name.lowercase() in framing } + original.filter { it.name.lowercase() in framing }
+}
+
+private fun HttpResponse.headBytes(fallbackMessage: String): ByteArray = buildString {
+    append("HTTP/1.1 $code ${message.ifBlank { fallbackMessage }}\r\n")
+    headers.forEach { append("${it.name}: ${it.value_}\r\n") }
+    append("\r\n")
+}.toByteArray(Charsets.ISO_8859_1)
 
 /** The response as it should be recorded, with headers that match the bytes actually captured. */
 private fun HttpHead.asResponse(bytes: Long, spoiled: Boolean, decoded: Boolean) = HttpResponse(

@@ -18,7 +18,13 @@ internal sealed interface BodyContent {
 internal enum class PreviewKind { Json, Html, Xml, Form, Text, Image, Hex }
 
 /** Image container detected by magic bytes, independent of a possibly wrong/absent Content-Type. */
-internal enum class ImageFormat { Png, Jpeg, Gif, Webp, Bmp }
+internal enum class ImageFormat(val fileExtension: String) {
+    Png("png"),
+    Jpeg("jpg"),
+    Gif("gif"),
+    Webp("webp"),
+    Bmp("bmp"),
+}
 
 /**
  * The set of previewers that fit a body, best-first, plus the [default] to open with. Purely a
@@ -34,6 +40,19 @@ internal data class BodyAnalysis(
 
 internal fun List<Header>.contentType(): String? =
     firstOrNull { it.name.equals("Content-Type", ignoreCase = true) }?.value_
+
+/**
+ * The coding the stored bytes are still under, or null when they are plaintext.
+ *
+ * A capture that decodes a body drops this header, precisely so the two cannot disagree — so a surviving
+ * `Content-Encoding` means the bytes were never decoded, and a body view has to say so rather than
+ * present a compressed payload as the response. `identity` is not a coding, so it reads as plaintext.
+ */
+internal fun List<Header>.contentEncoding(): String? =
+    firstOrNull { it.name.equals("Content-Encoding", ignoreCase = true) }
+        ?.value_
+        ?.trim()
+        ?.takeIf { it.isNotEmpty() && !it.equals("identity", ignoreCase = true) }
 
 /**
  * Decides how to show [body]: empty, binary (by content-type or byte sniffing), or decoded text
@@ -53,17 +72,28 @@ internal fun bodyContent(body: ByteString, contentType: String?, maxTextChars: I
  * Classifies [body] into the previewers that fit it, best-first. Detection is intentionally cheap
  * (content-type, magic bytes, and a short decoded prefix) so it can run on every selection change;
  * the heavy work (pretty-printing, hex formatting, image decoding) is deferred to the chosen
- * previewer. Hex is always offered as the last resort for a non-empty body, and text-shaped bodies
+ * previewer. Hex is offered only where the type is *unknown*: a hex dump answers "what are these
+ * bytes?", which an identified image, JSON or text body has already answered. Markup and form bodies
  * keep a plain-Text fallback so a mis-sniff is never a dead end. A [truncated] body can't be a valid
  * image, so image detection is skipped and it falls through to the byte/text path.
+ *
+ * An [encoded] body is classified as nothing at all. Compressed bytes are not the payload, whatever they
+ * happen to sniff as — and a short one can pass the text check and then render as mojibake — so the dump
+ * is the only honest view, with the caller naming the coding that is in the way.
  */
-internal fun analyzeBody(body: ByteString, contentType: String?, truncated: Boolean): BodyAnalysis {
+internal fun analyzeBody(
+    body: ByteString,
+    contentType: String?,
+    truncated: Boolean,
+    encoded: Boolean = false,
+): BodyAnalysis {
     if (body.size == 0) {
         return BodyAnalysis(isEmpty = true, previewers = emptyList(), default = PreviewKind.Text, imageFormat = null)
     }
+    if (encoded) return BodyAnalysis(false, listOf(PreviewKind.Hex), PreviewKind.Hex, null)
     val imageFormat = if (truncated) null else sniffImageFormat(body)
     if (imageFormat != null) {
-        return BodyAnalysis(false, listOf(PreviewKind.Image, PreviewKind.Hex), PreviewKind.Image, imageFormat)
+        return BodyAnalysis(false, listOf(PreviewKind.Image), PreviewKind.Image, imageFormat)
     }
     if (isBinaryContentType(contentType) || !isProbablyText(body)) {
         return BodyAnalysis(false, listOf(PreviewKind.Hex), PreviewKind.Hex, null)
@@ -78,14 +108,50 @@ internal fun analyzeBody(body: ByteString, contentType: String?, truncated: Bool
         isXml(contentType, prefix) -> PreviewKind.Xml
         else -> PreviewKind.Text
     }
-    val previewers = when (kind) {
-        // JSON gets the read-only code editor only — no Text/Hex toggle. The full raw bytes
-        // are still one click away on the Raw tab, so nothing is lost.
-        PreviewKind.Json -> listOf(PreviewKind.Json)
-        PreviewKind.Text -> listOf(PreviewKind.Text, PreviewKind.Hex)
-        else -> listOf(kind, PreviewKind.Text, PreviewKind.Hex)
+    // JSON gets the read-only code editor and text gets itself; neither has a second view worth offering.
+    val previewers = if (kind == PreviewKind.Json || kind == PreviewKind.Text) {
+        listOf(kind)
+    } else {
+        listOf(kind, PreviewKind.Text)
     }
     return BodyAnalysis(false, previewers, kind, null)
+}
+
+/**
+ * The name to offer when writing a body to disk: [base] (the URL's own name, from [bodyFileBaseName])
+ * plus what the bytes turned out to be.
+ *
+ * The classification decides the extension, not the path, so a payload that is not what it was called
+ * says so in the name it is offered under (`logo.jpg.png`) — the magic bytes already outvote Content-Type
+ * for the previewer, and a file name is the same kind of claim. A name that already agrees keeps it, and
+ * a body nothing identified gets `bin` rather than a guess.
+ *
+ * A [contentEncoding] that survived capture means the bytes are still compressed (ADR-0096), so the file
+ * is named for the *coding*: `search.br`, not `search.json`, which would hand someone an archive under
+ * the name of the thing inside it. A coding *list* names every layer (`gzip-br`), since that is what the
+ * bytes are — punctuation and all, it has to survive being a file name.
+ */
+internal fun bodyFileName(
+    base: String,
+    body: ByteString,
+    contentType: String?,
+    truncated: Boolean,
+    contentEncoding: String?,
+): String {
+    if (contentEncoding != null) {
+        val codings = contentEncoding.lowercase().split(',').map { it.trim() }.filter { it.isNotEmpty() }
+        return "$base.${fileNameSafe(codings.joinToString("-"))}"
+    }
+    val analysis = analyzeBody(body, contentType, truncated)
+    val extension = when (analysis.default) {
+        PreviewKind.Image -> analysis.imageFormat?.fileExtension
+        PreviewKind.Json -> "json"
+        PreviewKind.Html -> "html"
+        PreviewKind.Xml -> "xml"
+        PreviewKind.Text, PreviewKind.Form -> "txt"
+        PreviewKind.Hex -> "bin"
+    } ?: return base
+    return if (base.endsWith(".$extension", ignoreCase = true)) base else "$base.$extension"
 }
 
 /**

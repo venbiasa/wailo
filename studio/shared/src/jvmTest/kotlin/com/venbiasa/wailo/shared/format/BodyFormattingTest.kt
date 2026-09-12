@@ -100,13 +100,15 @@ class BodyFormattingTest {
     }
 
     @Test
-    fun imageBodyOffersImageThenHex() {
+    fun imageBodyOffersOnlyTheImage() {
+        // A recognized image needs no hex dump: the bytes are already identified, and the Raw tab has
+        // them verbatim for anyone who wants them.
         val png = bytes(0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D)
         val analysis = analyzeBody(png, "image/png", truncated = false)
         assertFalse(analysis.isEmpty)
         assertEquals(ImageFormat.Png, analysis.imageFormat)
         assertEquals(PreviewKind.Image, analysis.default)
-        assertEquals(listOf(PreviewKind.Image, PreviewKind.Hex), analysis.previewers)
+        assertEquals(listOf(PreviewKind.Image), analysis.previewers)
     }
 
     @Test
@@ -132,7 +134,7 @@ class BodyFormattingTest {
     @Test
     fun htmlBodyDetectedByContentTypeOrDoctype() {
         assertEquals(
-            listOf(PreviewKind.Html, PreviewKind.Text, PreviewKind.Hex),
+            listOf(PreviewKind.Html, PreviewKind.Text),
             analyzeBody("<p>hi</p>".encodeUtf8(), "text/html; charset=utf-8", truncated = false).previewers,
         )
         assertEquals(
@@ -142,28 +144,70 @@ class BodyFormattingTest {
     }
 
     @Test
-    fun xmlBodyOffersXmlTextHex() {
+    fun xmlBodyOffersXmlThenText() {
+        // Markup keeps the plain-text escape (a Content-Type can lie) but not hex — it is text either way.
         val analysis = analyzeBody("""<?xml version="1.0"?><a/>""".encodeUtf8(), "application/xml", truncated = false)
         assertEquals(PreviewKind.Xml, analysis.default)
-        assertEquals(listOf(PreviewKind.Xml, PreviewKind.Text, PreviewKind.Hex), analysis.previewers)
+        assertEquals(listOf(PreviewKind.Xml, PreviewKind.Text), analysis.previewers)
     }
 
     @Test
-    fun formBodyOffersFormTextHex() {
+    fun formBodyOffersFormThenText() {
         val analysis = analyzeBody(
             "a=1&b=2".encodeUtf8(),
             "application/x-www-form-urlencoded",
             truncated = false,
         )
         assertEquals(PreviewKind.Form, analysis.default)
-        assertEquals(listOf(PreviewKind.Form, PreviewKind.Text, PreviewKind.Hex), analysis.previewers)
+        assertEquals(listOf(PreviewKind.Form, PreviewKind.Text), analysis.previewers)
     }
 
     @Test
-    fun plainTextOffersTextThenHex() {
+    fun plainTextOffersOnlyText() {
         val analysis = analyzeBody("hello world".encodeUtf8(), "text/plain", truncated = false)
         assertEquals(PreviewKind.Text, analysis.default)
-        assertEquals(listOf(PreviewKind.Text, PreviewKind.Hex), analysis.previewers)
+        assertEquals(listOf(PreviewKind.Text), analysis.previewers)
+    }
+
+    @Test
+    fun contentEncodingReportsOnlyARealCoding() {
+        assertEquals("br", listOf(Header(name = "content-encoding", value_ = " br ")).contentEncoding())
+        assertNull(listOf(Header(name = "Content-Encoding", value_ = "identity")).contentEncoding())
+        assertNull(emptyList<Header>().contentEncoding())
+    }
+
+    @Test
+    fun anUndecodedBodyIsOnlyEverADump() {
+        // Compressed JSON is not JSON, and a short enough payload can even pass the text sniff — so the
+        // encoded flag has to override what the bytes look like, not merely add a caveat to it.
+        val analysis =
+            analyzeBody("looks like text".encodeUtf8(), "application/json", truncated = false, encoded = true)
+        assertEquals(listOf(PreviewKind.Hex), analysis.previewers)
+        assertEquals(PreviewKind.Hex, analysis.default)
+        assertNull(analysis.imageFormat)
+    }
+
+    @Test
+    fun aSavedBodyIsNamedForWhatTheBytesAre() {
+        val json = """{"a":1}""".encodeUtf8()
+        assertEquals("search.json", bodyFileName("search", json, "application/json", false, null))
+        // The path already agreed, so it is not said twice.
+        assertEquals("search.json", bodyFileName("search.json", json, "application/json", false, null))
+        // The magic bytes outvote both the path and the header, and the disagreement stays visible.
+        val png = bytes(0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A)
+        assertEquals("logo.jpg.png", bodyFileName("logo.jpg", png, "image/jpeg", false, null))
+        // Nothing identified it, so the name claims nothing either.
+        assertEquals("blob.bin", bodyFileName("blob", bytes(0x00, 0x01, 0x02, 0x03), null, false, null))
+    }
+
+    @Test
+    fun anUndecodedBodyIsNamedForItsCoding() {
+        // The file holds compressed bytes; calling it .json would name the thing inside the archive.
+        val json = """{"a":1}""".encodeUtf8()
+        assertEquals("search.br", bodyFileName("search", json, "application/json", false, "br"))
+        assertEquals("search.json", bodyFileName("search", json, "application/json", false, null))
+        // Every layer is named, and the punctuation that separates them cannot reach the file name.
+        assertEquals("search.gzip-br", bodyFileName("search", json, "application/json", false, "gzip, br"))
     }
 
     @Test

@@ -152,6 +152,24 @@ class FormattingTest {
     }
 
     @Test
+    fun bodyFileBaseNameTakesTheLastPathSegment() {
+        assertEquals("avatar.png", bodyFileBaseName("https://cdn.example.com/users/7/avatar.png?v=3"))
+        assertEquals("users", bodyFileBaseName("https://api.example.com/v1/users"))
+        // A trailing slash names the segment before it, not an empty one.
+        assertEquals("thumbs", bodyFileBaseName("https://cdn.example.com/thumbs/"))
+    }
+
+    @Test
+    fun bodyFileBaseNameAlwaysYieldsAUsableName() {
+        // Nothing but a host to go on, then nothing at all.
+        assertEquals("api.example.com", bodyFileBaseName("https://api.example.com"))
+        assertEquals("body", bodyFileBaseName(""))
+        // Characters a file name can't carry are replaced rather than dropped, so distinct URLs stay
+        // distinct names.
+        assertEquals("a-b-c", bodyFileBaseName("https://example.com/a b:c"))
+    }
+
+    @Test
     fun formatClockTimeRendersLocalMillis() {
         assertEquals("00:00:00.000", formatClockTime(0))
         assertEquals("00:00:01.000", formatClockTime(1_000))

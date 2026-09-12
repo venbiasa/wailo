@@ -21,7 +21,9 @@ import kotlin.concurrent.thread
 import okio.ByteString.Companion.encodeUtf8
 import kotlin.test.AfterTest
 import kotlin.test.Test
+import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -274,6 +276,122 @@ class ProxyServerTest {
         val headers = row.exchange.response?.headers.orEmpty()
         assertNull(headers.firstOrNull { it.name.equals("Content-Encoding", true) })
         assertEquals(payload.length.toString(), headers.first { it.name.equals("Content-Length", true) }.value_)
+    }
+
+    @Test
+    fun aCodingWeCannotDecodeKeepsItsHeaderSoTheDumpIsExplained() {
+        // Not real brotli — nothing here decodes it, which is the whole point. What matters is that the
+        // record does not claim these bytes are plaintext, because the header is the only thing that
+        // tells a reader why the body looks like garbage.
+        val payload = ByteArray(64) { (it * 7).toByte() }
+        val origin = origin { _, out ->
+            out.write(
+                (
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Encoding: br\r\n" +
+                        "Content-Length: ${payload.size}\r\n\r\n"
+                    ).toByteArray(),
+            )
+            out.write(payload)
+            out.flush()
+        }
+        val sink = RecordingSink()
+        val proxy = proxy(sink)
+
+        val raw = proxy.requestBytes("GET http://127.0.0.1:${origin.port}/br HTTP/1.1")
+
+        assertTrue(raw.toList().windowed(payload.size).any { it == payload.toList() }, "raw bytes must pass through")
+        val row = sink.awaitOne()
+        val headers = row.exchange.response?.headers.orEmpty()
+        assertEquals("br", headers.first { it.name.equals("Content-Encoding", true) }.value_)
+        assertContentEquals(payload, sink.bodyBytes(row.responseBody))
+    }
+
+    @Test
+    fun aResponseHoldIsDeclinedForACodingItCouldNotShow() {
+        // A hold that fired here would offer compressed bytes as the body and then have to strip the
+        // coding header to deliver them, so it is declined and the exchange relays through instead.
+        val payload = ByteArray(48) { (it * 5 + 1).toByte() }
+        val origin = origin { _, out ->
+            out.write(
+                (
+                    "HTTP/1.1 200 OK\r\nContent-Encoding: br\r\n" +
+                        "Content-Length: ${payload.size}\r\n\r\n"
+                    ).toByteArray(),
+            )
+            out.write(payload)
+            out.flush()
+        }
+        var held = false
+        val sink = RecordingSink()
+        val proxy = proxy(
+            sink,
+            rules(
+                intercepts = { Interception(holdResponse = true) },
+                onResponse = { response ->
+                    held = true
+                    ResponseVerdict.Proceed(response.copy(body = "rewritten".encodeUtf8()))
+                },
+            ),
+        )
+
+        val raw = proxy.requestBytes("GET http://127.0.0.1:${origin.port}/br HTTP/1.1")
+
+        assertFalse(held, "the hold must not fire on a body it cannot decode")
+        assertTrue(
+            raw.toList().windowed(payload.size).any { it == payload.toList() },
+            "the client must get the origin's bytes",
+        )
+        val headers = sink.awaitOne().exchange.response?.headers.orEmpty()
+        assertEquals("br", headers.first { it.name.equals("Content-Encoding", true) }.value_)
+    }
+
+    @Test
+    fun aGzippedRequestBodyIsHeldDecodedAndForwardedThatWay() {
+        // The hold decodes on the way in, so the headers it forwards must not keep saying gzip — the
+        // origin would inflate plaintext. The record has to agree for the same reason.
+        val compressed = ByteArrayOutputStream().also { out ->
+            GZIPOutputStream(out).use { it.write("original".toByteArray()) }
+        }.toByteArray()
+        var seenBody: String? = null
+        var upstreamCoding: String? = null
+        var upstreamBody: String? = null
+        val origin = rawOrigin { input, out ->
+            val lines = buildList {
+                while (true) {
+                    val line = input.bufferedReadLine() ?: break
+                    if (line.isBlank()) break
+                    add(line)
+                }
+            }
+            upstreamCoding = lines.firstOrNull { it.startsWith("Content-Encoding:", ignoreCase = true) }
+            val length = lines.firstOrNull { it.startsWith("Content-Length:", ignoreCase = true) }
+                ?.substringAfter(':')?.trim()?.toIntOrNull() ?: 0
+            upstreamBody = String(input.readNBytes(length))
+            out.respond("ok")
+        }
+        val sink = RecordingSink()
+        val proxy = proxy(
+            sink,
+            rules(
+                intercepts = { Interception(holdRequest = true) },
+                onRequest = { request ->
+                    seenBody = request.body.utf8()
+                    RequestVerdict.Proceed()
+                },
+            ),
+        )
+
+        proxy.request(
+            "POST http://127.0.0.1:${origin.port}/submit HTTP/1.1",
+            headers = listOf("Content-Encoding: gzip", "Content-Length: ${compressed.size}"),
+            bodyBytes = compressed,
+        )
+
+        assertEquals("original", seenBody)
+        assertEquals("original", upstreamBody)
+        assertNull(upstreamCoding, "a decoded body must not be forwarded as gzip")
+        val headers = sink.awaitOne().exchange.request?.headers.orEmpty()
+        assertNull(headers.firstOrNull { it.name.equals("Content-Encoding", true) })
     }
 
     @Test
@@ -558,12 +676,14 @@ private fun ProxyServer.request(
     startLine: String,
     headers: List<String> = emptyList(),
     body: String? = null,
-): String = String(requestBytes(startLine, headers, body))
+    bodyBytes: ByteArray? = null,
+): String = String(requestBytes(startLine, headers, body, bodyBytes))
 
 private fun ProxyServer.requestBytes(
     startLine: String,
     headers: List<String> = emptyList(),
     body: String? = null,
+    bodyBytes: ByteArray? = null,
 ): ByteArray = Socket().use { client ->
     client.connect(InetSocketAddress(InetAddress.getLoopbackAddress(), port), 2_000)
     client.soTimeout = 5_000
@@ -575,7 +695,7 @@ private fun ProxyServer.requestBytes(
         append("Connection: close\r\n\r\n")
     }
     out.write(head.toByteArray())
-    body?.let { out.write(it.toByteArray()) }
+    (bodyBytes ?: body?.toByteArray())?.let { out.write(it) }
     out.flush()
     client.getInputStream().readBytes()
 }
@@ -639,5 +759,7 @@ private class RecordingSink(private val recording: Boolean = true) : ProxyCaptur
         return rows.first()
     }
 
-    fun body(ref: ProxyBodyRef?): String = String(bodies[assertNotNull(ref).id] ?: ByteArray(0))
+    fun body(ref: ProxyBodyRef?): String = String(bodyBytes(ref))
+
+    fun bodyBytes(ref: ProxyBodyRef?): ByteArray = bodies[assertNotNull(ref).id] ?: ByteArray(0)
 }

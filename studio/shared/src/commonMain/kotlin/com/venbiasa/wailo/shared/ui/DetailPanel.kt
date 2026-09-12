@@ -48,6 +48,7 @@ import androidx.compose.ui.unit.dp
 import com.venbiasa.wailo.protocol.Header
 import com.venbiasa.wailo.protocol.HttpExchange
 import com.venbiasa.wailo.shared.BodyHandle
+import com.venbiasa.wailo.shared.LocalBodySaver
 import com.venbiasa.wailo.shared.FlowEntry
 import com.venbiasa.wailo.shared.ProxySetupAction
 import com.venbiasa.wailo.shared.ProxyState
@@ -55,6 +56,9 @@ import com.venbiasa.wailo.shared.format.BodyContent
 import com.venbiasa.wailo.shared.format.UrlPart
 import com.venbiasa.wailo.shared.format.basicAuthDecoded
 import com.venbiasa.wailo.shared.format.bodyContent
+import com.venbiasa.wailo.shared.format.bodyFileBaseName
+import com.venbiasa.wailo.shared.format.bodyFileName
+import com.venbiasa.wailo.shared.format.contentEncoding
 import com.venbiasa.wailo.shared.format.contentType
 import com.venbiasa.wailo.shared.format.formatBytes
 import com.venbiasa.wailo.shared.format.requestHost
@@ -230,6 +234,8 @@ private fun RequestResponseSplit(
     val request = exchange.request
     val response = exchange.response
     val method = request?.method?.ifEmpty { "?" } ?: "?"
+    // Both panes name a saved body after the same request, since that is what the two are halves of.
+    val fileBaseName = remember(request?.url) { bodyFileBaseName(request?.url.orEmpty()) }
 
     // Defined once and placed by whichever layout fits, so the side-by-side and the narrow single-pane
     // views can never drift apart in what they show.
@@ -242,8 +248,13 @@ private fun RequestResponseSplit(
             body = requestBody,
             declaredSize = request?.body_size ?: 0L,
             truncated = request?.body_truncated == true,
+            fileBaseName = fileBaseName,
             notice = "No request captured.",
             showAuth = true,
+            // What someone pulls out of a capture is what came back. A request body is usually the few
+            // bytes they typed, and a second download here would cost the pane header on both sides to
+            // serve the rarer half.
+            offerDownload = false,
             modifier = paneModifier,
         )
     }
@@ -256,6 +267,7 @@ private fun RequestResponseSplit(
             body = responseBody,
             declaredSize = response?.body_size ?: 0L,
             truncated = response?.body_truncated == true,
+            fileBaseName = fileBaseName,
             notice = if (exchange.error.isNotEmpty()) {
                 "Request failed before a response: ${exchange.error}"
             } else {
@@ -264,6 +276,7 @@ private fun RequestResponseSplit(
             // Auth is a request-side concern (credentials the client sends); the response only
             // echoes Set-Cookie/challenge headers, which read fine under Headers.
             showAuth = false,
+            offerDownload = true,
             lockedResponse = lockedHost?.let { host ->
                 LockedResponseState(
                     host = host,
@@ -415,8 +428,10 @@ private fun MessagePane(
     body: BodyHandle?,
     declaredSize: Long,
     truncated: Boolean,
+    fileBaseName: String,
     notice: String,
     showAuth: Boolean,
+    offerDownload: Boolean,
     lockedResponse: LockedResponseState? = null,
     onCreateCertificate: () -> Unit = {},
     onUnlockHost: (String) -> Unit = {},
@@ -439,13 +454,6 @@ private fun MessagePane(
             MessageTab.entries.filter { showAuth || it != MessageTab.Auth }
         }
         var tab by remember { mutableStateOf(MessageTab.Headers) }
-        UnderlineTabs(
-            items = tabs.map { TabItem(it, it.label) },
-            selected = tab,
-            onSelect = { tab = it },
-            modifier = Modifier.fillMaxWidth(),
-            trailingLabel = caption.uppercase(),
-        )
         // Fetched only for the two tabs that show bytes: opening a row on Headers should cost headers.
         // Switching away and back re-reads, which is a local socket and a decrypt, not a network trip.
         val shownBody = body.takeIf {
@@ -453,6 +461,40 @@ private fun MessagePane(
         }
         val bytes = rememberBodyBytes(shownBody)
         val capturedSize = body?.size ?: 0L
+        // Where the host can write files, a body can leave Studio; where it can't there is no control at
+        // all, rather than one nothing comes of. Offered only where bytes are actually on screen, so the
+        // Headers and Auth tabs don't carry an action that means nothing there.
+        val saver = LocalBodySaver.current
+        var saveFailure by remember(bytes) { mutableStateOf("") }
+        UnderlineTabs(
+            items = tabs.map { TabItem(it, it.label) },
+            selected = tab,
+            onSelect = { tab = it },
+            modifier = Modifier.fillMaxWidth(),
+            trailingLabel = caption.uppercase(),
+            trailing = if (offerDownload && saver != null && bytes != null && bytes.size > 0) {
+                {
+                    SaveBodyButton(
+                        body = bytes,
+                        handle = shownBody,
+                        fileName = bodyFileName(
+                            base = fileBaseName,
+                            body = bytes,
+                            contentType = headers.contentType(),
+                            truncated = truncated,
+                            contentEncoding = headers.contentEncoding(),
+                        ),
+                        saver = saver,
+                        onFailure = { saveFailure = it },
+                    )
+                }
+            } else {
+                null
+            },
+        )
+        if (saveFailure.isNotEmpty()) {
+            MutedText(saveFailure, Modifier.padding(start = 16.dp, end = 16.dp, top = 8.dp))
+        }
         Box(Modifier.weight(1f).fillMaxWidth()) {
             // The Body tab owns its own scrolling: its previewers include a lazy hex dump and a
             // centered image, neither of which can live inside the shared vertical scroll the
@@ -472,6 +514,7 @@ private fun MessagePane(
                         contentType = headers.contentType(),
                         declaredSize = declaredSize,
                         truncated = truncated,
+                        contentEncoding = headers.contentEncoding(),
                         modifier = Modifier.fillMaxSize(),
                     )
                 }

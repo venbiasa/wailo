@@ -12,6 +12,10 @@ local.properties
 captures/
 .cxx/
 
+# Agent session scratch. The rules/skills beside it are shared deliberately; plans are not — they
+# record machine-local absolute paths, which must never land in a public repo.
+.cursor/plans/
+
 # macOS
 .DS_Store
 

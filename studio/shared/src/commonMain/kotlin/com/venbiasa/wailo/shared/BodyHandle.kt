@@ -31,6 +31,25 @@ fun interface BodyLoader {
 val LocalBodyLoader = staticCompositionLocalOf { BodyLoader { _, _, _ -> ByteArray(0) } }
 
 /**
+ * Writes a body out to a file the user picks — the other half of [BodyLoader], for taking a captured
+ * payload out of Studio rather than bringing one in. `shared` is UI and owns no file IO, so the host
+ * supplies both the dialog and the write.
+ *
+ * The returned line is what the view shows about it, and is blank whenever there is nothing to say: a
+ * file the user chose and a dialog they dismissed both explain themselves, so only a failure speaks.
+ */
+fun interface BodySaver {
+    suspend fun save(suggestedFileName: String, bytes: ByteArray): String
+}
+
+/**
+ * The saver a body view offers a download through, absent by default. Null rather than a no-op, so a
+ * surface the host has not wired shows no control at all — a download button that quietly does nothing
+ * is worse than none.
+ */
+val LocalBodySaver = staticCompositionLocalOf<BodySaver?> { null }
+
+/**
  * The most of a body any single Studio surface pulls into memory at once.
  *
  * Every caller that wants "the body" as one value — a preview, a cURL copy, a rule authored from a
