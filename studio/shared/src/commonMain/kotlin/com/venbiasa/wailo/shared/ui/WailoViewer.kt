@@ -70,8 +70,8 @@ import com.venbiasa.wailo.shared.resources.ic_content_paste_go
 import com.venbiasa.wailo.shared.resources.ic_dark_mode
 import com.venbiasa.wailo.shared.resources.ic_delete
 import com.venbiasa.wailo.shared.resources.ic_devices
+import com.venbiasa.wailo.shared.resources.ic_fence
 import com.venbiasa.wailo.shared.resources.ic_light_mode
-import com.venbiasa.wailo.shared.resources.ic_lock
 import com.venbiasa.wailo.shared.resources.ic_lock_open
 import com.venbiasa.wailo.shared.resources.ic_pause
 import com.venbiasa.wailo.shared.resources.ic_play_arrow
@@ -687,8 +687,10 @@ private fun ToolRail(
             onClick = onToggleDarkTheme,
         )
         RailDivider()
+        // A fence, not a padlock: the lock pair belongs to Unlock directly below, where locked/unlocked is
+        // the feature, and two adjacent padlocks on the rail read as one control in two states.
         ToolRailButton(
-            icon = Res.drawable.ic_lock,
+            icon = Res.drawable.ic_fence,
             contentDescription = "Capture Filter",
             selected = openPanel == ToolPanel.CaptureFilter,
             onClick = { onSelectPanel(ToolPanel.CaptureFilter) },
