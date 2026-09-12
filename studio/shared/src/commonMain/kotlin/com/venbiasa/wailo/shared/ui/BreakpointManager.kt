@@ -43,8 +43,11 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.venbiasa.wailo.shared.BreakpointNode
 import com.venbiasa.wailo.shared.BreakpointRuleDef
+import com.venbiasa.wailo.shared.RuleGroup
+import com.venbiasa.wailo.shared.assignRuleToGroup
 import com.venbiasa.wailo.shared.findRule
 import com.venbiasa.wailo.shared.groupOf
+import com.venbiasa.wailo.shared.groups
 import com.venbiasa.wailo.shared.resources.Res
 import com.venbiasa.wailo.shared.resources.ic_arrow_back
 import com.venbiasa.wailo.shared.resources.ic_arrow_drop_down
@@ -63,8 +66,10 @@ import org.jetbrains.compose.resources.vectorResource
  * can break on the request (before it's sent), the response (before the app sees it), or both. It fills
  * whatever surface it's given (the studio's right tool panel).
  *
- * Unlike Map Local and Seed, the list isn't drag-orderable: every matching rule pauses the exchange, so
- * there is no first-match to prioritize and ordering would be a control that changes nothing.
+ * The list drags and groups exactly like Map Local's and Seed's, but its order is arrangement rather than
+ * priority: every matching rule pauses the exchange, so there is no first match to promote (ADR-0098
+ * keeps the grips anyway — a set you can arrange is easier to read than one you can't). A rule joins a
+ * group by being dragged into it, or through the picker in its editor.
  *
  * [enabled] is the feature master (ADR-0030): off dims the list and disables every rule/group switch (and
  * the editor's), their remembered state kept, while the host pushes no rules — so breakpoints go inert
@@ -123,7 +128,6 @@ internal fun BreakpointManager(
                     onClick = onOpenWindow,
                 )
             },
-            reorderable = false,
         ) { rule -> BreakpointRuleContent(rule) }
     } else {
         // The enabled toggle is shared with the list row, so for a persisted rule it commits immediately
@@ -138,14 +142,16 @@ internal fun BreakpointManager(
         key(target.id) {
             BreakpointRuleEditor(
                 initial = target,
+                groups = nodes.groups(),
+                initialGroupId = nodes.groupOf(target.id)?.id,
                 enabled = (persisted ?: target).enabled,
                 enabledToggleable = enabled && groupEnabled,
                 onToggleEnabled = { next ->
                     if (nodes.findRule(target.id) != null) onLayoutChange(nodes.setRuleEnabled(target.id, next))
                     else editing = target.copy(enabled = next)
                 },
-                onSave = { rule ->
-                    onLayoutChange(nodes.upsertRule(rule))
+                onSave = { rule, groupId ->
+                    onLayoutChange(nodes.upsertRule(rule).assignRuleToGroup(rule.id, groupId))
                     editing = null
                 },
                 onBack = { editing = null },
@@ -155,53 +161,77 @@ internal fun BreakpointManager(
     }
 }
 
-// A breakpoint rule row's label (rendered in the shared row scaffold's clickable column): the URL pattern
-// over a method + phase(s) summary.
+// A breakpoint rule row's label (rendered in the shared row scaffold's clickable column): the rule's name
+// over a method + phase(s) + URL summary — the same stack Map Local's rows use, now that a breakpoint rule
+// carries a name of its own.
 @Composable
 private fun BreakpointRuleContent(rule: BreakpointRuleDef) {
     Text(
-        rule.urlPattern.ifBlank { "(no pattern)" },
-        style = monoSmall(),
+        rule.name.ifBlank { "Untitled" },
+        style = MaterialTheme.typography.bodyMedium,
         color = MaterialTheme.colorScheme.onSurface,
         maxLines = 1,
-        overflow = TextOverflow.MiddleEllipsis,
+        overflow = TextOverflow.Ellipsis,
     )
     Text(
         ruleSummary(rule),
-        style = MaterialTheme.typography.labelSmall,
+        style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
     )
 }
 
 /**
- * The breakpoint rule editor page: the rule's match (URL pattern + method) and which phase(s) it pauses.
- * [enabled]/[onToggleEnabled] drive the header switch (committed by the host, gated by [enabledToggleable]
- * when the rule sits in an off group). Save is blocked until a URL pattern is set and at least one phase
- * is chosen — a rule that pauses on neither phase never fires.
+ * The breakpoint rule editor page: the rule's name and group, its match (URL pattern + method), and which
+ * phase(s) it pauses. [enabled]/[onToggleEnabled] drive the header switch (committed by the host, gated by
+ * [enabledToggleable] when the rule sits in an off group). Save is blocked until the rule has a name and a
+ * URL pattern and at least one phase is chosen — a rule that pauses on neither phase never fires.
+ *
+ * [groups]/[initialGroupId] back the group picker, and [onSave] reports the chosen group beside the rule.
+ * Filing a rule from here reaches a group that is scrolled far from the rule, or collapsed, without the
+ * drag that would otherwise be the only way in; it lands the rule at the end of the group, since where
+ * inside it the rule sits is what the drag is for.
  */
 @Composable
 private fun BreakpointRuleEditor(
     initial: BreakpointRuleDef,
+    groups: List<RuleGroup>,
+    initialGroupId: String?,
     enabled: Boolean,
     enabledToggleable: Boolean,
     onToggleEnabled: (Boolean) -> Unit,
-    onSave: (BreakpointRuleDef) -> Unit,
+    onSave: (BreakpointRuleDef, String?) -> Unit,
     onBack: () -> Unit,
     onClose: () -> Unit,
 ) {
     val focusManager = LocalFocusManager.current
+    var name by remember { mutableStateOf(initial.name) }
     var urlPattern by remember { mutableStateOf(initial.urlPattern) }
     var method by remember { mutableStateOf(initial.method) }
+    var groupId by remember { mutableStateOf(initialGroupId) }
     var onRequest by remember { mutableStateOf(initial.onRequest) }
     var onResponse by remember { mutableStateOf(initial.onResponse) }
     var showError by remember { mutableStateOf(false) }
 
-    // A rule fires only if it can pause at least one phase; enforce that (and a non-blank pattern) here.
-    val canSave = urlPattern.isNotBlank() && (onRequest || onResponse)
+    // A rule fires only if it can pause at least one phase; enforce that (and a non-blank name and
+    // pattern) here.
+    val canSave = name.isNotBlank() && urlPattern.isNotBlank() && (onRequest || onResponse)
     fun save() {
+        val trimmedName = name.trim()
         val trimmed = urlPattern.trim()
-        if (trimmed.isNotEmpty() && (onRequest || onResponse)) {
-            onSave(initial.copy(enabled = enabled, urlPattern = trimmed, method = method, onRequest = onRequest, onResponse = onResponse))
+        if (trimmedName.isNotEmpty() && trimmed.isNotEmpty() && (onRequest || onResponse)) {
+            onSave(
+                initial.copy(
+                    name = trimmedName,
+                    enabled = enabled,
+                    urlPattern = trimmed,
+                    method = method,
+                    onRequest = onRequest,
+                    onResponse = onResponse,
+                ),
+                groupId,
+            )
         } else {
             showError = true
         }
@@ -243,6 +273,21 @@ private fun BreakpointRuleEditor(
             Modifier.fillMaxWidth().padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
+            EditorField(
+                "Name",
+                error = if (showError && name.isBlank()) "Name can\u2019t be empty" else null,
+            ) {
+                CompactOutlinedTextField(
+                    value = name,
+                    onValueChange = {
+                        name = it
+                        showError = false
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    placeholder = "Untitled",
+                    isError = showError && name.isBlank(),
+                )
+            }
             EditorField("URL pattern") {
                 CompactOutlinedTextField(
                     value = urlPattern,
@@ -265,11 +310,21 @@ private fun BreakpointRuleEditor(
                         }
                     },
                     placeholder = "https://api.example.com/*",
-                    isError = showError,
+                    isError = showError && urlPattern.isBlank(),
                 )
             }
-            EditorField("Method") {
-                MethodDropdown(method = method, onSelect = { method = it })
+            // The method picker hugs its content; the group's name is free text, so it takes the rest.
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                EditorField("Method") {
+                    MethodDropdown(method = method, onSelect = { method = it })
+                }
+                EditorField("Group", Modifier.weight(1f)) {
+                    GroupDropdown(
+                        groups = groups,
+                        groupId = groupId,
+                        onSelect = { groupId = it },
+                    )
+                }
             }
             EditorField("Pause on") {
                 Row(
@@ -286,7 +341,9 @@ private fun BreakpointRuleEditor(
                     }
                 }
             }
-            if (showError) {
+            // One sentence for the match itself, since a pattern and a phase are the two halves of the
+            // same "this rule can never fire" mistake. A missing name is its own field's error instead.
+            if (showError && (urlPattern.isBlank() || !(onRequest || onResponse))) {
                 Text(
                     "Enter a URL pattern and pause the request, the response, or both.",
                     style = MaterialTheme.typography.labelSmall,
@@ -311,11 +368,20 @@ private fun BreakpointRuleEditor(
 
 // Label over its field, matching the compact tool-panel form spacing used elsewhere.
 @Composable
-private fun EditorField(label: String, content: @Composable () -> Unit) {
-    Column {
+private fun EditorField(
+    label: String,
+    modifier: Modifier = Modifier,
+    error: String? = null,
+    content: @Composable () -> Unit,
+) {
+    Column(modifier) {
         Text(label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Spacer(Modifier.height(4.dp))
         content()
+        if (error != null) {
+            Spacer(Modifier.height(4.dp))
+            Text(error, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error)
+        }
     }
 }
 
@@ -334,7 +400,8 @@ private fun PhaseToggle(label: String, checked: Boolean, onCheckedChange: (Boole
     }
 }
 
-// One-line caption under a rule: the method it's scoped to and which phase(s) it pauses on.
+// One-line caption under a rule: the method it's scoped to, which phase(s) it pauses on, and the URL it
+// matches — the URL last (and end-truncated) because the name above it is what identifies the rule now.
 private fun ruleSummary(rule: BreakpointRuleDef): String {
     val phases = when {
         rule.onRequest && rule.onResponse -> "Request & Response"
@@ -342,7 +409,7 @@ private fun ruleSummary(rule: BreakpointRuleDef): String {
         rule.onResponse -> "Response"
         else -> "Never"
     }
-    return methodLabel(rule.method) + " \u00b7 " + phases
+    return methodLabel(rule.method) + "  \u00b7  " + phases + "  \u2192  " + rule.urlPattern.ifBlank { "(no pattern)" }
 }
 
 // A rule matches a single HTTP method; "Any" (blank) leaves the method unconstrained. Blank leads so it
@@ -354,16 +421,54 @@ private fun methodLabel(method: String): String = method.ifBlank { "Any" }
 
 @Composable
 private fun MethodDropdown(method: String, onSelect: (String) -> Unit) {
+    CompactPicker(
+        selectedLabel = methodLabel(method),
+        options = MethodOptions.map { it to methodLabel(it) },
+        onSelect = onSelect,
+    )
+}
+
+// The group a rule is filed into, chosen rather than dragged. A null id is the top level, which leads the
+// menu as the "not in a group" default the way a blank method does.
+@Composable
+private fun GroupDropdown(
+    groups: List<RuleGroup>,
+    groupId: String?,
+    onSelect: (String?) -> Unit,
+) {
+    val selected = groups.firstOrNull { it.id == groupId }
+    CompactPicker(
+        selectedLabel = if (selected == null) NoGroupLabel else groupLabel(selected),
+        options = listOf<Pair<String?, String>>(null to NoGroupLabel) + groups.map { it.id to groupLabel(it) },
+        onSelect = onSelect,
+        modifier = Modifier.fillMaxWidth(),
+    )
+}
+
+private const val NoGroupLabel = "None"
+
+private fun groupLabel(group: RuleGroup): String = group.name.ifBlank { "New group" }
+
+// The compact read-only picker behind both the method and the group field: a field-shaped click target
+// that opens a menu of value-to-label [options]. Both go through one composable so they keep the same
+// height and hit behaviour as the text fields beside them (see CompactFieldDecoration).
+@Composable
+private fun <T> CompactPicker(
+    selectedLabel: String,
+    options: List<Pair<T, String>>,
+    onSelect: (T) -> Unit,
+    modifier: Modifier = Modifier,
+) {
     var expanded by remember { mutableStateOf(false) }
     val interactionSource = remember { MutableInteractionSource() }
-    Box {
+    Box(modifier) {
         Box(
             Modifier
                 .clip(RoundedCornerShape(4.dp))
                 .clickable(interactionSource = interactionSource, indication = null) { expanded = true },
         ) {
             CompactFieldDecoration(
-                value = methodLabel(method),
+                value = selectedLabel,
                 interactionSource = interactionSource,
                 trailingIcon = {
                     Icon(
@@ -375,19 +480,21 @@ private fun MethodDropdown(method: String, onSelect: (String) -> Unit) {
                 },
                 innerTextField = {
                     Text(
-                        methodLabel(method),
+                        selectedLabel,
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                     )
                 },
             )
         }
         DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-            MethodOptions.forEach { option ->
+            options.forEach { (value, label) ->
                 DropdownMenuItem(
-                    text = { Text(methodLabel(option)) },
+                    text = { Text(label) },
                     onClick = {
-                        onSelect(option)
+                        onSelect(value)
                         expanded = false
                     },
                 )

@@ -30,7 +30,7 @@ class DaemonLayoutAdoptionTest {
         GroupNode(
             RuleGroup("checkout", "Checkout", enabled = false),
             listOf(
-                BreakpointRuleDef(id = "pay", urlPattern = "https://example.com/pay", method = "POST,PUT"),
+                BreakpointRuleDef(id = "pay", name = "Hold pay", urlPattern = "https://example.com/pay", method = "POST,PUT"),
                 BreakpointRuleDef(id = "cart", urlPattern = "https://example.com/cart", enabled = false),
             ),
         ),

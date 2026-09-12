@@ -124,9 +124,10 @@ private const val AutoScrollMaxPxPerSecond = 1500f
  * [rowActions] optionally gives a rule row a right-click menu (Duplicate, plus Map Local's "Seed…",
  * ADR-0041); returning an empty list — the default — leaves the row without one.
  *
- * [reorderable] drops the drag handles when a feature's order carries no meaning — every matching
- * breakpoint rule fires, so ordering them is a control that does nothing (Map Local and Seed keep it,
- * since for them top-to-bottom *is* the match priority). Groups still organize and gate rules either way.
+ * [reorderable] drops the drag handles for a list whose order must not read as adjustable. No panel passes
+ * false today — the breakpoints list keeps its grips even though its order is arrangement rather than match
+ * priority (ADR-0098) — so this is the switch for the next one that needs it. Groups organize and gate
+ * rules either way; without the grips, a rule can only change groups through its own editor.
  */
 @Composable
 internal fun <T : LayoutRule<T>> GroupedRuleListPage(

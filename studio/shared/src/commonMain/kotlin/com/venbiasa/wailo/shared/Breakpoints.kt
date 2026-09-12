@@ -12,6 +12,8 @@ import kotlin.random.Random
  * (mirroring Map Local's `MapLocalRuleDef` -> `MapLocalRule`), so `shared` never touches the wire types
  * for rule authoring.
  *
+ * [name] is a human label for the rule, the same one Map Local carries: it is what the list shows and
+ * how the author picks this rule out of a set, and it is never part of matching.
  * [urlPattern] is a wildcard match against the full request URL (`*` matches any run of characters).
  * [method] restricts the rule to that single HTTP method; blank means any. A rule with neither phase
  * enabled never fires, so a new rule defaults [onResponse] on: tampering with what the app is about to
@@ -19,6 +21,7 @@ import kotlin.random.Random
  */
 data class BreakpointRuleDef(
     override val id: String,
+    val name: String = "Untitled",
     override val enabled: Boolean = true,
     val urlPattern: String = "",
     val method: String = "",

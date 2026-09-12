@@ -2,12 +2,13 @@
 adr: 0042
 title: A breakpoint rule list has no order to drag
 date: "2026-08-06"
-status: accepted
+status: superseded
 date_source: git-commit
+relations: superseded by ADR-0098, which restores the handles — the order still decides nothing, but arranging the list is worth the gesture
 ---
 # ADR-0042 — A breakpoint rule list has no order to drag
 
-- Status: Accepted; implemented in `shared`. Amends ADR-0028.
+- Status: Superseded by ADR-0098; was implemented in `shared`. Amended ADR-0028.
 - Context: ADR-0028 generalized Map Local's grouped, drag-orderable list so Breakpoints could reuse it, and Seed joined on the same stack (ADR-0041). But the three features consume their lists differently. Map Local and Seed resolve by **first match** — top-to-bottom order picks the winner, and for Seed it is also the sequence a run is scripted in. Breakpoints has no winner: every enabled rule whose pattern matches pauses the exchange, so the list is a set the order is drawn from, not a priority. Dragging a breakpoint rule therefore changed nothing observable, which is worse than no control at all — it invites the user to tune something that isn't there.
 - Decision: `GroupedRuleListPage` gains `reorderable` (default true) that drops the drag handles from both the rule rows and the group headers; Breakpoints passes false. Everything else about the panel is unchanged: groups still organize rules and gate them off together, rules still add/edit/delete/toggle, and the saved layout is still an ordered list — nothing about the persisted format or the codec changes, so turning this back on is one argument.
 - Alternatives considered:

@@ -5,6 +5,11 @@ import com.venbiasa.wailo.protocol.BreakpointRule
 /** A breakpoint definition retained by a headless frontend and compiled to wire match metadata. */
 class HostBreakpointRule(
     val id: String,
+    /**
+     * Studio's author-facing label, carried here only so headless frontends can name a rule whose id is
+     * an opaque generated string. Never part of matching, and blank for rules created without one.
+     */
+    val name: String = "",
     val enabled: Boolean = true,
     val urlPattern: String,
     /** One method, or blank for any — the same scalar contract Map Local carries (ADR-0087). */

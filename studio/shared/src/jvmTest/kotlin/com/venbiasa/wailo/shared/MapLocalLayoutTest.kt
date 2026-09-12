@@ -127,6 +127,32 @@ class MapLocalLayoutTest {
     }
 
     @Test
+    fun assignRuleToGroupFilesARuleAtTheEndAndPullsItBackOut() {
+        val filed = sample().assignRuleToGroup("r1", "g1")
+        assertEquals(listOf("r2", "r3", "r1"), filed.groupNode("g1")!!.rules.map { it.id })
+        assertEquals(listOf("g1", "r4"), filed.map { it.id })
+
+        val loosened = filed.assignRuleToGroup("r1", null)
+        assertEquals(listOf("r2", "r3"), loosened.groupNode("g1")!!.rules.map { it.id })
+        assertEquals("r1", loosened.last().id)
+        assertNull(loosened.groupOf("r1"))
+    }
+
+    @Test
+    fun assignRuleToGroupLeavesARuleWhereItAlreadyIs() {
+        // Saving a grouped rule repeats its group, which must not shuffle it to the end of that group.
+        assertEquals(sample(), sample().assignRuleToGroup("r2", "g1"))
+        assertEquals(sample(), sample().assignRuleToGroup("r1", ""))
+    }
+
+    /** A group that isn't there can't take the rule, and taking it out of the layout would lose it. */
+    @Test
+    fun assignRuleToGroupIgnoresAnUnknownGroupOrRule() {
+        assertEquals(sample(), sample().assignRuleToGroup("r1", "missing-group"))
+        assertEquals(sample(), sample().assignRuleToGroup("missing-rule", "g1"))
+    }
+
+    @Test
     fun moveGroupReordersTopLevel() {
         // Move g1 to the front. Index space is the layout minus the dragged group: [r1, r4] -> insert at 0.
         val moved = sample().moveGroup("g1", 0)

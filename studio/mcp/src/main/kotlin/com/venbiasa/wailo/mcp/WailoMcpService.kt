@@ -807,6 +807,7 @@ internal class WailoMcpService(
         backend.upsertBreakpointRule(
             HostBreakpointRule(
                 id = id,
+                name = arguments.string("name").orEmpty(),
                 enabled = arguments.boolean("enabled", true),
                 urlPattern = arguments.requiredString("url_pattern"),
                 method = method.value,
@@ -837,6 +838,8 @@ internal class WailoMcpService(
         val rules = page.items.map {
             mapOf(
                 "id" to it.id,
+                // Studio ids are generated, so the author's label is often the only human-readable handle.
+                "name" to it.name,
                 "enabled" to it.enabled,
                 "url_pattern" to it.urlPattern,
                 "method" to it.method,

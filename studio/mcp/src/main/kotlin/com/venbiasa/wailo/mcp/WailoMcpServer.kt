@@ -404,6 +404,7 @@ internal object WailoMcpTools {
             "Create or replace a breakpoint rule. Matching calls pause until resume_hold or abort_hold decides them.",
             objectSchema(
                 "id" to string("Stable rule id"),
+                "name" to string("Author-facing label shown in Studio; not used for matching"),
                 "url_pattern" to string("Full-URL wildcard pattern where * matches any characters"),
                 "method" to string("The one HTTP method to match; blank or omitted means any"),
                 "methods" to legacyMethods(),

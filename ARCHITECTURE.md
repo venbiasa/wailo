@@ -226,8 +226,10 @@ Every panel is stateless over its inputs. `shared` renders a layout and hands ba
 any change; `desktopApp` owns UI persistence and file IO, then sends state changes through the daemon client — which keeps
 `shared` portable and free of `java.*` (ADR-0013). Map Local, Breakpoints, and Seed share one grouped rule
 list (ADR-0026/0028), and each has an independent feature master that makes it inert without erasing what's
-configured (ADR-0030). Only Map Local and Seed are drag-orderable, because only they resolve by first
-match; every matching breakpoint rule fires, so ordering them would decide nothing (ADR-0042).
+configured (ADR-0030). All three drag and reorder, but only Map Local and Seed resolve by first match, so
+only their order is a priority: every matching breakpoint rule fires, and arranging that list is for
+reading it (ADR-0098, superseding ADR-0042's grip-free breakpoints). A breakpoint rule can also pick its
+group in its editor, for a group a drag would have to reach.
 
 All three rule panels are also reachable from a captured row's right-click, which opens the panel on an
 editor pre-filled from that exchange rather than asking for the URL again. Map Local and Seed both carry

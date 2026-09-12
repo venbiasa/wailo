@@ -1263,6 +1263,7 @@ internal fun List<BreakpointNode>.toDaemonBreakpointNodes(): List<DaemonRuleNode
 
 private fun BreakpointRuleDef.toHostRule() = HostBreakpointRule(
     id = id,
+    name = name,
     enabled = enabled,
     urlPattern = urlPattern,
     method = method.trim(),
@@ -1275,6 +1276,9 @@ internal fun List<DaemonRuleNode<HostBreakpointRule>>.toBreakpointNodes(): List<
         val definitions = node.rules.map { rule ->
             BreakpointRuleDef(
                 id = rule.id,
+                // A rule authored through the CLI or MCP may carry no label; its id is the handle its
+                // author chose there, which beats showing the panel a blank row.
+                name = rule.name.ifBlank { rule.id },
                 enabled = rule.enabled,
                 urlPattern = rule.urlPattern,
                 method = rule.method,

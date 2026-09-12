@@ -91,6 +91,7 @@ data class ArchivedMapLocalRule(
 @Serializable
 data class ArchivedBreakpointRule(
     val id: String,
+    val name: String = "Untitled",
     val enabled: Boolean = true,
     val urlPattern: String = "",
     val method: String = "",
@@ -229,6 +230,7 @@ fun ArchivedMapLocalRule.toRuleDef(filePathResolves: Boolean): MapLocalRuleDef {
 
 fun BreakpointRuleDef.toArchived(): ArchivedBreakpointRule = ArchivedBreakpointRule(
     id = id,
+    name = name,
     enabled = enabled,
     urlPattern = urlPattern,
     method = method,
@@ -238,6 +240,7 @@ fun BreakpointRuleDef.toArchived(): ArchivedBreakpointRule = ArchivedBreakpointR
 
 fun ArchivedBreakpointRule.toRuleDef(): BreakpointRuleDef = BreakpointRuleDef(
     id = id,
+    name = name.ifBlank { "Untitled" },
     enabled = enabled,
     urlPattern = urlPattern,
     method = method,

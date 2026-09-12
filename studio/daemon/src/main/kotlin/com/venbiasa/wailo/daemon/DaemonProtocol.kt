@@ -354,9 +354,13 @@ internal data class BreakpointRuleDto(
     val methods: List<String>? = null,
     val onRequest: Boolean,
     val onResponse: Boolean,
+    // Defaulted so this stays an additive field, exactly as on [MapLocalRuleDto]: a daemon and a
+    // frontend built either side of this change still talk, and a rule authored before it reads blank.
+    val name: String = "",
 ) {
     fun toDomain(enabled: Boolean = this.enabled) = HostBreakpointRule(
         id = id,
+        name = name,
         enabled = enabled,
         urlPattern = urlPattern,
         method = collapsedMethod(method, methods),
@@ -814,6 +818,7 @@ internal fun HostBreakpointRule.toDto() = BreakpointRuleDto(
     method = method,
     onRequest = onRequest,
     onResponse = onResponse,
+    name = name,
 )
 
 internal fun HostSeed.toDto() = SeedRuleDto(

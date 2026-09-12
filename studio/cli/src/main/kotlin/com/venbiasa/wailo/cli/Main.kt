@@ -796,6 +796,7 @@ private suspend fun setBreakpoint(host: DaemonClient, args: ParsedArgs): Command
     host.upsertBreakpointRule(
         HostBreakpointRule(
             id = id,
+            name = args.name.orEmpty(),
             enabled = args.flag ?: true,
             urlPattern = pattern,
             method = args.method.orEmpty(),
@@ -1348,7 +1349,7 @@ private fun printUsage() {
         wailo-cli remove_rule_group --family F --group-id ID [--with-rules]
         wailo-cli list_rule_groups --family F
         wailo-cli set_rule_order --family F --ids a,b,c [--group-id ID]
-        wailo-cli set_breakpoint --id ID --url-pattern GLOB [--method M]
+        wailo-cli set_breakpoint --id ID --url-pattern GLOB [--name TEXT] [--method M]
                     [--on-request] [--on-response] [--off] [--group-id ID]
         wailo-cli remove_breakpoint --id ID
         wailo-cli list_breakpoints

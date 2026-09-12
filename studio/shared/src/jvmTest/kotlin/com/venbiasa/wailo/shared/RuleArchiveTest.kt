@@ -207,7 +207,15 @@ class RuleArchiveTest {
     @Test
     fun breakpointAndSeedSectionsRoundTripThroughTheSameSchema() {
         val breakpoints = listOf<BreakpointNode>(
-            RuleNode(BreakpointRuleDef(id = "bp1", urlPattern = "https://x/*", onRequest = true, onResponse = false)),
+            RuleNode(
+                BreakpointRuleDef(
+                    id = "bp1",
+                    name = "Hold checkout",
+                    urlPattern = "https://x/*",
+                    onRequest = true,
+                    onResponse = false,
+                ),
+            ),
         )
         val seeds = listOf<SeedNode>(
             RuleNode(SeedRuleDef(id = "s1", urlPattern = "https://y/*", statusCode = 503, delayMillis = 900)),
@@ -223,6 +231,7 @@ class RuleArchiveTest {
         assertNull(decoded.mapLocal)
 
         val bp = decoded.breakpoints!!.nodes.toLayoutNodes { it.toRuleDef() }.findRule("bp1")!!
+        assertEquals("Hold checkout", bp.name)
         assertTrue(bp.onRequest)
         assertFalse(bp.onResponse)
         val seed = decoded.seeds!!.nodes.toLayoutNodes { it.toRuleDef() }.findRule("s1")!!
