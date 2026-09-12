@@ -186,9 +186,9 @@ internal class ProxyController(
         publish()
     }
 
-    private fun publish() {
-        _status.value = describe(running = running, port = _status.value.port, error = _status.value.error)
-    }
+    private fun publish(): ProxyStatus =
+        describe(running = running, port = _status.value.port, error = _status.value.error)
+            .also { _status.value = it }
 
     private fun describe(running: Boolean, port: Int, error: String? = null): ProxyStatus {
         // Read rather than mint: asking for the status must not be what creates a signing key.
@@ -268,22 +268,19 @@ internal class ProxyController(
         runCatching { current.close() }
     }
 
-    /** Refresh the counters the panel and the menu bar read; they only change as traffic flows. */
+    /**
+     * Refresh what the panel and the menu bar read. Re-derived with the listener off too: nothing else
+     * fills in the certificate fields, so short-circuiting that path is what left a fresh daemon telling
+     * every surface there was no root until something happened to touch the proxy.
+     */
     fun sample(): ProxyStatus {
-        val current = server ?: return sampleLanAddress()
+        val current = server ?: return publish()
         val next = describe(running = true, port = current.port).copy(
             connections = current.connections,
             exchanges = current.exchangeCount,
         )
         _status.value = next
         return next
-    }
-
-    // Refresh only the network-dependent field; [describe] would read the Keychain on every poll.
-    private fun sampleLanAddress(): ProxyStatus {
-        val address = currentLanAddress()
-        if (address == _status.value.lanAddress) return _status.value
-        return _status.value.copy(lanAddress = address).also { _status.value = it }
     }
 
     private fun currentLanAddress(): String =

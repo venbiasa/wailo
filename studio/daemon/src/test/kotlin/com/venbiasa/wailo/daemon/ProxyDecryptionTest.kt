@@ -91,6 +91,23 @@ class ProxyDecryptionTest {
         assertEquals(false, proxy.status.value.caInstalled)
     }
 
+    @Test
+    fun aStoppedProxyReportsARootThatAlreadyExists() {
+        // The bug this guards: the published status seeded `caInstalled` false and only `describe()` ever
+        // filled it in, which the listener-off poll skipped — so a fresh daemon told every surface there
+        // was no root, and Studio offered to create the one already in the store.
+        val store = EphemeralCertificateAuthorityStore()
+        val existing = assertNotNull(WailoCertificateAuthority(store).ensure())
+        val restarted = ProxyController(host, 0, ca = WailoCertificateAuthority(store))
+            .also { closeables += it }
+
+        val status = restarted.sample()
+
+        assertEquals(false, status.running, "the listener stays off — that is the path under test")
+        assertTrue(status.caInstalled)
+        assertEquals(existing.sha256, status.caFingerprint)
+    }
+
     /** Drive one HTTPS request through the proxy, trusting Wailo's root the way an unlocked client would. */
     private fun through(originPort: Int, path: String): String {
         // Both roots: Wailo's when it decrypts, the origin's own when it does not.

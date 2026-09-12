@@ -52,12 +52,21 @@ internal class WailoCertificateAuthority(private val store: CertificateAuthority
         private set
 
     /**
+     * Whether [store] has been asked yet. A miss is remembered as well as a hit, because every surface
+     * polls for whether a root exists and answering that from a Keychain is a subprocess per call.
+     */
+    @Volatile
+    private var consulted = false
+
+    /**
      * The root as it stands, without creating one. Kept separate from [ensure] so polling for status is
      * never what puts a universal signing key on a machine.
      */
     @Synchronized
     fun current(): CertificateAuthorityInfo? {
         root?.let { return it.info }
+        if (consulted) return null
+        consulted = true
         return store.load()?.let(::restore)?.also { root = it }?.info
     }
 
@@ -88,6 +97,9 @@ internal class WailoCertificateAuthority(private val store: CertificateAuthority
         leaves.clear()
         root = null
         store.clear()
+        // Ask the store again rather than trust the delete: a clear that failed has to surface as a root
+        // still being there, not as a cached "none" that outlives the mistake.
+        consulted = false
     }
 
     /**
