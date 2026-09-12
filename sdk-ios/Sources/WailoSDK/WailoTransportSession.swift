@@ -3,7 +3,7 @@ import WailoProtocol
 import Wire
 
 /// Shared device-side session over any WebSocket link. Owns the live tap, Map Local / capture-filter /
-/// breakpoint control channel, and the exchange pump — identical whether the SDK dials Studio over LAN
+/// Script / breakpoint control channel, and the exchange pump — identical whether the SDK dials Studio over LAN
 /// or accepts Studio through a USB tunnel.
 protocol WailoTransportLink: AnyObject {
     func send(_ data: Data, completion: @escaping (Error?) -> Void)
@@ -51,12 +51,13 @@ final class WailoSnapshotOwner: @unchecked Sendable {
     }
 }
 
-final class WailoTransportSession: CaptureSink, WailoBodyFetcher, WailoBreakpointGate, @unchecked Sendable {
+final class WailoTransportSession: CaptureSink, WailoBodyFetcher, WailoBreakpointGate, WailoScriptTransformer, @unchecked Sendable {
 
     private let hello: Hello
     private let security: WailoSessionSecurity
     private let bufferCapacity: Int
     private let bodyTimeout: TimeInterval
+    private let scriptTimeout: TimeInterval
     private let pingInterval: TimeInterval
     private let queue: DispatchQueue
     private let queueKey = DispatchSpecificKey<Void>()
@@ -66,6 +67,7 @@ final class WailoTransportSession: CaptureSink, WailoBodyFetcher, WailoBreakpoin
     private var buffer: [HttpExchange] = []
     private var pending: [String: (WailoMappedResponse?) -> Void] = [:]
     private var pendingBreakpoints: [String: (BreakpointDecision?) -> Void] = [:]
+    private var pendingScriptTransforms: [String: (ScriptTransformResult?) -> Void] = [:]
     private var pendingRevocations: [String: (Bool) -> Void] = [:]
     /// Non-nil only between dialling and `AuthResultV3`; every frame in that window is an auth frame.
     private var handshake: WailoHandshake?
@@ -106,6 +108,7 @@ final class WailoTransportSession: CaptureSink, WailoBodyFetcher, WailoBreakpoin
         security: WailoSessionSecurity = .open,
         bufferCapacity: Int = 512,
         bodyTimeout: TimeInterval = 10.0,
+        scriptTimeout: TimeInterval = 1.5,
         pingInterval: TimeInterval = 20.0
     ) {
         self.hello = hello
@@ -113,8 +116,37 @@ final class WailoTransportSession: CaptureSink, WailoBodyFetcher, WailoBreakpoin
         self.queue = queue
         self.bufferCapacity = bufferCapacity
         self.bodyTimeout = bodyTimeout
+        self.scriptTimeout = scriptTimeout
         self.pingInterval = pingInterval
         queue.setSpecific(key: queueKey, value: ())
+    }
+
+    func transform(
+        phase: ScriptPhase,
+        request: HttpRequest,
+        response: HttpResponse?,
+        requestBodyReplayable: Bool,
+        completion: @escaping (ScriptTransformResult?) -> Void
+    ) {
+        queue.async {
+            guard self.link != nil else { completion(nil); return }
+            let correlationId = UUID().uuidString
+            self.pendingScriptTransforms[correlationId] = completion
+            self.sendControl(Envelope {
+                $0.message = .script_transform_request(ScriptTransformRequest(
+                    correlation_id: correlationId,
+                    phase: phase,
+                    request_body_replayable: requestBodyReplayable
+                ) {
+                    $0.request = request
+                    $0.response = response
+                })
+            })
+            self.queue.asyncAfter(deadline: .now() + self.scriptTimeout) { [weak self] in
+                guard let self else { return }
+                self.pendingScriptTransforms.removeValue(forKey: correlationId)?(nil)
+            }
+        }
     }
 
     /// Attach a live link, send Hello, and begin streaming. Re-binding replaces any prior link.
@@ -334,6 +366,7 @@ final class WailoTransportSession: CaptureSink, WailoBodyFetcher, WailoBreakpoin
         dropCachedRules()
         drainPending()
         drainBreakpoints()
+        drainScriptTransforms()
         drainRevocations()
         link?.stopKeepalive()
         link?.closeLink()
@@ -356,6 +389,13 @@ final class WailoTransportSession: CaptureSink, WailoBodyFetcher, WailoBreakpoin
             sendControl(Envelope { $0.message = .breakpoint_rules_ack(BreakpointRulesAck(epoch: rules.epoch)) })
         case let .breakpoint_decision(decision)?:
             resolveBreakpoint(decision)
+        case let .script_rule_set(rules)?:
+            WailoScriptStore.shared.replace(rules.rules, owner: snapshotOwner)
+            sendControl(Envelope {
+                $0.message = .script_rule_set_ack(ScriptRuleSetAck(epoch: rules.epoch))
+            })
+        case let .script_transform_result(result)?:
+            pendingScriptTransforms.removeValue(forKey: result.correlation_id)?(result)
         case let .revoke_device_ack(ack)?:
             pendingRevocations.removeValue(forKey: ack.request_id)?(true)
         default:
@@ -368,6 +408,7 @@ final class WailoTransportSession: CaptureSink, WailoBodyFetcher, WailoBreakpoin
         WailoRuleStore.shared.reset(owner: snapshotOwner)
         WailoCaptureFilterStore.shared.reset(owner: snapshotOwner)
         WailoBreakpointStore.shared.reset(owner: snapshotOwner)
+        WailoScriptStore.shared.reset(owner: snapshotOwner)
         self.snapshotOwner = nil
     }
 
@@ -407,6 +448,12 @@ final class WailoTransportSession: CaptureSink, WailoBodyFetcher, WailoBreakpoin
         let waiting = pendingBreakpoints.values
         pendingBreakpoints.removeAll()
         for resolver in waiting { resolver(nil) }
+    }
+
+    private func drainScriptTransforms() {
+        let waiting = pendingScriptTransforms.values
+        pendingScriptTransforms.removeAll()
+        for completion in waiting { completion(nil) }
     }
 
     private func drainRevocations() {

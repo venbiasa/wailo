@@ -23,6 +23,9 @@ import com.venbiasa.wailo.engine.pairing.RefusedDevice
 import com.venbiasa.wailo.protocol.MapLocalRule
 import com.venbiasa.wailo.protocol.RuleSet
 import com.venbiasa.wailo.protocol.RevokeDeviceAck
+import com.venbiasa.wailo.protocol.ScriptRule
+import com.venbiasa.wailo.protocol.ScriptRuleSet
+import com.venbiasa.wailo.protocol.ScriptTransformRequest
 import io.ktor.server.application.install
 import io.ktor.server.cio.CIO
 import io.ktor.server.engine.EmbeddedServer
@@ -309,6 +312,11 @@ class WailoEngine(
      */
     val breakpointRules: StateFlow<BreakpointRules> = _breakpointRules.asStateFlow()
 
+    private val _scriptRules = MutableStateFlow(ScriptRuleSet())
+
+    /** Match metadata for daemon-owned request and response Scripts. Source never reaches a device. */
+    val scriptRules: StateFlow<ScriptRuleSet> = _scriptRules.asStateFlow()
+
     private val _pausedExchanges = MutableStateFlow<List<PausedExchange>>(emptyList())
 
     /**
@@ -327,6 +335,10 @@ class WailoEngine(
     @Volatile
     var bodyProvider: MapLocalBodyProvider? = null
 
+    /** Set by the daemon to execute a matched Script phase outside this UI-free engine. */
+    @Volatile
+    var scriptTransformProvider: ScriptTransformProvider? = null
+
     // Monotonic version stamped on every snapshot; the device echoes it in a RuleAck. Only used for
     // ack-matching/retry, never to gate the device's apply, so a restart resetting it is harmless.
     private val epochCounter = AtomicLong(0)
@@ -336,6 +348,9 @@ class WailoEngine(
 
     // Separate monotonic version for the breakpoint rules, acked independently of the others.
     private val breakpointEpochCounter = AtomicLong(0)
+
+    // Separate because each rule family is independently pushed and acknowledged.
+    private val scriptEpochCounter = AtomicLong(0)
 
     // Live device connections + how far each is acked, so a rule change reaches every attached SDK and a
     // silently lost push is re-sent. The transport-neutral key lets the same protocol loop serve inbound
@@ -411,6 +426,7 @@ class WailoEngine(
         val ackedEpoch = AtomicLong(-1)
         val ackedFilterEpoch = AtomicLong(-1)
         val ackedBreakpointEpoch = AtomicLong(-1)
+        val ackedScriptEpoch = AtomicLong(-1)
     }
 
     private class KtorServerConnection(
@@ -556,7 +572,7 @@ class WailoEngine(
             .getOrDefault(false)
 
     private suspend fun handleConnection(unadmitted: DeviceConnection) = coroutineScope {
-        // Nothing below this line may run for a peer that has not proved itself: the three pushes that
+        // Nothing below this line may run for a peer that has not proved itself: the four pushes that
         // follow describe every host being intercepted and every Map Local path, and they used to go
         // out the instant a socket opened (ADR-0039).
         val admitted = when (val admission = admission.admit(unadmitted)) {
@@ -587,6 +603,7 @@ class WailoEngine(
             pushRules(connection)
             pushCaptureFilter(connection)
             pushBreakpointRules(connection)
+            pushScriptRules(connection)
             var hello: Hello? = null
             while (true) {
                 val bytes = connection.receive() ?: break
@@ -618,6 +635,9 @@ class WailoEngine(
                 envelope.breakpoint_rules_ack?.let { ack ->
                     state.ackedBreakpointEpoch.updateAndGet { cur -> maxOf(cur, ack.epoch) }
                 }
+                envelope.script_rule_set_ack?.let { ack ->
+                    state.ackedScriptEpoch.updateAndGet { cur -> maxOf(cur, ack.epoch) }
+                }
                 val revoke = envelope.revoke_device
                 if (revoke != null && state.pairedDeviceId != null) {
                     // Ack under the still-live session key, then remove the alias. The local device
@@ -634,6 +654,9 @@ class WailoEngine(
                 }
                 // Keep a slow body read off this connection's receive loop.
                 envelope.body_request?.let { request -> launch { serveBody(connection, request) } }
+                envelope.script_transform_request?.let { request ->
+                    launch { serveScriptTransform(connection, request) }
+                }
                 envelope.breakpoint_hit?.let { hit -> recordBreakpointHit(hello, hit, connection) }
             }
         } finally {
@@ -830,6 +853,19 @@ class WailoEngine(
         }
     }
 
+    /** Replace Script match metadata and converge every attached device on the new snapshot. */
+    fun updateScriptRules(rules: List<ScriptRule>) {
+        _scriptRules.value = ScriptRuleSet(rules = rules, epoch = scriptEpochCounter.incrementAndGet())
+        scope.launch { sessions.keys.forEach { pushScriptRules(it) } }
+    }
+
+    private suspend fun pushScriptRules(session: DeviceConnection) {
+        sendMutex.withLock {
+            val bytes = Envelope(script_rule_set = _scriptRules.value).encode()
+            runCatching { session.send(bytes) }
+        }
+    }
+
     // Re-push the current snapshot to a device that hasn't acked it yet. Cancelled when the connection
     // ends (the launching coroutine is a child of the session handler).
     private suspend fun reconcile(session: DeviceConnection, state: SessionState) {
@@ -838,6 +874,7 @@ class WailoEngine(
             if (state.ackedEpoch.get() < _rules.value.epoch) pushRules(session)
             if (state.ackedFilterEpoch.get() < _captureFilter.value.epoch) pushCaptureFilter(session)
             if (state.ackedBreakpointEpoch.get() < _breakpointRules.value.epoch) pushBreakpointRules(session)
+            if (state.ackedScriptEpoch.get() < _scriptRules.value.epoch) pushScriptRules(session)
         }
     }
 
@@ -861,6 +898,16 @@ class WailoEngine(
         }
         sendMutex.withLock {
             runCatching { session.send(Envelope(body_response = response).encode()) }
+        }
+    }
+
+    private suspend fun serveScriptTransform(session: DeviceConnection, request: ScriptTransformRequest) {
+        val result = runCatching { scriptTransformProvider?.transform(request) }
+            .getOrNull()
+            ?.copy(correlation_id = request.correlation_id)
+            ?: request.identityResult()
+        sendMutex.withLock {
+            runCatching { session.send(Envelope(script_transform_result = result).encode()) }
         }
     }
 

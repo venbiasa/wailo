@@ -1,6 +1,7 @@
 package com.venbiasa.wailo.proxy
 
 import com.venbiasa.wailo.protocol.HttpExchange
+import com.venbiasa.wailo.protocol.Header
 import com.venbiasa.wailo.protocol.HttpRequest
 import com.venbiasa.wailo.protocol.HttpResponse
 import java.io.ByteArrayOutputStream
@@ -86,6 +87,47 @@ class ProxyServerTest {
     }
 
     @Test
+    fun aMetadataOnlyRequestScriptCannotCorruptTheOriginalBodyFraming() {
+        val origin = rawOrigin { input, output ->
+            val request = buildList {
+                while (true) {
+                    val line = input.bufferedReadLine() ?: break
+                    if (line.isBlank()) break
+                    add(line)
+                }
+            }
+            val length = request.first { it.startsWith("Content-Length:", true) }
+                .substringAfter(':')
+                .trim()
+                .toInt()
+            output.respond("$length:${String(input.readNBytes(length))}")
+        }
+        val proxy = proxy(
+            RecordingSink(),
+            rules(
+                intercepts = { Interception(transformRequest = true) },
+                onRequest = { request ->
+                    RequestVerdict.Proceed(
+                        request.copy(
+                            headers = request.headers
+                                .filterNot { it.name.equals("Content-Length", true) } +
+                                Header("Content-Length", "1"),
+                        ),
+                    )
+                },
+            ),
+        )
+
+        val response = proxy.request(
+            "POST http://127.0.0.1:${origin.port}/submit HTTP/1.1",
+            headers = listOf("Content-Length: 7"),
+            body = "payload",
+        )
+
+        assertTrue(response.endsWith("7:payload"), response)
+    }
+
+    @Test
     fun aChunkedResponseReachesTheClientChunkedAndIsCapturedWhole() {
         val origin = origin { _, out ->
             out.write(
@@ -103,6 +145,104 @@ class ProxyServerTest {
 
         assertTrue(response.contains("5\r\nfirst\r\n6\r\nsecond\r\n0\r\n\r\n"), response)
         assertEquals("firstsecond", sink.body(sink.awaitOne().responseBody))
+    }
+
+    @Test
+    fun aChunkedResponseKeepsStreamingWhileAScriptEditsMetadata() {
+        val origin = origin { _, out ->
+            out.write(
+                (
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n" +
+                        "Transfer-Encoding: chunked\r\n\r\n5\r\nfirst\r\n6\r\nsecond\r\n0\r\n\r\n"
+                    ).toByteArray(),
+            )
+            out.flush()
+        }
+        val sink = RecordingSink()
+        var bodyUnavailable = false
+        val proxy = proxy(
+            sink,
+            rules(
+                intercepts = { Interception(transformResponse = true) },
+                onResponse = { response ->
+                    bodyUnavailable = response.body_truncated
+                    ResponseVerdict.Proceed(
+                        response.copy(
+                            code = 202,
+                            message = "",
+                            headers = response.headers + Header("X-Script", "yes"),
+                        ),
+                    )
+                },
+            ),
+        )
+
+        val response = proxy.request("GET http://127.0.0.1:${origin.port}/stream HTTP/1.1")
+
+        assertTrue(bodyUnavailable)
+        assertTrue(response.startsWith("HTTP/1.1 202 Accepted"), response)
+        assertTrue(response.contains("5\r\nfirst\r\n6\r\nsecond\r\n0\r\n\r\n"), response)
+        val row = sink.awaitOne()
+        assertEquals(202, row.exchange.response?.code)
+        assertTrue(row.exchange.edited)
+        assertEquals("firstsecond", sink.body(row.responseBody))
+    }
+
+    @Test
+    fun aNoOpScriptKeepsAnUnavailableStreamingResponseHeadUnchanged() {
+        val origin = origin { _, out ->
+            out.write(
+                (
+                    "HTTP/1.1 200 OK\r\nX-Origin: exact\r\nConnection: close\r\n" +
+                        "Transfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n"
+                    ).toByteArray(),
+            )
+            out.flush()
+        }
+        val sink = RecordingSink()
+        val proxy = proxy(
+            sink,
+            rules(intercepts = { Interception(transformResponse = true) }),
+        )
+
+        val response = proxy.request("GET http://127.0.0.1:${origin.port}/stream HTTP/1.1")
+
+        assertTrue(response.contains("X-Origin: exact\r\nConnection: close\r\nTransfer-Encoding: chunked"), response)
+        assertFalse(sink.awaitOne().exchange.edited)
+    }
+
+    @Test
+    fun aRequestRewriteChangesTheRouteAndSelectsResponseScriptsFromTheFinalUrl() {
+        val origin = origin { request, out -> out.respond(request.first()) }
+        val sink = RecordingSink()
+        val proxy = proxy(
+            sink,
+            rules(
+                intercepts = { url ->
+                    Interception(
+                        transformRequest = url.endsWith("/original"),
+                        transformResponse = url.endsWith("/changed"),
+                    )
+                },
+                onRequest = { request ->
+                    RequestVerdict.Proceed(
+                        request.copy(url = request.url.replace("/original", "/changed")),
+                    )
+                },
+                onResponse = { response ->
+                    ResponseVerdict.Proceed(response.copy(code = 202, message = ""))
+                },
+            ),
+        )
+
+        val response = proxy.request("GET http://127.0.0.1:${origin.port}/original HTTP/1.1")
+
+        assertTrue(response.startsWith("HTTP/1.1 202 Accepted"), response)
+        assertTrue(response.contains("GET /changed HTTP/1.1"), response)
+        val row = sink.awaitOne()
+        assertEquals("http://127.0.0.1:${origin.port}/changed", row.exchange.request?.url)
+        assertEquals(202, row.exchange.response?.code)
+        assertTrue(row.exchange.edited)
     }
 
     @Test
@@ -495,6 +635,25 @@ class ProxyServerTest {
     }
 
     @Test
+    fun aRequestScriptEditMarksAnUnreachableExchangeAsEdited() {
+        val sink = RecordingSink()
+        val proxy = proxy(
+            sink,
+            rules(
+                intercepts = { Interception(transformRequest = true) },
+                onRequest = { request ->
+                    RequestVerdict.Proceed(request.copy(headers = request.headers + Header("X-Script", "yes")))
+                },
+            ),
+        )
+        val deadPort = ServerSocket(0).use { it.localPort }
+
+        proxy.request("GET http://127.0.0.1:$deadPort/gone HTTP/1.1")
+
+        assertTrue(sink.awaitOne().exchange.edited)
+    }
+
+    @Test
     fun aPausedCaptureStillRelays() {
         val origin = origin { _, out -> out.respond("still served") }
         val sink = RecordingSink(recording = false)
@@ -536,6 +695,42 @@ class ProxyServerTest {
     }
 
     @Test
+    fun aLocallyAnsweredRequestCapturesTheRequestScriptsFinalValue() {
+        val sink = RecordingSink()
+        val proxy = proxy(
+            sink,
+            rules(
+                intercepts = { Interception(transformRequest = true) },
+                onRequest = { request ->
+                    RequestVerdict.Respond(
+                        response = HttpResponse(code = 200, body = "mapped".encodeUtf8(), body_size = 6),
+                        editedRequest = request.copy(
+                            method = "PUT",
+                            url = request.url.replace("/original", "/mapped"),
+                            body = "rewritten".encodeUtf8(),
+                            body_size = 9,
+                        ),
+                        requestBodyReplaced = true,
+                    )
+                },
+            ),
+        )
+
+        proxy.request(
+            "POST http://127.0.0.1:1/original HTTP/1.1",
+            headers = listOf("Content-Length: 8"),
+            body = "original",
+        )
+
+        val row = sink.awaitOne()
+        assertEquals("PUT", row.exchange.request?.method)
+        assertEquals("http://127.0.0.1:1/mapped", row.exchange.request?.url)
+        assertEquals("9", row.exchange.request?.headers?.first { it.name.equals("Content-Length", true) }?.value_)
+        assertEquals("rewritten", sink.body(row.requestBody))
+        assertTrue(row.exchange.edited)
+    }
+
+    @Test
     fun aHeldRequestIsOfferedWholeAndItsEditReachesTheOrigin() {
         val origin = origin { request, out ->
             val length = request.first { it.startsWith("Content-Length:", true) }.substringAfter(':').trim().toInt()
@@ -548,7 +743,10 @@ class ProxyServerTest {
                 intercepts = { Interception(holdRequest = true) },
                 onRequest = { request ->
                     seen = request.body.utf8()
-                    RequestVerdict.Proceed(request.copy(body = "edited body!".encodeUtf8()))
+                    RequestVerdict.Proceed(
+                        request.copy(body = "edited body!".encodeUtf8()),
+                        bodyReplaced = true,
+                    )
                 },
             ),
         )
@@ -635,7 +833,12 @@ class ProxyServerTest {
     ): ProxyRules = object : ProxyRules {
         override fun intercepts(method: String, url: String) = intercepts(url)
         override fun onRequest(client: String, request: HttpRequest) = onRequest(request)
-        override fun onResponse(client: String, request: HttpRequest, response: HttpResponse) = onResponse(response)
+        override fun onResponse(
+            client: String,
+            request: HttpRequest,
+            response: HttpResponse,
+            breakpointSelected: Boolean,
+        ) = onResponse(response)
     }
 
     private fun origin(handle: (List<String>, OutputStream) -> Unit): TestOrigin =

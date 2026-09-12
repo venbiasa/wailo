@@ -18,7 +18,9 @@ persistent local daemon shared by the Kotlin Multiplatform desktop app, CLI, and
  secret redaction must keep working with no UI open, so never move either into `desktopApp` — and never
    redact in `engine`, which exists to show real values. The same test governs interception: an exchange is
 held, mapped, or answered by a seed on the daemon, so a frontend never resolves a hold on its own
- (ADR-0067). It also holds the *only* copy of what was authored — rules, their grouping, their bodies, the
+ (ADR-0067). Script source and execution follow the same test: source stays on the daemon, devices receive
+ match metadata only, and GraalJS stays in a replaceable child process rather than in an SDK, frontend, or
+ the daemon JVM (ADR-0099). It also holds the *only* copy of what was authored — rules, their grouping, their bodies, the
  feature masters, bookmarks: a frontend reads them back and writes changes straight through, and never
  keeps a local mirror to reconcile on launch, because the reconciliation cannot tell a list a user cleared
  from one nothing has written yet (ADR-0085). Studio may author and display; it may not be the only place
@@ -114,7 +116,8 @@ because "installed" is a useless answer to someone debugging an APK they did not
 read-only setup guide and requires `confirm=true` on every proxy mutation. `proxy` knows the
 *shape* of interception (`ProxyRules`) but never a
 rule: the daemon's `HostProxyRules` evaluates the real sets, in ADR-0033's precedence, against the same
-registries the device snapshots come from. That matching order now exists twice — here and in
+registries the device snapshots come from. The fixed order is Capture Filter, request Scripts, request
+breakpoint, Map Local/network, response Scripts, response breakpoint, and delay (ADR-0099). That matching order now exists twice — here and in
 `sdk-android`, which cannot depend on it — so a change to one is a change to both (ADR-0072).
 
 `sdk-android-panel` is the on-device panel (Compose + a ZXing QR scanner + a launcher shortcut). It is a
@@ -173,6 +176,7 @@ cd studio && ./cli/build/install/wailo-cli/bin/wailo-cli proxy_targets # booted 
 cd studio && ./cli/build/install/wailo-cli/bin/wailo-cli setup_proxy_target --id emulator-5554 # route it + install the root; reports which trust store took it
 cd studio && ./cli/build/install/wailo-cli/bin/wailo-cli clear_proxy_target --id emulator-5554 # give that device its network back
 cd studio && ./cli/build/install/wailo-cli/bin/wailo-cli set_mcp_access --off # revoke AI tool access (ADR-0059)
+cd studio && ./cli/build/install/wailo-cli/bin/wailo-cli set_script --id s1 --url-pattern 'https://…/*' --script-file ./rewrite.js
 cd studio && ./cli/build/install/wailo-cli/bin/wailo-cli set_seed --id s1 --url-pattern 'https://…/poll' --body-text '{}'
 cd studio && ./cli/build/install/wailo-cli/bin/wailo-cli fill_seeds # arm the library + sweep waiting holds (ADR-0067)
 cd studio && ./cli/build/install/wailo-cli/bin/wailo-cli serve --keep # pin the daemon until Ctrl-C (ADR-0062)

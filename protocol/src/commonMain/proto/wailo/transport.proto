@@ -5,13 +5,10 @@ package com.venbiasa.wailo.protocol;
 import "wailo/capture.proto";
 
 // One Envelope per WebSocket frame. Device -> desktop: the client opens with a Hello, then streams
-// exchanges, plus a RuleAck after applying rules, a CaptureFilterAck after applying the capture filter,
-// a BodyRequest when a Map Local rule matches, a BreakpointRulesAck after applying breakpoint rules,
-// and a BreakpointHit when a breakpoint pauses a request/response. Desktop -> device: pushes a RuleSet
-// (match-metadata), a CaptureFilter (allow/block lists), and a BreakpointRules snapshot right after the
-// Hello and whenever they change, replies to a BodyRequest with a BodyResponse (ADR-0019), and replies
-// to a BreakpointHit with a BreakpointDecision. The receiver keys on which oneof field is set; new kinds
-// are a oneof extension (ADR-0008), so this stays backward-compatible.
+// exchanges and acknowledgements, requests matched Map Local bodies and Script transforms, and reports
+// breakpoint hits. Desktop -> device: pushes rule snapshots and replies to each request or hit. The
+// receiver keys on which oneof field is set; new kinds are a oneof extension (ADR-0008), so this stays
+// backward-compatible.
 //
 // Over WiFi the exchange above is preceded by the identity-first v3 handshake (ADR-0060) and every
 // frame after it is wrapped in a SealedFrame. Loopback sessions — Simulator, `adb reverse`, the
@@ -44,6 +41,10 @@ message Envelope {
     AuthResultV3 auth_result_v3 = 21;
     RevokeDevice revoke_device = 22;
     RevokeDeviceAck revoke_device_ack = 23;
+    ScriptRuleSet script_rule_set = 24;
+    ScriptRuleSetAck script_rule_set_ack = 25;
+    ScriptTransformRequest script_transform_request = 26;
+    ScriptTransformResult script_transform_result = 27;
   }
 }
 

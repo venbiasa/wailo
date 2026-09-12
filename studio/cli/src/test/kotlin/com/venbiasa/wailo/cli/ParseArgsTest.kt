@@ -6,6 +6,26 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class ParseArgsTest {
+    @Test
+    fun scriptSourceHasDedicatedInlineAndFileFlags() {
+        val inline = parseArgs(
+            arrayOf(
+                "set_script",
+                "--id", "rewrite",
+                "--url-pattern", "*",
+                "--script", "function onRequest({ request }) { return request; }",
+            ),
+        )!!
+        assertEquals("function onRequest({ request }) { return request; }", inline.script)
+        assertNull(inline.scriptFile)
+
+        val file = parseArgs(
+            arrayOf("set_script", "--id", "rewrite", "--url-pattern", "*", "--script-file", "rewrite.js"),
+        )!!
+        assertEquals("rewrite.js", file.scriptFile)
+        assertNull(file.script)
+    }
+
 
     @Test
     fun parsesServeAndFlags() {
@@ -254,6 +274,7 @@ class ParseArgsTest {
                 "get_seed",
                 "set_breakpoint",
                 "list_breakpoints",
+                "get_script",
                 "set_max_retained",
                 "wait_device",
                 "list_paired",

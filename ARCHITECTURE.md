@@ -139,8 +139,8 @@ is the SDK regardless of which transport carried it (LAN WebSocket, usbmux, or `
   must not also stop checking who is on the other end.
 - One connection per virtual thread, blocking IO throughout — a proxy is almost entirely parked on a
   socket, and blocking reads keep the framing code readable.
-- **The same rules act on both paths** (ADR-0067). There is no proxy rule list: Capture Filter, Map Local,
-  Breakpoints, and Seeds are the sets the SDK already uses, in ADR-0033's precedence — the filter decides
+- **The same rules act on both paths** (ADR-0067/0099). There is no proxy rule list: Capture Filter,
+  Scripts, Map Local, Breakpoints, and Seeds are the shared sets. The filter decides
   what is *kept* (a blocked host is still relayed, and still interceptable); with no breakpoint a Map Local
   rule short-circuits; with one, the breakpoint owns the exchange and Map Local supplies the response it
   shows. `daemon`'s `HostProxyRules` is the evaluator, because for a proxied exchange there is no device to
@@ -200,6 +200,19 @@ never see the store — they ask the daemon for a range and get bounded bytes ba
 actually looking at that body. When the volume runs low, the store asks the engine to retire its oldest
 exchanges rather than stop recording.
 
+## Script transforms
+
+Scripts are daemon-owned, ordered request/response transforms (ADR-0099). Devices receive only URL,
+method, and hook match metadata; source stays in `scripts.json`, and a matching call asks the engine's
+`ScriptTransformProvider` to execute it. The proxy calls the same `HeadlessHost` contract directly.
+
+The fixed pipeline is `Capture Filter → request Scripts → request breakpoint → Map Local/network →
+response Scripts → response breakpoint → delay → caller`. One child JVM hosts GraalJS Community with no
+host, filesystem, network, environment, native, or thread access. Each script gets a fresh context and a
+transactional copy of the previous output. An invalid return rolls back that script; a worker timeout or
+crash replaces the worker and restores the whole phase input. Bodies and source are capped before crossing
+the worker protocol, and unsafe streams remain byte-preserving while metadata can still change.
+
 ## Studio surfaces
 
 The desktop is one main window — a live traffic list over a detail panel — plus a single docked tool
@@ -210,10 +223,15 @@ persisted width (ADR-0021). The panels are:
 |---|---|---|
 | Capture Filter | Allow/block hosts, gated at the device (ADR-0029) | pushed to devices |
 | Map Local | Answer matching requests with an authored response (ADR-0019) | pushed as match metadata; bodies read on the desktop, per request |
+| Scripts | Transform matching requests and responses with synchronous JavaScript (ADR-0099) | source and execution on the daemon; match metadata pushed to devices |
 | Breakpoints | Pause matching requests/responses for live editing (ADR-0027) | pushed to devices |
-| Seed | Canned responses that answer paused exchanges, in order (ADR-0041) | desktop only — never pushed |
+| Seed | Canned responses that answer paused exchanges, in order (ADR-0041/0067) | daemon-owned; never pushed |
 | Devices | Connected devices, USB/LAN, and Wi-Fi trust (ADR-0039/0040) | host |
 | Settings | Socket/USB ports, the proxy and its setup (reach, root, unlocked hosts), retention, AI tool access | host + daemon, persisted |
+
+Every modal in the studio is scoped to the panel that raised it: the scrim (`PanelScrim`) is a child of
+that panel's Box, so a pairing offer, an `+ Add filter` card, or a delete-group confirmation dims only its
+own pane and leaves the rest of the window lit and usable. None of them is a window-level dialog.
 
 Held exchanges are edited in a second top-level window, not a modal, so traffic stays browsable beside
 it (ADR-0034). That window is user-owned: it opens from the Breakpoints panel or when a hold needs a
@@ -224,13 +242,12 @@ already working on another hold (ADR-0043).
 
 Every panel is stateless over its inputs. `shared` renders a layout and hands back a whole new one for
 any change; `desktopApp` owns UI persistence and file IO, then sends state changes through the daemon client — which keeps
-`shared` portable and free of `java.*` (ADR-0013). Map Local, Breakpoints, and Seed share one grouped rule
+`shared` portable and free of `java.*` (ADR-0013). Map Local, Scripts, Breakpoints, and Seed share one grouped rule
 list (ADR-0026/0028), and each has an independent feature master that makes it inert without erasing what's
-configured (ADR-0030). All three drag and reorder, but only Map Local and Seed resolve by first match, so
-only their order is a priority: every matching breakpoint rule fires, and arranging that list is for
-reading it (ADR-0098, superseding ADR-0042's grip-free breakpoints). Dragging is also the only way a rule
-joins a group, which is why taking the breakpoint handles away had left its groups unfillable from
-Studio at all.
+configured (ADR-0030). All four drag and reorder, but only Map Local, Scripts, and Seed use order as
+priority: every matching breakpoint rule fires, and arranging that list is for reading it (ADR-0098,
+superseding ADR-0042's grip-free breakpoints). Dragging is also the only way a rule joins a group, which
+is why taking the breakpoint handles away had left its groups unfillable from Studio at all.
 
 All three rule panels are also reachable from a captured row's right-click, which opens the panel on an
 editor pre-filled from that exchange rather than asking for the URL again. Map Local and Seed both carry
@@ -265,7 +282,7 @@ exit, suppresses relaunch by clients that were already open. A fresh frontend st
 `wailo-cli` sends one command directly to the daemon; `serve` remains a compatibility command that ensures
 the daemon is running and returns. `wailo-mcp` remains a client-owned stdio process for Cursor/Claude, but
 it is now only a protocol adapter over the daemon. Multiple MCP clients, CLI invocations, and Studio can
-coexist without capture-port conflicts or split state. Map Local, breakpoint rules, and the capture filter
+coexist without capture-port conflicts or split state. Map Local, Scripts, breakpoint rules, and the capture filter
 are daemon files under `~/.wailo/` so a restart still serves the same mocks and filter; Studio's grouped
 layouts ride along as opaque strings. Captured traffic and paused holds remain session state that dies
 with the daemon (ADR-0061), even though captured bodies now sit in an encrypted spool under
@@ -276,7 +293,8 @@ Two daemon settings govern that adapter rather than its lifecycle (ADR-0059). AI
 default, is a gate: with it off every MCP tool including `status` is refused, while capture, Studio, and the
 CLI carry on untouched. Secret redaction, also on by default, replaces credential and cookie headers,
 sensitive query parameters, and secret-looking body fields with `<wailo:redacted>` on the way out of `mcp`
-— never in `engine`, because Studio's inspector exists to show those values. Both live in the daemon so a
+and withholds Script source as one marker — never in `engine`, because Studio's inspector exists to show
+real values. Both live in the daemon so a
 headless MCP session and an open Studio cannot disagree, and both are settable from Studio's Settings panel
 and from `wailo-cli`.
 

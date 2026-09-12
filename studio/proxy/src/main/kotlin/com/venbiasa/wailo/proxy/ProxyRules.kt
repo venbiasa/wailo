@@ -49,6 +49,8 @@ fun interface ProxySetup {
 class Interception(
     val holdRequest: Boolean = false,
     val holdResponse: Boolean = false,
+    val transformRequest: Boolean = false,
+    val transformResponse: Boolean = false,
     val record: Boolean = true,
 )
 
@@ -76,11 +78,20 @@ fun interface ProxyTls {
 
 /** What the daemon decides about a request that has not yet left for its origin. */
 sealed interface RequestVerdict {
-    /** Send it on. [edited] replaces what the client wrote when a human changed it. */
-    class Proceed(val edited: HttpRequest? = null) : RequestVerdict
+    /** Send it on. [bodyReplaced] distinguishes an empty replacement from preserved streaming bytes. */
+    class Proceed(
+        val edited: HttpRequest? = null,
+        val bodyReplaced: Boolean = false,
+        /** The response half of the breakpoint selected before this request left, if known. */
+        val holdResponse: Boolean? = null,
+    ) : RequestVerdict
 
     /** Answer here and never contact the origin — a Map Local rule, or a hold resolved with a response. */
-    class Respond(val response: HttpResponse) : RequestVerdict
+    class Respond(
+        val response: HttpResponse,
+        val editedRequest: HttpRequest? = null,
+        val requestBodyReplaced: Boolean = false,
+    ) : RequestVerdict
 
     /**
      * Fail the client's request.
@@ -99,7 +110,7 @@ sealed interface ResponseVerdict {
 }
 
 /**
- * The daemon's rules — Capture Filter, Map Local, breakpoints, and the seeds that answer their holds —
+ * The daemon's rules — Capture Filter, Scripts, Map Local, breakpoints, and the seeds that answer their holds —
  * as the relay sees them (ADR-0067). Implemented in `daemon`, which is the only module allowed to know
  * that any of those exist; this interface is what keeps `proxy` off `engine` and `host`.
  *
@@ -111,7 +122,12 @@ interface ProxyRules {
 
     fun onRequest(client: String, request: HttpRequest): RequestVerdict
 
-    fun onResponse(client: String, request: HttpRequest, response: HttpResponse): ResponseVerdict
+    fun onResponse(
+        client: String,
+        request: HttpRequest,
+        response: HttpResponse,
+        breakpointSelected: Boolean = false,
+    ): ResponseVerdict
 
     companion object {
         /** Relay everything untouched: what a `ProxyServer` does with no daemon behind it. */
@@ -124,6 +140,7 @@ interface ProxyRules {
                 client: String,
                 request: HttpRequest,
                 response: HttpResponse,
+                breakpointSelected: Boolean,
             ) = ResponseVerdict.Proceed()
         }
     }

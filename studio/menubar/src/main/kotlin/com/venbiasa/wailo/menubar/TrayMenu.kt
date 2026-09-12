@@ -17,6 +17,8 @@ internal data class MenuState(
     val capturePort: Int,
     val capturing: Boolean,
     val mapLocalEnabled: Boolean,
+    val scriptsEnabled: Boolean = true,
+    val scriptIssueCount: Int = 0,
     val breakpointsEnabled: Boolean,
     val seedsEnabled: Boolean,
     val allowlistEnabled: Boolean,
@@ -45,6 +47,7 @@ internal class MenuActions(
     val setProxyEnabled: (Boolean) -> Unit,
     val setSystemProxy: (Boolean) -> Unit,
     val setMapLocalEnabled: (Boolean) -> Unit,
+    val setScriptsEnabled: (Boolean) -> Unit = {},
     val setBreakpointsEnabled: (Boolean) -> Unit,
     val setSeedsEnabled: (Boolean) -> Unit,
     val setAllowlistEnabled: (Boolean) -> Unit,
@@ -83,6 +86,7 @@ internal class TrayMenu(
     // here (ADR-0066) — which now includes Seeds, since the daemon spends them (ADR-0067).
     private val enableTools = Menu("Enable Tools")
     private val mapLocal = CheckboxMenuItem("Map Local")
+    private val scripts = CheckboxMenuItem("Scripts")
     private val breakpoints = CheckboxMenuItem("Breakpoints")
     private val seeds = CheckboxMenuItem("Seeds")
     private val allowlist = CheckboxMenuItem("Capture Filter: Allowlist")
@@ -108,6 +112,7 @@ internal class TrayMenu(
         add(listenOn)
         addSeparator()
         enableTools.add(mapLocal)
+        enableTools.add(scripts)
         enableTools.add(breakpoints)
         enableTools.add(seeds)
         enableTools.add(allowlist)
@@ -132,6 +137,7 @@ internal class TrayMenu(
         proxy.addItemListener { actions.setProxyEnabled(proxy.state) }
         systemProxy.addItemListener { actions.setSystemProxy(systemProxy.state) }
         mapLocal.addItemListener { actions.setMapLocalEnabled(mapLocal.state) }
+        scripts.addItemListener { actions.setScriptsEnabled(scripts.state) }
         breakpoints.addItemListener { actions.setBreakpointsEnabled(breakpoints.state) }
         seeds.addItemListener { actions.setSeedsEnabled(seeds.state) }
         allowlist.addItemListener { actions.setAllowlistEnabled(allowlist.state) }
@@ -164,6 +170,8 @@ internal class TrayMenu(
         // row is not information, unlike the temporarily-unusable ones below.
         if (next.systemProxySupported) systemProxy.state = next.systemProxy else menu.remove(systemProxy)
         mapLocal.state = next.mapLocalEnabled
+        scripts.label = if (next.scriptIssueCount == 0) "Scripts" else "Scripts (${next.scriptIssueCount} issues)"
+        scripts.state = next.scriptsEnabled
         breakpoints.state = next.breakpointsEnabled
         seeds.state = next.seedsEnabled
         allowlist.state = next.allowlistEnabled

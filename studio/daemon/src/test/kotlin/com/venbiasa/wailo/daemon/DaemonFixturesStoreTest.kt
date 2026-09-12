@@ -8,6 +8,38 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class DaemonFixturesStoreTest {
+    @Test
+    fun scriptsRoundTripSourceGroupsAndMaster() {
+        val directory = Files.createTempDirectory("wailo-scripts")
+        try {
+            val source = "function onRequest({ request }) { return request; }"
+            val stored = PersistedScripts(
+                enabled = false,
+                nodes = listOf(
+                    DaemonRuleNode(
+                        group = DaemonRuleGroup("g1", "Auth", enabled = true),
+                        rules = listOf(
+                            ScriptRuleDto(
+                                id = "rewrite",
+                                enabled = true,
+                                urlPattern = "https://example.com/*",
+                                source = source,
+                                onRequest = true,
+                            ),
+                        ),
+                    ),
+                ),
+            )
+            DaemonFixturesStore(directory).saveScripts(stored)
+
+            val loaded = DaemonFixturesStore(directory).loadScriptsIfPresent()
+            assertEquals(stored, loaded)
+            assertTrue(Files.readString(directory.resolve("scripts.json")).contains(source))
+        } finally {
+            directory.toFile().deleteRecursively()
+        }
+    }
+
     /**
      * The layout file holds the body's *reference*, never its bytes (ADR-0086) — that is what keeps a
      * reorder or a toggle from rewriting every fixture in the file.

@@ -55,6 +55,7 @@ import com.venbiasa.wailo.engine.WailoEngine
 import com.venbiasa.wailo.engine.pairing.PairingCode
 import com.venbiasa.wailo.host.HostBreakpointRule
 import com.venbiasa.wailo.host.HostMapLocalRule
+import com.venbiasa.wailo.host.HostScript
 import com.venbiasa.wailo.host.HostSeed
 import com.venbiasa.wailo.protocol.CaptureFilter
 import com.venbiasa.wailo.protocol.Header
@@ -90,6 +91,10 @@ import com.venbiasa.wailo.shared.RuleNode
 import com.venbiasa.wailo.shared.ResponseHeader
 import com.venbiasa.wailo.shared.SeedNode
 import com.venbiasa.wailo.shared.SeedRuleDef
+import com.venbiasa.wailo.shared.ScriptHookAvailability
+import com.venbiasa.wailo.shared.ScriptIssue
+import com.venbiasa.wailo.shared.ScriptNode
+import com.venbiasa.wailo.shared.ScriptRuleDef
 import com.venbiasa.wailo.shared.WailoApp
 import com.venbiasa.wailo.shared.WailoBreakpointWindowContent
 import com.venbiasa.wailo.shared.WailoCompareWindowContent
@@ -550,6 +555,29 @@ private fun runWailo(engine: DaemonClient) = application {
         Unit
     }
 
+    val daemonScriptNodes by engine.scriptNodes.collectAsState()
+    val scriptNodes = remember(daemonScriptNodes) { daemonScriptNodes.toScriptNodes() }
+    val scriptsEnabled by engine.scriptsEnabled.collectAsState()
+    val daemonScriptIssues by engine.scriptIssues.collectAsState()
+    val scriptIssues = remember(daemonScriptIssues) {
+        daemonScriptIssues.map {
+            ScriptIssue(
+                ruleId = it.ruleId,
+                phase = it.phase.name,
+                timestampEpochMs = it.timestampEpochMs,
+                code = it.code.name,
+            )
+        }
+    }
+    val onScriptLayoutChange = { next: List<ScriptNode> ->
+        scope.launch { engine.replaceScriptNodes(next.toDaemonScriptNodes(), scriptsEnabled) }
+        Unit
+    }
+    val onScriptsEnabledChange = { next: Boolean ->
+        scope.launch { engine.setScriptsEnabled(next) }
+        Unit
+    }
+
     // Seed layout: owned by the daemon, which holds the bytes too — a seed is spent by whoever owns the
     // hold, and that is the daemon whether or not this window exists (ADR-0067). Read and written exactly
     // like Map Local above; unlike it, nothing reaches a device.
@@ -641,6 +669,8 @@ private fun runWailo(engine: DaemonClient) = application {
                     mapLocalEnabled = mapLocalEnabled,
                     breakpointNodes = breakpointNodes,
                     breakpointsEnabled = breakpointsEnabled,
+                    scriptNodes = scriptNodes,
+                    scriptsEnabled = scriptsEnabled,
                     seedNodes = seedNodes,
                     seedsEnabled = seedsEnabled,
                     captureFilter = captureFilter,
@@ -653,18 +683,32 @@ private fun runWailo(engine: DaemonClient) = application {
     val onImportRules: suspend (Frame?) -> String = onImport@{ owner: Frame? ->
         val source = chooseArchiveFile(owner, save = false) ?: return@onImport ""
         val result = withContext(Dispatchers.IO) {
-            importArchive(source, mapLocalNodes, breakpointNodes, seedNodes, captureFilter)
+            importArchive(source, mapLocalNodes, breakpointNodes, scriptNodes, seedNodes, captureFilter)
         }
         // The archive's bodies are staged the same way the editor stages one, so the layout push below
         // carries them to the daemon through the one path that writes bodies.
         pendingBodies.putAll(result.bodies)
+        var scriptsValid = true
+        if (result.scripts != scriptNodes) {
+            for (script in result.scripts.allRules()) {
+                if (engine.validateScript(script.source) == null) {
+                    scriptsValid = false
+                    break
+                }
+            }
+        }
         // Adopted through each panel's own change handler rather than by assigning state, so the daemon
         // push runs exactly as it does for a hand edit.
         if (result.mapLocal != mapLocalNodes) onLayoutChange(result.mapLocal)
         if (result.breakpoints != breakpointNodes) onBreakpointLayoutChange(result.breakpoints)
+        if (scriptsValid && result.scripts != scriptNodes) onScriptLayoutChange(result.scripts)
         if (result.seeds != seedNodes) onSeedLayoutChange(result.seeds)
         if (result.captureFilter != captureFilter) onCaptureFilterChange(result.captureFilter)
-        result.message
+        if (scriptsValid) {
+            result.message
+        } else {
+            "Scripts in ${source.name} were skipped because one did not validate; other sections were imported normally."
+        }
     }
 
     // Exchanges currently held at a breakpoint. Bridged from the engine row to the viewer's model at
@@ -948,6 +992,16 @@ private fun runWailo(engine: DaemonClient) = application {
             onOpenBreakpointWindow = {
                 breakpointWindowOpen = true
                 raiseBreakpointWindow += 1
+            },
+            scriptNodes = scriptNodes,
+            scriptIssues = scriptIssues,
+            scriptsEnabled = scriptsEnabled,
+            onScriptLayoutChange = onScriptLayoutChange,
+            onScriptsEnabledChange = onScriptsEnabledChange,
+            onValidateScript = { source ->
+                engine.validateScript(source)?.let {
+                    ScriptHookAvailability(it.onRequest, it.onResponse)
+                }
             },
             seedNodes = seedNodes,
             onSeedLayoutChange = onSeedLayoutChange,
@@ -1289,6 +1343,41 @@ internal fun List<DaemonRuleNode<HostBreakpointRule>>.toBreakpointNodes(): List<
         node.group?.let { listOf(GroupNode(it.toRuleGroup(), definitions)) }
             ?: definitions.map { RuleNode(it) }
     }
+
+internal fun List<ScriptNode>.toDaemonScriptNodes(): List<DaemonRuleNode<HostScript>> = map { node ->
+    when (node) {
+        is GroupNode -> DaemonRuleNode(node.group.toDaemonGroup(), node.rules.map { it.toHostScript() })
+        is RuleNode -> DaemonRuleNode(null, listOf(node.rule.toHostScript()))
+    }
+}
+
+private fun ScriptRuleDef.toHostScript() = HostScript(
+    id = id,
+    name = name,
+    enabled = enabled,
+    urlPattern = urlPattern,
+    method = method.trim(),
+    source = source,
+    onRequest = onRequest,
+    onResponse = onResponse,
+)
+
+internal fun List<DaemonRuleNode<HostScript>>.toScriptNodes(): List<ScriptNode> = flatMap { node ->
+    val definitions = node.rules.map { rule ->
+        ScriptRuleDef(
+            id = rule.id,
+            name = rule.name.ifBlank { rule.id },
+            enabled = rule.enabled,
+            urlPattern = rule.urlPattern,
+            method = rule.method,
+            source = rule.source,
+            onRequest = rule.onRequest,
+            onResponse = rule.onResponse,
+        )
+    }
+    node.group?.let { listOf(GroupNode(it.toRuleGroup(), definitions)) }
+        ?: definitions.map { RuleNode(it) }
+}
 
 private fun mergeDevices(
     connected: List<ConnectedDevice>,

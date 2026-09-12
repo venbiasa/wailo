@@ -220,8 +220,20 @@ class RuleArchiveTest {
         val seeds = listOf<SeedNode>(
             RuleNode(SeedRuleDef(id = "s1", urlPattern = "https://y/*", statusCode = 503, delayMillis = 900)),
         )
+        val scripts = listOf<ScriptNode>(
+            RuleNode(
+                ScriptRuleDef(
+                    id = "js1",
+                    name = "Rewrite",
+                    source = "function onRequest({ request }) { return request; }",
+                    onRequest = true,
+                    onResponse = false,
+                ),
+            ),
+        )
         val archive = RuleArchive(
             breakpoints = ArchivedSection(nodes = breakpoints.toArchivedNodes { it.toArchived() }),
+            scripts = ArchivedSection(nodes = scripts.toArchivedNodes { it.toArchived() }),
             seeds = ArchivedSection(nodes = seeds.toArchivedNodes { it.toArchived("") }),
         )
 
@@ -237,5 +249,9 @@ class RuleArchiveTest {
         val seed = decoded.seeds!!.nodes.toLayoutNodes { it.toRuleDef() }.findRule("s1")!!
         assertEquals(503, seed.statusCode)
         assertEquals(900, seed.delayMillis)
+        val script = decoded.scripts!!.nodes.toLayoutNodes { it.toRuleDef() }.findRule("js1")!!
+        assertEquals("Rewrite", script.name)
+        assertTrue(script.onRequest)
+        assertEquals("function onRequest({ request }) { return request; }", script.source)
     }
 }

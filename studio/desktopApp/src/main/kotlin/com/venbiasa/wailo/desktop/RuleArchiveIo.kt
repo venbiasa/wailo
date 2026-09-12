@@ -8,6 +8,7 @@ import com.venbiasa.wailo.shared.MapLocalRuleDef
 import com.venbiasa.wailo.shared.RuleArchive
 import com.venbiasa.wailo.shared.SeedNode
 import com.venbiasa.wailo.shared.SeedRuleDef
+import com.venbiasa.wailo.shared.ScriptNode
 import com.venbiasa.wailo.shared.allRules
 import com.venbiasa.wailo.shared.mergeIn
 import com.venbiasa.wailo.shared.toArchived
@@ -30,6 +31,7 @@ import java.time.Instant
 data class ArchiveImport(
     val mapLocal: List<MapLocalNode>,
     val breakpoints: List<BreakpointNode>,
+    val scripts: List<ScriptNode>,
     val seeds: List<SeedNode>,
     val captureFilter: CaptureFilterState,
     /** Bodies for the rules that landed, by rule id, to publish alongside the layouts above. */
@@ -46,6 +48,8 @@ suspend fun buildArchive(
     mapLocalEnabled: Boolean,
     breakpointNodes: List<BreakpointNode>,
     breakpointsEnabled: Boolean,
+    scriptNodes: List<ScriptNode>,
+    scriptsEnabled: Boolean,
     seedNodes: List<SeedNode>,
     seedsEnabled: Boolean,
     captureFilter: CaptureFilterState,
@@ -78,6 +82,10 @@ suspend fun buildArchive(
                 enabled = breakpointsEnabled,
                 nodes = breakpointNodes.toArchivedNodes { it.toArchived() },
             ),
+            scripts = ArchivedSection(
+                enabled = scriptsEnabled,
+                nodes = scriptNodes.toArchivedNodes { it.toArchived() },
+            ),
             seeds = ArchivedSection(enabled = seedsEnabled, nodes = seeds),
             captureFilter = captureFilter.toArchived(),
         ),
@@ -100,11 +108,19 @@ fun importArchive(
     source: File,
     mapLocalNodes: List<MapLocalNode>,
     breakpointNodes: List<BreakpointNode>,
+    scriptNodes: List<ScriptNode>,
     seedNodes: List<SeedNode>,
     captureFilter: CaptureFilterState,
 ): ArchiveImport {
     val contents = readArchiveContainer(source)
-        ?: return unchanged(mapLocalNodes, breakpointNodes, seedNodes, captureFilter, "${source.name} isn't a Wailo rules file.")
+        ?: return unchanged(
+            mapLocalNodes,
+            breakpointNodes,
+            scriptNodes,
+            seedNodes,
+            captureFilter,
+            "${source.name} isn't a Wailo rules file.",
+        )
     val archive = contents.archive
 
     val added = mutableListOf<String>()
@@ -142,6 +158,13 @@ fun importArchive(
         if (merge.addedRuleIds.isNotEmpty()) added += "${merge.addedRuleIds.size} seed"
     }
 
+    var scripts = scriptNodes
+    archive.scripts?.let { section ->
+        val merge = scripts.mergeIn(section.nodes.toLayoutNodes { it.toRuleDef() })
+        scripts = merge.nodes
+        if (merge.addedRuleIds.isNotEmpty()) added += "${merge.addedRuleIds.size} script"
+    }
+
     val filter = archive.captureFilter?.let { captureFilter.mergeIn(it) } ?: captureFilter
     val filterGrew = filter.allowHosts.size + filter.blockHosts.size >
         captureFilter.allowHosts.size + captureFilter.blockHosts.size
@@ -151,7 +174,7 @@ fun importArchive(
         added.isEmpty() -> "Nothing new in ${source.name} — every rule in it is already here."
         else -> "Imported ${added.joinToString(", ")} from ${source.name}."
     }
-    return ArchiveImport(mapLocal, breakpoints, seeds, filter, bodies, message)
+    return ArchiveImport(mapLocal, breakpoints, scripts, seeds, filter, bodies, message)
 }
 
 /**
@@ -181,7 +204,8 @@ private fun SeedRuleDef.bodyExtension(): String = extensionForContentType(
 private fun unchanged(
     mapLocal: List<MapLocalNode>,
     breakpoints: List<BreakpointNode>,
+    scripts: List<ScriptNode>,
     seeds: List<SeedNode>,
     captureFilter: CaptureFilterState,
     message: String,
-) = ArchiveImport(mapLocal, breakpoints, seeds, captureFilter, emptyMap(), message)
+) = ArchiveImport(mapLocal, breakpoints, scripts, seeds, captureFilter, emptyMap(), message)

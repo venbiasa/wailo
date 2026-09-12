@@ -3,6 +3,8 @@ package com.venbiasa.wailo.sdk.android
 import com.venbiasa.wailo.protocol.Header
 import com.venbiasa.wailo.protocol.HttpRequest
 import com.venbiasa.wailo.protocol.HttpResponse
+import com.venbiasa.wailo.protocol.ScriptPhase
+import com.venbiasa.wailo.protocol.ScriptTransformResult
 import okio.ByteString
 
 /**
@@ -56,6 +58,15 @@ interface WailoBreakpointGate {
     fun pauseResponse(ruleId: String, request: HttpRequest, response: HttpResponse): WailoResponseDecision
 }
 
+interface WailoScriptTransformer {
+    fun transform(
+        phase: ScriptPhase,
+        request: HttpRequest,
+        response: HttpResponse? = null,
+        requestBodyReplayable: Boolean,
+    ): ScriptTransformResult?
+}
+
 /**
  * Process-global handles to the desktop control channel, set by [WailoClient.start] and cleared on
  * stop. The [WailoInterceptor] is constructed per OkHttp client (and often wraps a composite sink that
@@ -71,4 +82,7 @@ object WailoControlChannel {
 
     @Volatile
     var breakpointGate: WailoBreakpointGate? = null
+
+    @Volatile
+    var scriptTransformer: WailoScriptTransformer? = null
 }

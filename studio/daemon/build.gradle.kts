@@ -27,6 +27,8 @@ dependencies {
     // The daemon is the only thing that adapts the relay to the engine (ADR-0070); no frontend sees it.
     implementation(projects.proxy)
     implementation(libs.kotlinx.serialization.json)
+    implementation(libs.graal.polyglot)
+    runtimeOnly(libs.graal.js)
 
     testImplementation(kotlin("test"))
     testImplementation(libs.ktor.client.core)

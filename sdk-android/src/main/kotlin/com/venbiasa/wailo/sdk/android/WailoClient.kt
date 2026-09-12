@@ -16,6 +16,10 @@ import com.venbiasa.wailo.protocol.HttpResponse
 import com.venbiasa.wailo.protocol.RuleAck
 import com.venbiasa.wailo.protocol.RevokeDevice
 import com.venbiasa.wailo.protocol.SealedFrame
+import com.venbiasa.wailo.protocol.ScriptPhase
+import com.venbiasa.wailo.protocol.ScriptRuleSetAck
+import com.venbiasa.wailo.protocol.ScriptTransformRequest
+import com.venbiasa.wailo.protocol.ScriptTransformResult
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.cio.CIO
 import io.ktor.client.plugins.websocket.DefaultClientWebSocketSession
@@ -47,7 +51,7 @@ import java.util.concurrent.TimeUnit
 /**
  * Streams captured exchanges to the desktop over a WebSocket as a *live tap*, and drives the desktop's
  * device-bound control channel back down the same socket: Map Local (ADR-0019), the capture filter
- * (ADR-0029), and breakpoints (ADR-0027). Only traffic captured while a connection is up is sent;
+ * (ADR-0029), Scripts (ADR-0099), and breakpoints (ADR-0027). Only traffic captured while a connection is up is sent;
  * [onExchange] never blocks (it hands the exchange to the current connection's channel, or drops it when
  * disconnected), and nothing is retained across a disconnect so a reconnect never replays stale traffic
  * (ADR-0025). A background loop reconnects with a fixed backoff whenever the desktop isn't up; a
@@ -63,7 +67,7 @@ import java.util.concurrent.TimeUnit
  * ADR-0046 records on iOS cannot arise here.
  *
  * Inbound frames the desktop pushes are applied to the process-global stores ([WailoRuleStore],
- * [WailoCaptureFilterStore], [WailoBreakpointStore]) and acknowledged by epoch so a lost push
+ * [WailoCaptureFilterStore], [WailoBreakpointStore], [WailoScriptStore]) and acknowledged by epoch so a lost push
  * self-repairs (anti-entropy, mirroring the engine). The cached snapshots are dropped when their owning
  * connection goes away, without letting a retired client clear its replacement's newer snapshot. As the
  * [WailoBodyFetcher] and [WailoBreakpointGate] it answers the interceptor's on-match calls: a Map Local
@@ -79,7 +83,8 @@ class WailoClient(
     private val port: Int? = null,
     private val bufferCapacity: Int = DEFAULT_BUFFER,
     private val bodyTimeoutMs: Long = DEFAULT_BODY_TIMEOUT_MS,
-) : CaptureSink, WailoBodyFetcher, WailoBreakpointGate, AutoCloseable {
+    private val scriptTimeoutMs: Long = DEFAULT_SCRIPT_TIMEOUT_MS,
+) : CaptureSink, WailoBodyFetcher, WailoBreakpointGate, WailoScriptTransformer, AutoCloseable {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val snapshotOwner = Any()
@@ -109,6 +114,7 @@ class WailoClient(
     // coroutine.
     private val pending = ConcurrentHashMap<String, CompletableFuture<BodyResponse?>>()
     private val pendingBreakpoints = ConcurrentHashMap<String, CompletableFuture<BreakpointDecision?>>()
+    private val pendingScriptTransforms = ConcurrentHashMap<String, CompletableFuture<ScriptTransformResult?>>()
     private val pendingRevocations = ConcurrentHashMap<String, () -> Unit>()
 
     @Volatile
@@ -169,6 +175,7 @@ class WailoClient(
         synchronized(activeClientLock) {
             WailoControlChannel.bodyFetcher = this
             WailoControlChannel.breakpointGate = this
+            WailoControlChannel.scriptTransformer = this
             Wailo.active = this
         }
         startDiscovery()
@@ -185,6 +192,7 @@ class WailoClient(
         val wasActive = synchronized(activeClientLock) {
             if (WailoControlChannel.bodyFetcher === this) WailoControlChannel.bodyFetcher = null
             if (WailoControlChannel.breakpointGate === this) WailoControlChannel.breakpointGate = null
+            if (WailoControlChannel.scriptTransformer === this) WailoControlChannel.scriptTransformer = null
             val active = Wailo.active === this
             if (active) Wailo.active = null
             active
@@ -195,6 +203,7 @@ class WailoClient(
         dropCachedRules()
         drainPending()
         drainBreakpoints()
+        drainScriptTransforms()
         drainRevocations()
         scope.cancel()
         client.close()
@@ -428,6 +437,41 @@ class WailoClient(
         }
     }
 
+    override fun transform(
+        phase: ScriptPhase,
+        request: HttpRequest,
+        response: HttpResponse?,
+        requestBodyReplayable: Boolean,
+    ): ScriptTransformResult? {
+        val correlationId = UUID.randomUUID().toString()
+        val future = CompletableFuture<ScriptTransformResult?>()
+        pendingScriptTransforms[correlationId] = future
+        val message = Envelope(
+            script_transform_request = ScriptTransformRequest(
+                correlation_id = correlationId,
+                phase = phase,
+                request = request,
+                response = response,
+                request_body_replayable = requestBodyReplayable,
+            ),
+        )
+        val channel = control
+        if (channel == null || channel.trySend(message).isFailure) {
+            pendingScriptTransforms.remove(correlationId)
+            return null
+        }
+        return try {
+            future.get(scriptTimeoutMs, TimeUnit.MILLISECONDS)
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+            null
+        } catch (_: Exception) {
+            null
+        } finally {
+            pendingScriptTransforms.remove(correlationId)
+        }
+    }
+
     // MARK: - Breakpoints (WailoBreakpointGate)
 
     override fun pauseRequest(ruleId: String, request: HttpRequest): WailoRequestDecision {
@@ -553,6 +597,7 @@ class WailoClient(
                     dropCachedRules()
                     drainPending()
                     drainBreakpoints()
+                    drainScriptTransforms()
                 }
                 _status.update {
                     it.copy(
@@ -686,6 +731,7 @@ class WailoClient(
                 dropCachedRules()
                 drainPending()
                 drainBreakpoints()
+                drainScriptTransforms()
                 drainRevocations()
             }
         }
@@ -872,11 +918,18 @@ class WailoClient(
                 WailoBreakpointStore.replace(rules.rules, snapshotOwner)
                 control?.trySend(Envelope(breakpoint_rules_ack = BreakpointRulesAck(epoch = rules.epoch)))
             }
+            envelope.script_rule_set?.let { rules ->
+                WailoScriptStore.replace(rules.rules, snapshotOwner)
+                control?.trySend(Envelope(script_rule_set_ack = ScriptRuleSetAck(epoch = rules.epoch)))
+            }
             envelope.body_response?.let { response ->
                 pending.remove(response.correlation_id)?.complete(response)
             }
             envelope.breakpoint_decision?.let { decision ->
                 pendingBreakpoints.remove(decision.correlation_id)?.complete(decision)
+            }
+            envelope.script_transform_result?.let { result ->
+                pendingScriptTransforms.remove(result.correlation_id)?.complete(result)
             }
             envelope.revoke_device_ack?.let { ack ->
                 pendingRevocations.remove(ack.request_id)?.invoke()
@@ -934,6 +987,7 @@ class WailoClient(
         WailoRuleStore.reset(snapshotOwner)
         WailoCaptureFilterStore.reset(snapshotOwner)
         WailoBreakpointStore.reset(snapshotOwner)
+        WailoScriptStore.reset(snapshotOwner)
     }
 
     /** Fail open every in-flight body fetch: with the socket gone there is no authority to answer. */
@@ -946,6 +1000,12 @@ class WailoClient(
         for (id in pendingBreakpoints.keys.toList()) pendingBreakpoints.remove(id)?.complete(null)
     }
 
+    private fun drainScriptTransforms() {
+        for (id in pendingScriptTransforms.keys.toList()) {
+            pendingScriptTransforms.remove(id)?.complete(null)
+        }
+    }
+
     private fun drainRevocations() {
         for (id in pendingRevocations.keys.toList()) pendingRevocations.remove(id)?.invoke()
     }
@@ -955,6 +1015,7 @@ class WailoClient(
         const val DEFAULT_PORT: Int = 8899
         private const val DEFAULT_BUFFER: Int = 512
         private const val DEFAULT_BODY_TIMEOUT_MS: Long = 10_000L
+        private const val DEFAULT_SCRIPT_TIMEOUT_MS: Long = 1_500L
         private const val RECONNECT_DELAY_MS: Long = 2000L
         private const val REVOKE_TIMEOUT_MS: Long = 350L
         private const val PING_INTERVAL_MS: Long = 20_000L

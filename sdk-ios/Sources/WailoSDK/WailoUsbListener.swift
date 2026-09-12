@@ -297,7 +297,7 @@ final class WailoUsbListener: @unchecked Sendable {
 private enum UsbBindError: Error { case notReady }
 
 /// One accepted inbound WebSocket; device sends Hello first, then mirrors LAN session semantics.
-final class WailoUsbConnection: CaptureSink, WailoBodyFetcher, WailoBreakpointGate, WailoTransportLink, @unchecked Sendable {
+final class WailoUsbConnection: CaptureSink, WailoBodyFetcher, WailoBreakpointGate, WailoScriptTransformer, WailoTransportLink, @unchecked Sendable {
 
     var onClosed: ((WailoUsbConnection) -> Void)?
     var onConnectionChange: ((Bool) -> Void)?
@@ -363,6 +363,22 @@ final class WailoUsbConnection: CaptureSink, WailoBodyFetcher, WailoBreakpointGa
 
     func pauseRequest(ruleId: String, request: HttpRequest, completion: @escaping (WailoRequestDecision) -> Void) {
         session.pauseRequest(ruleId: ruleId, request: request, completion: completion)
+    }
+
+    func transform(
+        phase: ScriptPhase,
+        request: HttpRequest,
+        response: HttpResponse?,
+        requestBodyReplayable: Bool,
+        completion: @escaping (ScriptTransformResult?) -> Void
+    ) {
+        session.transform(
+            phase: phase,
+            request: request,
+            response: response,
+            requestBodyReplayable: requestBodyReplayable,
+            completion: completion
+        )
     }
 
     func pauseResponse(

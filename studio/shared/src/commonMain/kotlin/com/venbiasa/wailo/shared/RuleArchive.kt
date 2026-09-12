@@ -30,6 +30,7 @@ data class RuleArchive(
     val exportedAt: String = "",
     val mapLocal: ArchivedSection<ArchivedMapLocalRule>? = null,
     val breakpoints: ArchivedSection<ArchivedBreakpointRule>? = null,
+    val scripts: ArchivedSection<ArchivedScriptRule>? = null,
     val seeds: ArchivedSection<ArchivedSeedRule>? = null,
     val captureFilter: ArchivedCaptureFilter? = null,
 )
@@ -97,6 +98,18 @@ data class ArchivedBreakpointRule(
     val method: String = "",
     val onRequest: Boolean = false,
     val onResponse: Boolean = true,
+)
+
+@Serializable
+data class ArchivedScriptRule(
+    val id: String,
+    val name: String = "Untitled",
+    val enabled: Boolean = true,
+    val urlPattern: String = "",
+    val method: String = "",
+    val source: String = "",
+    val onRequest: Boolean = false,
+    val onResponse: Boolean = false,
 )
 
 /** [bodyEntry] names an entry in the container, as on [ArchivedMapLocalRule]. */
@@ -244,6 +257,28 @@ fun ArchivedBreakpointRule.toRuleDef(): BreakpointRuleDef = BreakpointRuleDef(
     enabled = enabled,
     urlPattern = urlPattern,
     method = method,
+    onRequest = onRequest,
+    onResponse = onResponse,
+)
+
+fun ScriptRuleDef.toArchived(): ArchivedScriptRule = ArchivedScriptRule(
+    id = id,
+    name = name,
+    enabled = enabled,
+    urlPattern = urlPattern,
+    method = method,
+    source = source,
+    onRequest = onRequest,
+    onResponse = onResponse,
+)
+
+fun ArchivedScriptRule.toRuleDef(): ScriptRuleDef = ScriptRuleDef(
+    id = id,
+    name = name.ifBlank { "Untitled" },
+    enabled = enabled,
+    urlPattern = urlPattern,
+    method = method,
+    source = source,
     onRequest = onRequest,
     onResponse = onResponse,
 )

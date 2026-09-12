@@ -15,7 +15,10 @@ import com.venbiasa.wailo.engine.PausedExchange
 import com.venbiasa.wailo.host.HeadlessHost
 import com.venbiasa.wailo.host.HostBreakpointRule
 import com.venbiasa.wailo.host.HostMapLocalRule
+import com.venbiasa.wailo.host.HostScript
 import com.venbiasa.wailo.host.HostSeed
+import com.venbiasa.wailo.host.ScriptRuntimeIssue
+import com.venbiasa.wailo.host.ScriptValidation
 import com.venbiasa.wailo.protocol.CaptureFilter
 import com.venbiasa.wailo.protocol.HttpRequest
 import com.venbiasa.wailo.protocol.HttpResponse
@@ -49,6 +52,9 @@ internal interface McpBackend {
     val mapLocalRules: List<HostMapLocalRule>
     val breakpointsEnabled: Boolean
     val breakpointRules: List<HostBreakpointRule>
+    val scriptsEnabled: Boolean get() = false
+    val scripts: List<HostScript> get() = emptyList()
+    val scriptIssues: List<ScriptRuntimeIssue> get() = emptyList()
     val seedsEnabled: Boolean
 
     /** The authored library, in priority order. */
@@ -120,6 +126,12 @@ internal interface McpBackend {
     suspend fun upsertBreakpointRule(rule: HostBreakpointRule, groupId: String?)
     suspend fun removeBreakpointRule(id: String): Boolean
     suspend fun setBreakpointsEnabled(enabled: Boolean)
+    suspend fun validateScript(source: String): ScriptValidation? = null
+    suspend fun upsertScript(script: HostScript, groupId: String?): Unit =
+        throw UnsupportedOperationException("Scripts need a running Wailo daemon")
+    suspend fun removeScript(id: String): Boolean = false
+    suspend fun setScriptsEnabled(enabled: Boolean): Unit =
+        throw UnsupportedOperationException("Scripts need a running Wailo daemon")
     suspend fun upsertSeed(seed: HostSeed, groupId: String?)
     suspend fun removeSeed(id: String): Boolean
     suspend fun setSeedsEnabled(enabled: Boolean)
@@ -166,6 +178,9 @@ internal class DaemonMcpBackend(
     override val mapLocalRules get() = daemon.mapLocalRules.value
     override val breakpointsEnabled get() = daemon.breakpointsEnabled.value
     override val breakpointRules get() = daemon.breakpointRules.value
+    override val scriptsEnabled get() = daemon.scriptsEnabled.value
+    override val scripts get() = daemon.scripts.value
+    override val scriptIssues get() = daemon.scriptIssues.value
     override val seedsEnabled get() = daemon.seedsEnabled.value
     override val seeds get() = daemon.seeds.value
     override val seedQueue get() = daemon.seedQueue.value
@@ -223,6 +238,10 @@ internal class DaemonMcpBackend(
         daemon.upsertBreakpointRule(rule, groupId)
     override suspend fun removeBreakpointRule(id: String) = daemon.removeBreakpointRule(id)
     override suspend fun setBreakpointsEnabled(enabled: Boolean) = daemon.setBreakpointsEnabled(enabled)
+    override suspend fun validateScript(source: String) = daemon.validateScript(source)
+    override suspend fun upsertScript(script: HostScript, groupId: String?) = daemon.upsertScript(script, groupId)
+    override suspend fun removeScript(id: String) = daemon.removeScript(id)
+    override suspend fun setScriptsEnabled(enabled: Boolean) = daemon.setScriptsEnabled(enabled)
     override suspend fun upsertSeed(seed: HostSeed, groupId: String?) = daemon.upsertSeed(seed, groupId)
     override suspend fun removeSeed(id: String) = daemon.removeSeed(id)
     override suspend fun setSeedsEnabled(enabled: Boolean) = daemon.setSeedsEnabled(enabled)
@@ -265,6 +284,9 @@ internal class LocalMcpBackend(
     override val mapLocalRules get() = host.mapLocalRules.value
     override val breakpointsEnabled get() = host.areBreakpointsEnabled()
     override val breakpointRules get() = host.breakpointRules.value
+    override val scriptsEnabled get() = host.areScriptsEnabled()
+    override val scripts get() = host.scripts.value
+    override val scriptIssues get() = host.scriptIssues
     override val seedsEnabled get() = host.areSeedsEnabled()
     override val seeds get() = host.seeds.value
     override val seedQueue get() = host.seedQueue.value
@@ -347,6 +369,14 @@ internal class LocalMcpBackend(
     }
     override suspend fun removeBreakpointRule(id: String) = host.removeBreakpointRule(id)
     override suspend fun setBreakpointsEnabled(enabled: Boolean) = host.setBreakpointsEnabled(enabled)
+    override suspend fun validateScript(source: String) =
+        runCatching { host.validateScript(source) }.getOrNull()
+    override suspend fun upsertScript(script: HostScript, groupId: String?) {
+        rejectGroup(groupId)
+        host.upsertScript(script)
+    }
+    override suspend fun removeScript(id: String) = host.removeScript(id)
+    override suspend fun setScriptsEnabled(enabled: Boolean) = host.setScriptsEnabled(enabled)
     override suspend fun upsertSeed(seed: HostSeed, groupId: String?) {
         rejectGroup(groupId)
         host.upsertSeed(seed)

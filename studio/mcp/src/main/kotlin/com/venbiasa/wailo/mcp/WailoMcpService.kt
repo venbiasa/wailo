@@ -5,6 +5,7 @@ import com.venbiasa.wailo.daemon.RULE_FAMILIES
 import com.venbiasa.wailo.daemon.RULE_FAMILY_BREAKPOINTS
 import com.venbiasa.wailo.daemon.RULE_FAMILY_MAP_LOCAL
 import com.venbiasa.wailo.daemon.RULE_FAMILY_SEEDS
+import com.venbiasa.wailo.daemon.RULE_FAMILY_SCRIPTS
 import com.venbiasa.wailo.daemon.ProxyCertificate
 import com.venbiasa.wailo.daemon.ProxyStatus
 import com.venbiasa.wailo.daemon.PROXY_SETUP_HOST
@@ -17,6 +18,7 @@ import com.venbiasa.wailo.engine.WailoEngine
 import com.venbiasa.wailo.host.HeadlessHost
 import com.venbiasa.wailo.host.HostBreakpointRule
 import com.venbiasa.wailo.host.HostMapLocalRule
+import com.venbiasa.wailo.host.HostScript
 import com.venbiasa.wailo.host.HostSeed
 import com.venbiasa.wailo.host.urlPatternMatches
 import com.venbiasa.wailo.host.withEdits
@@ -96,6 +98,11 @@ internal class WailoMcpService(
                 "remove_breakpoint" -> removeBreakpoint(arguments)
                 "list_breakpoints" -> listBreakpoints(arguments)
                 "set_breakpoints_enabled" -> setBreakpointsEnabled(arguments)
+                "set_script" -> setScript(arguments)
+                "remove_script" -> removeScript(arguments)
+                "list_scripts" -> listScripts(arguments)
+                "get_script" -> getScript(arguments)
+                "set_scripts_enabled" -> setScriptsEnabled(arguments)
                 "set_seed" -> setSeed(arguments)
                 "remove_seed" -> removeSeed(arguments)
                 "list_seeds" -> listSeeds(arguments)
@@ -134,6 +141,9 @@ internal class WailoMcpService(
             "map_local_rule_count" to backend.mapLocalRules.size,
             "breakpoints_enabled" to backend.breakpointsEnabled,
             "breakpoint_rule_count" to backend.breakpointRules.size,
+            "scripts_enabled" to backend.scriptsEnabled,
+            "script_count" to backend.scripts.size,
+            "script_issue_count" to backend.scriptIssues.size,
             "seeds_enabled" to backend.seedsEnabled,
             "seed_count" to backend.seeds.size,
             "armed_seed_count" to backend.seedQueue.size,
@@ -858,6 +868,100 @@ internal class WailoMcpService(
         val enabled = arguments.requiredBoolean("enabled")
         backend.setBreakpointsEnabled(enabled)
         return success("breakpoints_enabled=$enabled", mapOf("enabled" to enabled))
+    }
+
+    private suspend fun setScript(arguments: ToolArguments): McpToolResponse {
+        val id = arguments.requiredString("id")
+        val source = arguments.requiredString("source")
+        val validation = backend.validateScript(source)
+            ?: throw ToolFailure("Script must define a synchronous onRequest or onResponse function")
+        val method = arguments.method()
+        backend.upsertScript(
+            HostScript(
+                id = id,
+                name = arguments.string("name").orEmpty(),
+                enabled = arguments.boolean("enabled", true),
+                urlPattern = arguments.requiredString("url_pattern"),
+                method = method.value,
+                source = source,
+                onRequest = validation.onRequest,
+                onResponse = validation.onResponse,
+            ),
+            arguments.string("group_id"),
+        )
+        return success(
+            "Script $id set",
+            mapOf(
+                "id" to id,
+                "on_request" to validation.onRequest,
+                "on_response" to validation.onResponse,
+                "method" to method.value,
+                "group_id" to backend.groupIdByRule(RULE_FAMILY_SCRIPTS)[id].orEmpty(),
+            ),
+        )
+    }
+
+    private suspend fun removeScript(arguments: ToolArguments): McpToolResponse {
+        val id = arguments.requiredString("id")
+        if (!backend.removeScript(id)) throw ToolFailure("Script not found: $id")
+        return success("Script $id removed", mapOf("id" to id, "removed" to true))
+    }
+
+    private fun listScripts(arguments: ToolArguments): McpToolResponse {
+        val groups = backend.groupIdByRule(RULE_FAMILY_SCRIPTS)
+        val issues = backend.scriptIssues.associateBy { it.ruleId }
+        val page = arguments.page(backend.scripts)
+        val scripts = page.items.map { script ->
+            mapOf(
+                "id" to script.id,
+                "name" to script.name,
+                "enabled" to script.enabled,
+                "url_pattern" to script.urlPattern,
+                "method" to script.method,
+                "on_request" to script.onRequest,
+                "on_response" to script.onResponse,
+                "group_id" to groups[script.id].orEmpty(),
+                "issue" to issues[script.id]?.code?.name?.lowercase(),
+            )
+        }
+        return success(
+            "${scripts.size} of ${page.total} script(s)",
+            mapOf("enabled" to backend.scriptsEnabled) + page.data("scripts", scripts),
+        )
+    }
+
+    private fun getScript(arguments: ToolArguments): McpToolResponse {
+        val id = arguments.requiredString("id")
+        val script = backend.scripts.firstOrNull { it.id == id } ?: throw ToolFailure("Script not found: $id")
+        val issue = backend.scriptIssues.firstOrNull { it.ruleId == id }
+        return success(
+            "Script $id",
+            mapOf(
+                "id" to script.id,
+                "name" to script.name,
+                "enabled" to script.enabled,
+                "url_pattern" to script.urlPattern,
+                "method" to script.method,
+                "on_request" to script.onRequest,
+                "on_response" to script.onResponse,
+                "group_id" to backend.groupIdByRule(RULE_FAMILY_SCRIPTS)[id].orEmpty(),
+                "source" to if (backend.redactSecrets) REDACTED_VALUE else script.source,
+                "source_redacted" to backend.redactSecrets,
+                "issue" to issue?.let {
+                    mapOf(
+                        "phase" to it.phase.name.lowercase(),
+                        "timestamp_epoch_ms" to it.timestampEpochMs,
+                        "code" to it.code.name.lowercase(),
+                    )
+                },
+            ),
+        )
+    }
+
+    private suspend fun setScriptsEnabled(arguments: ToolArguments): McpToolResponse {
+        val enabled = arguments.requiredBoolean("enabled")
+        backend.setScriptsEnabled(enabled)
+        return success("scripts_enabled=$enabled", mapOf("enabled" to enabled))
     }
 
     private suspend fun setSeed(arguments: ToolArguments): McpToolResponse {

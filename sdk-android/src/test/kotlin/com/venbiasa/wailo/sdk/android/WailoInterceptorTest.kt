@@ -6,6 +6,9 @@ import com.venbiasa.wailo.protocol.HttpExchange
 import com.venbiasa.wailo.protocol.HttpRequest
 import com.venbiasa.wailo.protocol.HttpResponse
 import com.venbiasa.wailo.protocol.MapLocalRule
+import com.venbiasa.wailo.protocol.ScriptPhase
+import com.venbiasa.wailo.protocol.ScriptRule
+import com.venbiasa.wailo.protocol.ScriptTransformResult
 import okhttp3.Call
 import okhttp3.Connection
 import okhttp3.Headers
@@ -13,11 +16,13 @@ import okhttp3.Interceptor
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.Protocol
 import okhttp3.Request
+import okhttp3.RequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 import okhttp3.ResponseBody.Companion.toResponseBody
 import com.venbiasa.wailo.protocol.BreakpointRule
 import okio.Buffer
+import okio.BufferedSink
 import okio.ByteString.Companion.encodeUtf8
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -43,9 +48,11 @@ class WailoInterceptorTest {
     fun tearDown() {
         WailoRuleStore.replace(emptyList())
         WailoBreakpointStore.replace(emptyList())
+        WailoScriptStore.replace(emptyList())
         WailoCaptureFilterStore.reset()
         WailoControlChannel.bodyFetcher = null
         WailoControlChannel.breakpointGate = null
+        WailoControlChannel.scriptTransformer = null
     }
 
     @Test
@@ -99,6 +106,111 @@ class WailoInterceptorTest {
         assertEquals("real", response.body!!.string())
         assertEquals("https://api.example.com/users", chain.proceededWith?.url.toString())
         assertFalse(sink.exchanges.single().edited)
+    }
+
+    @Test
+    fun requestScriptsFeedMapLocalAndResponseScriptsTransformTheFixture() {
+        WailoScriptStore.replace(
+            listOf(
+                ScriptRule(
+                    id = "script",
+                    enabled = true,
+                    url_pattern = "https://api.example.com/*",
+                    on_request = true,
+                    on_response = true,
+                ),
+            ),
+        )
+        WailoRuleStore.replace(
+            listOf(
+                MapLocalRule(
+                    id = "mapped",
+                    enabled = true,
+                    url_pattern = "https://api.example.com/mapped",
+                ),
+            ),
+        )
+        WailoControlChannel.bodyFetcher = FakeFetcher(
+            WailoMappedResponse(
+                code = 200,
+                headers = listOf(Header("Content-Type", "application/json")),
+                body = """{"value":1}""".encodeUtf8(),
+            ),
+        )
+        WailoControlChannel.scriptTransformer = FakeScriptTransformer { phase, request, response ->
+            when (phase) {
+                ScriptPhase.SCRIPT_PHASE_REQUEST -> ScriptTransformResult(
+                    request = request.copy(url = "https://api.example.com/mapped"),
+                )
+                ScriptPhase.SCRIPT_PHASE_RESPONSE -> ScriptTransformResult(
+                    request = request,
+                    response = response?.copy(body = """{"value":2}""".encodeUtf8(), body_size = 11),
+                    response_body_replaced = true,
+                )
+                else -> null
+            }
+        }
+        val chain = FakeChain(request("https://api.example.com/original")) { networkResponse(it) }
+
+        val response = interceptor.intercept(chain)
+
+        assertNull(chain.proceededWith)
+        assertEquals("""{"value":2}""", response.body!!.string())
+        assertTrue(sink.exchanges.single().edited)
+        assertEquals("https://api.example.com/mapped", sink.exchanges.single().request?.url)
+    }
+
+    @Test
+    fun requestScriptCanEditMetadataWithoutConsumingAOneShotBody() {
+        WailoScriptStore.replace(
+            listOf(
+                ScriptRule(
+                    id = "metadata",
+                    enabled = true,
+                    url_pattern = "*",
+                    on_request = true,
+                ),
+            ),
+        )
+        var replayable: Boolean? = null
+        WailoControlChannel.scriptTransformer = object : WailoScriptTransformer {
+            override fun transform(
+                phase: ScriptPhase,
+                request: HttpRequest,
+                response: HttpResponse?,
+                requestBodyReplayable: Boolean,
+            ): ScriptTransformResult {
+                replayable = requestBodyReplayable
+                return ScriptTransformResult(
+                    request = request.copy(url = "https://api.example.com/changed"),
+                )
+            }
+        }
+        val streaming = object : RequestBody() {
+            override fun contentType() = "text/plain".toMediaTypeOrNull()
+            override fun isOneShot(): Boolean = true
+            override fun writeTo(sink: BufferedSink) {
+                sink.writeUtf8("streamed")
+            }
+        }
+        var sentBody = ""
+        val original = Request.Builder()
+            .url("https://api.example.com/original")
+            .post(streaming)
+            .build()
+        val chain = FakeChain(original) { sent ->
+            val buffer = Buffer()
+            sent.body?.writeTo(buffer)
+            sentBody = buffer.readUtf8()
+            networkResponse(sent)
+        }
+
+        interceptor.intercept(chain).close()
+
+        assertEquals(false, replayable)
+        assertEquals("https://api.example.com/changed", chain.proceededWith?.url.toString())
+        assertEquals("streamed", sentBody)
+        assertTrue(sink.exchanges.single().edited)
     }
 
     @Test
@@ -295,6 +407,21 @@ class WailoInterceptorTest {
             pausedResponse = response
             return responseDecision
         }
+    }
+
+    private class FakeScriptTransformer(
+        private val transform: (
+            ScriptPhase,
+            HttpRequest,
+            HttpResponse?,
+        ) -> ScriptTransformResult?,
+    ) : WailoScriptTransformer {
+        override fun transform(
+            phase: ScriptPhase,
+            request: HttpRequest,
+            response: HttpResponse?,
+            requestBodyReplayable: Boolean,
+        ): ScriptTransformResult? = transform(phase, request, response)
     }
 
     private class FakeChain(

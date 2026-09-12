@@ -4,6 +4,7 @@ import com.venbiasa.wailo.daemon.DaemonClient
 import com.venbiasa.wailo.daemon.RULE_FAMILY_BREAKPOINTS
 import com.venbiasa.wailo.daemon.RULE_FAMILY_MAP_LOCAL
 import com.venbiasa.wailo.daemon.RULE_FAMILY_SEEDS
+import com.venbiasa.wailo.daemon.RULE_FAMILY_SCRIPTS
 import com.venbiasa.wailo.host.HeadlessHost
 import io.modelcontextprotocol.json.McpJsonDefaults
 import io.modelcontextprotocol.server.McpServer
@@ -72,7 +73,7 @@ internal object WailoMcpServer {
             .instructions(
                 "Wailo captures HTTP(S) traffic from instrumented Android and iOS apps. " +
                     "Use status when you need an overview; other tools can be called directly. Configure " +
-                    "Map Local, Capture Filter, breakpoint, or seed rules as needed, then inspect or wait " +
+                    "Map Local, Scripts, Capture Filter, breakpoint, or seed rules as needed, then inspect or wait " +
                     "for exchanges. To script a sequence of answers, set " +
                     "breakpoints, write seeds, then fill_seeds. " +
                     "For SDK-less traffic, read get_proxy_setup_guide before making an explicit proxy " +
@@ -431,6 +432,40 @@ internal object WailoMcpTools {
             objectSchema("enabled" to boolean("Global breakpoint state"), required = listOf("enabled")),
         ),
         McpToolDefinition(
+            "set_script",
+            "Create or replace an ordered JavaScript request/response transformer. Hook availability is derived by daemon validation.",
+            objectSchema(
+                "id" to string("Stable script id"),
+                "name" to string("Author-facing label shown in Studio"),
+                "url_pattern" to string("Full-URL wildcard pattern where * matches any characters"),
+                "method" to string("The one HTTP method to match; blank or omitted means any"),
+                "enabled" to boolean("Whether this script is active"),
+                "source" to string("JavaScript defining synchronous onRequest and/or onResponse"),
+                "group_id" to groupId("script"),
+                required = listOf("id", "url_pattern", "source"),
+            ),
+        ),
+        McpToolDefinition(
+            "remove_script",
+            "Remove a Script rule by id.",
+            objectSchema("id" to string("Script id"), required = listOf("id")),
+        ),
+        readTool(
+            "list_scripts",
+            "List compact Script metadata, hook availability, categorical runtime issues, and global state.",
+            pagedObjectSchema("from the highest-priority script"),
+        ),
+        readTool(
+            "get_script",
+            "Get one Script including source and its latest categorical issue. Source is fully withheld while secret redaction is enabled.",
+            objectSchema("id" to string("Script id"), required = listOf("id")),
+        ),
+        McpToolDefinition(
+            "set_scripts_enabled",
+            "Globally enable or disable Scripts without deleting them.",
+            objectSchema("enabled" to boolean("Global Scripts state"), required = listOf("enabled")),
+        ),
+        McpToolDefinition(
             "set_seed",
             "Create or replace a seed: a canned response that answers a response-phase breakpoint hold. " +
                 "Seeds are matched in library order and each one answers a single hold, so two seeds for " +
@@ -513,12 +548,13 @@ internal object WailoMcpTools {
         ),
         McpToolDefinition(
             "set_rule_order",
-            "Set match priority within one container: of two rules that both match, the higher one wins. " +
+            "Set order within one container. It is match priority for Map Local, Scripts, and Seeds; " +
+                "breakpoint order is visual because every matching breakpoint fires. " +
                 "With group_id the ids are the rules inside that group; without it they are the top-level " +
                 "entries, where an id is either a group id or an ungrouped rule's id. Ids you omit keep " +
                 "their order behind the ones you name, so promoting one rule needs only that rule's id. " +
-                "To move a rule into another group, file it there with set_map_local/set_breakpoint/" +
-                "set_seed and its group_id instead.",
+                "To move a rule into another group, file it there with set_map_local/set_script/" +
+                "set_breakpoint/set_seed and its group_id instead.",
             objectSchema(
                 "family" to ruleFamily(),
                 "group_id" to string("Order the rules inside this group; omit to order the top level"),
@@ -672,6 +708,7 @@ private fun ruleFamily(): Map<String, Any> = enumString(
     RULE_FAMILY_MAP_LOCAL,
     RULE_FAMILY_BREAKPOINTS,
     RULE_FAMILY_SEEDS,
+    RULE_FAMILY_SCRIPTS,
 )
 
 private fun groupId(family: String): Map<String, Any> = string(

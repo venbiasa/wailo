@@ -15,20 +15,24 @@ import com.venbiasa.wailo.engine.pairing.PairedDevice
 import com.venbiasa.wailo.engine.pairing.RefusedDevice
 import com.venbiasa.wailo.host.HostBreakpointRule
 import com.venbiasa.wailo.host.HostMapLocalRule
+import com.venbiasa.wailo.host.HostScript
 import com.venbiasa.wailo.host.HostSeed
+import com.venbiasa.wailo.host.ScriptRuntimeIssue
+import com.venbiasa.wailo.host.ScriptRuntimeIssueCode
 import com.venbiasa.wailo.protocol.BreakpointPhase
 import com.venbiasa.wailo.protocol.CaptureFilter
 import com.venbiasa.wailo.protocol.Header
 import com.venbiasa.wailo.protocol.HttpExchange
 import com.venbiasa.wailo.protocol.HttpRequest
 import com.venbiasa.wailo.protocol.HttpResponse
+import com.venbiasa.wailo.protocol.ScriptPhase
 import java.util.Base64
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import okio.ByteString.Companion.toByteString
 
-internal const val DAEMON_CONTROL_PROTOCOL_VERSION = 17
+internal const val DAEMON_CONTROL_PROTOCOL_VERSION = 18
 
 /**
  * The one command whose socket is not answered and closed. The daemon holds it open and counts it as a
@@ -70,6 +74,8 @@ internal data class PollRequest(
     val mapLocalHash: String? = null,
     val breakpointHash: String? = null,
     val seedHash: String? = null,
+    val scriptHash: String? = null,
+    val scriptIssuesHash: String? = null,
     val holdsHash: String? = null,
     val captureFilterHash: String? = null,
 )
@@ -109,6 +115,11 @@ internal data class PollResponse(
     val seedsEnabled: Boolean,
     val seedHash: String,
     val seedNodes: List<DaemonRuleNode<SeedRuleDto>>? = null,
+    val scriptsEnabled: Boolean = true,
+    val scriptHash: String = "",
+    val scriptNodes: List<DaemonRuleNode<ScriptRuleDto>>? = null,
+    val scriptIssuesHash: String = "",
+    val scriptIssues: List<ScriptRuntimeIssueDto>? = null,
     // The armed queue as ids into the library above, not whole seeds: it changes on every spend, so a
     // poll that carried the bodies again would re-send them on each answered hold. Session state, so it
     // rides outside the hash-gated snapshot (ADR-0067).
@@ -369,6 +380,47 @@ internal data class BreakpointRuleDto(
     )
 }
 
+@Serializable
+internal data class ScriptRuleDto(
+    val id: String,
+    val enabled: Boolean,
+    val urlPattern: String,
+    val method: String = "",
+    val source: String,
+    // Derived by daemon validation. Frontend-supplied values are never trusted on mutation.
+    val onRequest: Boolean = false,
+    val onResponse: Boolean = false,
+    val name: String = "",
+) {
+    fun toDomain(enabled: Boolean = this.enabled) = HostScript(
+        id = id,
+        name = name,
+        enabled = enabled,
+        urlPattern = urlPattern,
+        method = method,
+        source = source,
+        onRequest = onRequest,
+        onResponse = onResponse,
+    )
+}
+
+@Serializable
+internal data class ScriptRuntimeIssueDto(
+    val ruleId: String,
+    val phase: String,
+    val timestampEpochMs: Long,
+    val code: String,
+) {
+    fun toDomain() = ScriptRuntimeIssue(
+        ruleId = ruleId,
+        phase = runCatching { ScriptPhase.valueOf(phase) }
+            .getOrDefault(ScriptPhase.SCRIPT_PHASE_UNSPECIFIED),
+        timestampEpochMs = timestampEpochMs,
+        code = runCatching { ScriptRuntimeIssueCode.valueOf(code) }
+            .getOrDefault(ScriptRuntimeIssueCode.WORKER_FAILURE),
+    )
+}
+
 /**
  * One method from either shape, last-wins (ADR-0087). The scalar is authoritative when it says anything;
  * a legacy list contributes its last entry, which is the same rewrite Studio performed on the next save.
@@ -622,6 +674,12 @@ internal data class ReplaceSeedsRequest(
     val bodies: Map<String, String> = emptyMap(),
 )
 
+@Serializable
+internal data class ReplaceScriptsRequest(
+    val enabled: Boolean,
+    val nodes: List<DaemonRuleNode<ScriptRuleDto>>,
+)
+
 /**
  * An upsert that can also place the rule, so a headless frontend can file into a group rather than only
  * appending loose rules. A null [groupId] leaves an existing rule where it is; an empty one moves it out
@@ -649,6 +707,22 @@ internal data class UpsertSeedRequest(
     val seed: SeedRuleDto,
     val groupId: String? = null,
     val body: String? = null,
+)
+
+@Serializable
+internal data class UpsertScriptRequest(
+    val script: ScriptRuleDto,
+    val groupId: String? = null,
+)
+
+@Serializable
+internal data class ValidateScriptRequest(val source: String)
+
+@Serializable
+internal data class ScriptValidationDto(
+    val valid: Boolean,
+    val onRequest: Boolean = false,
+    val onResponse: Boolean = false,
 )
 
 /**
@@ -703,7 +777,14 @@ const val RULE_FAMILY_BREAKPOINTS = "breakpoints"
 
 const val RULE_FAMILY_SEEDS = "seeds"
 
-val RULE_FAMILIES = listOf(RULE_FAMILY_MAP_LOCAL, RULE_FAMILY_BREAKPOINTS, RULE_FAMILY_SEEDS)
+const val RULE_FAMILY_SCRIPTS = "scripts"
+
+val RULE_FAMILIES = listOf(
+    RULE_FAMILY_MAP_LOCAL,
+    RULE_FAMILY_BREAKPOINTS,
+    RULE_FAMILY_SEEDS,
+    RULE_FAMILY_SCRIPTS,
+)
 
 @Serializable
 internal data class ResumeHoldRequest(
@@ -796,6 +877,13 @@ internal fun List<DaemonRuleNode<SeedRuleDto>>.toHostSeeds(
     node.rules.map { it.toDomain(effectiveEnabled(it.enabled, node.group), bodies(it.id)) }
 }
 
+internal fun List<DaemonRuleNode<ScriptRuleDto>>.toHostScripts(): List<HostScript> =
+    flatMap { node ->
+        node.rules
+            .filter { it.onRequest || it.onResponse }
+            .map { it.toDomain(effectiveEnabled(it.enabled, node.group)) }
+    }
+
 internal fun HostMapLocalRule.toDto() = MapLocalRuleDto(
     id = id,
     enabled = enabled,
@@ -819,6 +907,24 @@ internal fun HostBreakpointRule.toDto() = BreakpointRuleDto(
     onRequest = onRequest,
     onResponse = onResponse,
     name = name,
+)
+
+internal fun HostScript.toDto() = ScriptRuleDto(
+    id = id,
+    enabled = enabled,
+    urlPattern = urlPattern,
+    method = method,
+    source = source,
+    onRequest = onRequest,
+    onResponse = onResponse,
+    name = name,
+)
+
+internal fun ScriptRuntimeIssue.toDto() = ScriptRuntimeIssueDto(
+    ruleId = ruleId,
+    phase = phase.name,
+    timestampEpochMs = timestampEpochMs,
+    code = code.name,
 )
 
 internal fun HostSeed.toDto() = SeedRuleDto(

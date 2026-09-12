@@ -3,7 +3,6 @@ package com.venbiasa.wailo.shared.ui
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
-import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -60,6 +59,9 @@ import com.venbiasa.wailo.shared.ProxyTargets
 import com.venbiasa.wailo.shared.ResponseHeader
 import com.venbiasa.wailo.shared.SeedNode
 import com.venbiasa.wailo.shared.SeedRuleDef
+import com.venbiasa.wailo.shared.ScriptHookAvailability
+import com.venbiasa.wailo.shared.ScriptIssue
+import com.venbiasa.wailo.shared.ScriptNode
 import com.venbiasa.wailo.shared.TrafficFilter
 import com.venbiasa.wailo.shared.compile
 import com.venbiasa.wailo.shared.format.requestHost
@@ -67,6 +69,7 @@ import com.venbiasa.wailo.shared.toggleExactHost
 import com.venbiasa.wailo.shared.resources.Res
 import com.venbiasa.wailo.shared.resources.ic_breakpoint
 import com.venbiasa.wailo.shared.resources.ic_content_paste_go
+import com.venbiasa.wailo.shared.resources.ic_code_blocks
 import com.venbiasa.wailo.shared.resources.ic_dark_mode
 import com.venbiasa.wailo.shared.resources.ic_delete
 import com.venbiasa.wailo.shared.resources.ic_devices
@@ -88,7 +91,7 @@ import org.jetbrains.compose.resources.vectorResource
  * to reason about two side panels, and each opens at the one host-owned [WailoViewer] width ratio. Modeled
  * as one value rather than a flag per panel so "two panels open at once" isn't a state that can be reached.
  */
-private enum class ToolPanel { CaptureFilter, Unlock, MapLocal, Breakpoints, Seed, Devices, Settings }
+private enum class ToolPanel { CaptureFilter, Unlock, MapLocal, Scripts, Breakpoints, Seed, Devices, Settings }
 
 // Common HTTP verbs lead the filter's Method menu (in this order); anything else follows alphabetically.
 private val MethodOrder = listOf("GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS")
@@ -150,6 +153,12 @@ internal fun WailoViewer(
     breakpointsEnabled: Boolean,
     onBreakpointsEnabledChange: (Boolean) -> Unit,
     onOpenBreakpointWindow: () -> Unit,
+    scriptNodes: List<ScriptNode>,
+    scriptIssues: List<ScriptIssue>,
+    scriptsEnabled: Boolean,
+    onScriptLayoutChange: (List<ScriptNode>) -> Unit,
+    onScriptsEnabledChange: (Boolean) -> Unit,
+    onValidateScript: suspend (String) -> ScriptHookAvailability?,
     seedNodes: List<SeedNode>,
     onSeedLayoutChange: (List<SeedNode>) -> Unit,
     onLoadSeedBody: suspend (SeedRuleDef) -> ByteArray,
@@ -465,15 +474,7 @@ internal fun WailoViewer(
                             addFilterOpen = false
                             filterFocusRequests += 1
                         }
-                        Box(
-                            Modifier.matchParentSize()
-                                .background(MaterialTheme.colorScheme.scrim.copy(alpha = 0.4f))
-                                .clickable(
-                                    interactionSource = remember { MutableInteractionSource() },
-                                    indication = null,
-                                    onClick = dismissModal,
-                                ),
-                        )
+                        PanelScrim(onDismiss = dismissModal)
                         AddFilterCard(
                             suggestions = filterSuggestions,
                             onAdd = { clause ->
@@ -548,6 +549,17 @@ internal fun WailoViewer(
                                 onEnabledChange = onBreakpointsEnabledChange,
                                 onOpenWindow = onOpenBreakpointWindow,
                                 onClose = closePanel,
+                            )
+                            ToolPanel.Scripts -> ScriptManager(
+                                nodes = scriptNodes,
+                                onLayoutChange = onScriptLayoutChange,
+                                issues = scriptIssues,
+                                enabled = scriptsEnabled,
+                                onEnabledChange = onScriptsEnabledChange,
+                                onValidate = onValidateScript,
+                                onClose = closePanel,
+                                onExportRules = onExportRules,
+                                onImportRules = onImportRules,
                             )
                             ToolPanel.Devices -> DevicesManager(
                                 devices = devices,
@@ -706,6 +718,12 @@ private fun ToolRail(
             contentDescription = "Map Local",
             selected = openPanel == ToolPanel.MapLocal,
             onClick = { onSelectPanel(ToolPanel.MapLocal) },
+        )
+        ToolRailButton(
+            icon = Res.drawable.ic_code_blocks,
+            contentDescription = "Scripts",
+            selected = openPanel == ToolPanel.Scripts,
+            onClick = { onSelectPanel(ToolPanel.Scripts) },
         )
         ToolRailButton(
             icon = Res.drawable.ic_breakpoint,

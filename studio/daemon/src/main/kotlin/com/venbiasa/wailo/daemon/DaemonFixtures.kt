@@ -55,6 +55,12 @@ internal data class PersistedSeeds(
         nodes.ifEmpty { rules.map { DaemonRuleNode(rules = listOf(it)) } }
 }
 
+@Serializable
+internal data class PersistedScripts(
+    val enabled: Boolean = true,
+    val nodes: List<DaemonRuleNode<ScriptRuleDto>> = emptyList(),
+)
+
 /**
  * The filter as authored, so the feature master and each list's armed state survive a restart separately.
  * Storing only the folded per-list flags could not tell "master off, list armed" from "master on, list not
@@ -88,6 +94,7 @@ internal class DaemonFixturesStore(
     private val mapLocalPath: Path get() = directory.resolve("map-local.json")
     private val breakpointsPath: Path get() = directory.resolve("breakpoints.json")
     private val seedsPath: Path get() = directory.resolve("seeds.json")
+    private val scriptsPath: Path get() = directory.resolve("scripts.json")
     private val captureFilterPath: Path get() = directory.resolve("capture-filter.json")
     private val bookmarksPath: Path get() = directory.resolve("bookmarks.json")
 
@@ -120,6 +127,13 @@ internal class DaemonFixturesStore(
 
     @Synchronized
     fun saveSeeds(value: PersistedSeeds) = write(seedsPath, DaemonJson.encodeToString(value))
+
+    @Synchronized
+    fun loadScriptsIfPresent(): PersistedScripts? =
+        if (Files.isRegularFile(scriptsPath)) read(scriptsPath, PersistedScripts()) else null
+
+    @Synchronized
+    fun saveScripts(value: PersistedScripts) = write(scriptsPath, DaemonJson.encodeToString(value))
 
     @Synchronized
     fun loadCaptureFilter(): PersistedCaptureFilter = read(captureFilterPath, PersistedCaptureFilter())

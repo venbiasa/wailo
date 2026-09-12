@@ -8,7 +8,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 
 /** The language a [CodeEditor] highlights. Deliberately small — grown as new surfaces need it. */
-internal enum class CodeLanguage { Json, PlainText }
+internal enum class CodeLanguage { Json, JavaScript, PlainText }
 
 /**
  * The editor's document + caret/selection/undo, kept apart from the composable so the model is portable and

@@ -6,6 +6,7 @@ import com.venbiasa.wailo.daemon.RULE_FAMILIES
 import com.venbiasa.wailo.daemon.RULE_FAMILY_BREAKPOINTS
 import com.venbiasa.wailo.daemon.RULE_FAMILY_MAP_LOCAL
 import com.venbiasa.wailo.daemon.RULE_FAMILY_SEEDS
+import com.venbiasa.wailo.daemon.RULE_FAMILY_SCRIPTS
 import com.venbiasa.wailo.daemon.PROXY_SETUP_HOST
 import com.venbiasa.wailo.daemon.groupIdByRule
 import com.venbiasa.wailo.daemon.provision.CaTrust
@@ -14,6 +15,7 @@ import com.venbiasa.wailo.engine.PausedExchange
 import com.venbiasa.wailo.engine.WailoEngine
 import com.venbiasa.wailo.host.HostBreakpointRule
 import com.venbiasa.wailo.host.HostMapLocalRule
+import com.venbiasa.wailo.host.HostScript
 import com.venbiasa.wailo.host.HostSeed
 import com.venbiasa.wailo.host.urlPatternMatches
 import com.venbiasa.wailo.host.summarizeExchanges
@@ -271,6 +273,67 @@ internal suspend fun dispatch(host: DaemonClient, args: ParsedArgs): CommandResu
                 ?: return CommandResult("set_breakpoints_enabled requires --on or --off", exitCode = 2)
             host.setBreakpointsEnabled(enabled)
             CommandResult("breakpoints_enabled=$enabled")
+        }
+        "set_script", "set-script" -> setScript(host, args)
+        "remove_script", "remove-script" -> {
+            val id = args.id ?: return CommandResult("remove_script requires --id", exitCode = 2)
+            if (host.removeScript(id)) {
+                CommandResult("removed script $id")
+            } else {
+                CommandResult("script not found: $id", exitCode = 1)
+            }
+        }
+        "list_scripts", "list-scripts" -> {
+            val groups = host.nodesFor(RULE_FAMILY_SCRIPTS).groupIdByRule { it }
+            val issues = host.scriptIssues.value.associateBy { it.ruleId }
+            CommandResult(
+                buildString {
+                    appendLine("scripts_enabled=${host.scriptsEnabled.value}")
+                    if (host.scripts.value.isEmpty()) {
+                        append("(no scripts)")
+                    } else {
+                        host.scripts.value.forEach { script ->
+                            val group = groups[script.id]?.let { "\t[$it]" }.orEmpty()
+                            val issue = issues[script.id]?.code?.name?.let { "\tissue=$it" }.orEmpty()
+                            appendLine(
+                                "${script.id}\t${if (script.enabled) "on" else "off"}\t" +
+                                    "${script.method.ifBlank { "*" }}\t" +
+                                    "${phaseLabel(script.onRequest, script.onResponse)}\t" +
+                                    "${script.urlPattern}$group$issue",
+                            )
+                        }
+                    }
+                }.trimEnd(),
+            )
+        }
+        "get_script", "get-script" -> {
+            val id = args.id ?: return CommandResult("get_script requires --id", exitCode = 2)
+            val script = host.scripts.value.firstOrNull { it.id == id }
+                ?: return CommandResult("script not found: $id", exitCode = 1)
+            val group = host.nodesFor(RULE_FAMILY_SCRIPTS).groupIdByRule { it }[id]
+            val issue = host.scriptIssues.value.firstOrNull { it.ruleId == id }
+            CommandResult(
+                buildString {
+                    appendLine("id=${script.id}")
+                    if (script.name.isNotBlank()) appendLine("name=${script.name}")
+                    appendLine("enabled=${script.enabled} scripts_enabled=${host.scriptsEnabled.value}")
+                    appendLine("url_pattern=${script.urlPattern}")
+                    appendLine("method=${script.method.ifBlank { "*" }}")
+                    appendLine("hooks=${phaseLabel(script.onRequest, script.onResponse)}")
+                    group?.let { appendLine("group=$it") }
+                    issue?.let {
+                        appendLine("issue=${it.code.name} phase=${it.phase.name} timestamp_ms=${it.timestampEpochMs}")
+                    }
+                    appendLine("source:")
+                    append(script.source)
+                }.trimEnd(),
+            )
+        }
+        "set_scripts_enabled", "set-scripts-enabled" -> {
+            val enabled = args.flag
+                ?: return CommandResult("set_scripts_enabled requires --on or --off", exitCode = 2)
+            host.setScriptsEnabled(enabled)
+            CommandResult("scripts_enabled=$enabled")
         }
         "set_seed", "set-seed" -> setSeed(host, args)
         "remove_seed", "remove-seed" -> {
@@ -700,6 +763,7 @@ internal suspend fun dispatch(host: DaemonClient, args: ParsedArgs): CommandResu
                 "devices=${host.connectedDevices.value.size} exchanges=${host.exchanges.value.size} " +
                 "capturing=${host.capturing.value} " +
                 "proxy=${if (host.proxy.value.running) "on:${host.proxy.value.port}" else "off"} " +
+                "scripts=${if (host.scriptsEnabled.value) "on" else "off"}:${host.scripts.value.size} " +
                 "bookmarks=${host.bookmarkedHosts.value.size} " +
                 "mcp_access=${host.mcpAccess.value} mcp_redaction=${host.mcpRedactSecrets.value}",
         )
@@ -808,6 +872,42 @@ private suspend fun setBreakpoint(host: DaemonClient, args: ParsedArgs): Command
     return CommandResult("breakpoint $id set (${phaseLabel(onRequest, onResponse)})")
 }
 
+private suspend fun setScript(host: DaemonClient, args: ParsedArgs): CommandResult {
+    val id = args.id ?: return CommandResult("set_script requires --id", exitCode = 2)
+    val pattern = args.urlPattern ?: return CommandResult("set_script requires --url-pattern", exitCode = 2)
+    if (id.isBlank()) return CommandResult("script id must not be blank", exitCode = 2)
+    if (pattern.isBlank()) return CommandResult("script URL pattern must not be blank", exitCode = 2)
+    if ((args.scriptFile == null) == (args.script == null)) {
+        return CommandResult("set_script requires exactly one of --script-file or --script", exitCode = 2)
+    }
+    val source = if (args.scriptFile != null) {
+        runCatching { Files.readString(Path.of(args.scriptFile)) }.getOrElse {
+            return CommandResult("could not read script file ${args.scriptFile}: ${it.message}", exitCode = 1)
+        }
+    } else {
+        args.script.orEmpty()
+    }
+    val validation = host.validateScript(source)
+        ?: return CommandResult(
+            "script must define a synchronous onRequest or onResponse function",
+            exitCode = 2,
+        )
+    host.upsertScript(
+        HostScript(
+            id = id,
+            name = args.name.orEmpty(),
+            enabled = args.flag ?: true,
+            urlPattern = pattern,
+            method = args.method.orEmpty(),
+            source = source,
+            onRequest = validation.onRequest,
+            onResponse = validation.onResponse,
+        ),
+        args.groupId,
+    )
+    return CommandResult("script $id set (${phaseLabel(validation.onRequest, validation.onResponse)})")
+}
+
 /**
  * Resumes a hold, rewriting what continues when asked (ADR-0067). A flag that does not apply to the phase
  * the hold is in is refused rather than ignored: a script that believed it replaced a status code has to
@@ -907,7 +1007,7 @@ private fun holdSummary(hold: PausedExchange, bodyChars: Int): String = buildStr
 }
 
 /**
- * The group commands for all three panels (ADR-0081). One set with `--family` rather than three
+ * The group commands for all four rule panels (ADR-0081/0099). One set with `--family` rather than four
  * near-identical trios, since the model behind them is the same and only the panel differs.
  */
 private suspend fun setRuleGroup(host: DaemonClient, args: ParsedArgs): CommandResult {
@@ -1105,6 +1205,11 @@ internal enum class Command(val verb: String) {
     RemoveBreakpoint("remove_breakpoint"),
     ListBreakpoints("list_breakpoints"),
     SetBreakpointsEnabled("set_breakpoints_enabled"),
+    SetScript("set_script"),
+    RemoveScript("remove_script"),
+    ListScripts("list_scripts"),
+    GetScript("get_script"),
+    SetScriptsEnabled("set_scripts_enabled"),
     SetSeed("set_seed"),
     RemoveSeed("remove_seed"),
     ListSeeds("list_seeds"),
@@ -1178,6 +1283,8 @@ internal data class ParsedArgs(
     val hosts: List<String> = emptyList(),
     val bodyFile: String? = null,
     val bodyText: String? = null,
+    val scriptFile: String? = null,
+    val script: String? = null,
     val out: String? = null,
     val keep: Boolean = false,
     val family: String? = null,
@@ -1220,6 +1327,8 @@ internal fun parseArgs(args: Array<String>): ParsedArgs? {
     val hosts = mutableListOf<String>()
     var bodyFile: String? = null
     var bodyText: String? = null
+    var scriptFile: String? = null
+    var script: String? = null
     var out: String? = null
     var keep = false
     var family: String? = null
@@ -1263,6 +1372,8 @@ internal fun parseArgs(args: Array<String>): ParsedArgs? {
             "--host" -> hosts += args.getOrNull(++i) ?: return null
             "--body-file" -> bodyFile = args.getOrNull(++i) ?: return null
             "--body-text" -> bodyText = args.getOrNull(++i) ?: return null
+            "--script-file" -> scriptFile = args.getOrNull(++i) ?: return null
+            "--script" -> script = args.getOrNull(++i) ?: return null
             "--out" -> out = args.getOrNull(++i) ?: return null
             "--on" -> flag = true
             "--off" -> flag = false
@@ -1310,6 +1421,8 @@ internal fun parseArgs(args: Array<String>): ParsedArgs? {
         hosts = hosts,
         bodyFile = bodyFile,
         bodyText = bodyText,
+        scriptFile = scriptFile,
+        script = script,
         out = out,
         keep = keep,
         family = family,
@@ -1344,7 +1457,7 @@ private fun printUsage() {
         wailo-cli list_map_local
         wailo-cli get_map_local --id ID [--body-chars N]
         wailo-cli set_map_local_enabled --on|--off
-        wailo-cli set_rule_group --family map_local|breakpoints|seeds --group-id ID
+        wailo-cli set_rule_group --family map_local|breakpoints|seeds|scripts --group-id ID
                     [--name TEXT] [--on|--off]
         wailo-cli remove_rule_group --family F --group-id ID [--with-rules]
         wailo-cli list_rule_groups --family F
@@ -1354,6 +1467,12 @@ private fun printUsage() {
         wailo-cli remove_breakpoint --id ID
         wailo-cli list_breakpoints
         wailo-cli set_breakpoints_enabled --on|--off
+        wailo-cli set_script --id ID --url-pattern GLOB [--name TEXT] [--method M]
+                    (--script-file PATH | --script SOURCE) [--off] [--group-id ID]
+        wailo-cli remove_script --id ID
+        wailo-cli list_scripts
+        wailo-cli get_script --id ID
+        wailo-cli set_scripts_enabled --on|--off
         wailo-cli set_seed --id ID --url-pattern GLOB [--method M] [--status C] [--delay-ms N]
                     [--header "Name: value"]... [--body-file PATH|--body-text TEXT] [--off]
                     [--group-id ID]

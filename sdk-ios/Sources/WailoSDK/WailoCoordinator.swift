@@ -174,6 +174,7 @@ final class WailoCoordinator: @unchecked Sendable {
         WailoURLProtocol.sink = nil
         WailoURLProtocol.bodyFetcher = nil
         WailoURLProtocol.breakpointGate = nil
+        WailoURLProtocol.scriptTransformer = nil
         if wasConnected { post(Wailo.connectionDidChangeNotification) }
     }
 
@@ -776,13 +777,14 @@ final class WailoCoordinator: @unchecked Sendable {
     }
 
     private func wireTransport(
-        _ transport: CaptureSink & WailoBodyFetcher & WailoBreakpointGate,
+        _ transport: CaptureSink & WailoBodyFetcher & WailoBreakpointGate & WailoScriptTransformer,
         session: Session
     ) {
         let sink: CaptureSink = session.alsoLogToConsole ? transport + ConsoleSink() : transport
         WailoURLProtocol.sink = sink
         WailoURLProtocol.bodyFetcher = transport
         WailoURLProtocol.breakpointGate = transport
+        WailoURLProtocol.scriptTransformer = transport
         WailoURLProtocol.maxBodyBytes = session.maxBodyBytes
     }
 

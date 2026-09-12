@@ -120,6 +120,55 @@ message BodyResponse {
   int32 delay_ms = 6;
 }
 
+// --- Scripts (desktop <-> device control channel) ---
+
+// Ordered Script match metadata. Source stays on the daemon; a device uses the derived hook flags to
+// avoid a transform round trip when no enabled rule can run for that request and phase.
+message ScriptRuleSet {
+  repeated ScriptRule rules = 1;
+  uint64 epoch = 2;
+}
+
+message ScriptRule {
+  string id = 1;
+  bool enabled = 2;
+  string url_pattern = 3;
+  repeated string methods = 4;
+  bool on_request = 5;
+  bool on_response = 6;
+}
+
+message ScriptRuleSetAck {
+  uint64 epoch = 1;
+}
+
+enum ScriptPhase {
+  SCRIPT_PHASE_UNSPECIFIED = 0;
+  SCRIPT_PHASE_REQUEST = 1;
+  SCRIPT_PHASE_RESPONSE = 2;
+}
+
+// A device asks the daemon to run every matching hook for one phase. An unreplayable request carries
+// its metadata but not replaceable bytes; the result can still change method, URL, and headers.
+message ScriptTransformRequest {
+  string correlation_id = 1;
+  ScriptPhase phase = 2;
+  HttpRequest request = 3;
+  HttpResponse response = 4;
+  bool request_body_replayable = 5;
+}
+
+// The last transactionally committed phase value. Body replacement is explicit so a device can keep
+// an unavailable request stream byte-for-byte when only metadata changed.
+message ScriptTransformResult {
+  string correlation_id = 1;
+  HttpRequest request = 2;
+  HttpResponse response = 3;
+  bool request_body_replaced = 4;
+  bool response_body_replaced = 5;
+  int32 delay_ms = 6;
+}
+
 // --- Breakpoints (desktop <-> device control channel) ---
 
 // Which requests to pause and at which phase(s). Pushed desktop -> device as a snapshot like RuleSet:

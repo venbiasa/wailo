@@ -1555,9 +1555,11 @@ private class HighlightColors(
 
 // Colors a JSON line from its per-line spans; plain text (or an over-long line) is returned uncolored.
 private fun annotateLine(line: String, language: CodeLanguage, colors: HighlightColors): AnnotatedString {
-    if (language != CodeLanguage.Json || line.isEmpty() || line.length > MAX_HIGHLIGHT_LINE) {
+    if (line.isEmpty() || line.length > MAX_HIGHLIGHT_LINE) {
         return AnnotatedString(line)
     }
+    if (language == CodeLanguage.JavaScript) return annotateJavaScript(line, colors)
+    if (language != CodeLanguage.Json) return AnnotatedString(line)
     val spans = jsonHighlightSpans(line)
     if (spans.isEmpty()) return AnnotatedString(line)
     return buildAnnotatedString {
@@ -1574,6 +1576,85 @@ private fun annotateLine(line: String, language: CodeLanguage, colors: Highlight
         }
     }
 }
+
+private enum class JavaScriptToken { String, Number, Keyword, Punctuation, Comment }
+
+private data class JavaScriptSpan(
+    val start: Int,
+    val end: Int,
+    val token: JavaScriptToken,
+)
+
+private fun annotateJavaScript(line: String, colors: HighlightColors): AnnotatedString {
+    val spans = javaScriptSpans(line)
+    if (spans.isEmpty()) return AnnotatedString(line)
+    return buildAnnotatedString {
+        append(line)
+        spans.forEach { span ->
+            val color = when (span.token) {
+                JavaScriptToken.String -> colors.string
+                JavaScriptToken.Number -> colors.number
+                JavaScriptToken.Keyword -> colors.keyword
+                JavaScriptToken.Punctuation, JavaScriptToken.Comment -> colors.punctuation
+            }
+            addStyle(SpanStyle(color = color), span.start, span.end)
+        }
+    }
+}
+
+private fun javaScriptSpans(line: String): List<JavaScriptSpan> {
+    val result = mutableListOf<JavaScriptSpan>()
+    var index = 0
+    while (index < line.length) {
+        val start = index
+        val char = line[index]
+        when {
+            char == '/' && line.getOrNull(index + 1) == '/' -> {
+                result += JavaScriptSpan(index, line.length, JavaScriptToken.Comment)
+                break
+            }
+            char == '"' || char == '\'' || char == '`' -> {
+                val quote = char
+                index++
+                while (index < line.length) {
+                    if (line[index] == '\\') {
+                        index += 2
+                    } else if (line[index++] == quote) {
+                        break
+                    }
+                }
+                result += JavaScriptSpan(start, index.coerceAtMost(line.length), JavaScriptToken.String)
+            }
+            char.isDigit() -> {
+                index++
+                while (index < line.length && (line[index].isDigit() || line[index] in ".xabcdefABCDEF")) index++
+                result += JavaScriptSpan(start, index, JavaScriptToken.Number)
+            }
+            char.isLetter() || char == '_' || char == '$' -> {
+                index++
+                while (index < line.length && (line[index].isLetterOrDigit() || line[index] == '_' || line[index] == '$')) {
+                    index++
+                }
+                if (line.substring(start, index) in JavaScriptKeywords) {
+                    result += JavaScriptSpan(start, index, JavaScriptToken.Keyword)
+                }
+            }
+            char in "{}[]().,;:+-*/%=!<>?&|" -> {
+                index++
+                result += JavaScriptSpan(start, index, JavaScriptToken.Punctuation)
+            }
+            else -> index++
+        }
+    }
+    return result
+}
+
+private val JavaScriptKeywords = setOf(
+    "async", "await", "break", "case", "catch", "class", "const", "continue", "default", "delete",
+    "do", "else", "export", "extends", "false", "finally", "for", "function", "if", "import", "in",
+    "instanceof", "let", "new", "null", "return", "static", "switch", "this", "throw", "true", "try",
+    "typeof", "undefined", "var", "void", "while", "with", "yield",
+)
 
 // A typed code point as a string, building a surrogate pair for astral chars (no JVM Character in common).
 private fun codePointToString(cp: Int): String =

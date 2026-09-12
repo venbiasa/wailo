@@ -6,7 +6,9 @@ import com.venbiasa.wailo.engine.BodyRef
 import com.venbiasa.wailo.host.HeadlessHost
 import com.venbiasa.wailo.host.HostBreakpointRule
 import com.venbiasa.wailo.host.HostMapLocalRule
+import com.venbiasa.wailo.host.HostScript
 import com.venbiasa.wailo.host.HostSeed
+import com.venbiasa.wailo.host.ScriptExecutor
 import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.io.IOException
@@ -72,6 +74,7 @@ internal class DaemonRuntime(
     systemProxy: SystemProxyController = SystemProxyController.forThisMachine(),
     private val fixtures: DaemonFixturesStore = DaemonFixturesStore(),
     private val provisioner: ProxyTargetProvisioner = ProxyTargetProvisioner.forThisMachine(),
+    private val scriptExecutor: ScriptExecutor = DaemonScriptExecutor(),
 ) : AutoCloseable {
     /**
      * The bundled proxy, off until something explicitly starts it (ADR-0070). Daemon-owned like every
@@ -134,6 +137,12 @@ internal class DaemonRuntime(
     var seedNodes: List<DaemonRuleNode<SeedRuleDto>> = emptyList()
         private set
 
+    private val scriptMutex = Mutex()
+
+    @Volatile
+    var scriptNodes: List<DaemonRuleNode<ScriptRuleDto>> = emptyList()
+        private set
+
     // One host at a time rather than a whole-list replace: bookmarking is the one edit two frontends
     // plausibly make at once, and a read-modify-write of the list would drop one of them (ADR-0084).
     private val bookmarkLock = Any()
@@ -147,6 +156,7 @@ internal class DaemonRuntime(
     private val ruleBodies = DaemonRuleBodyStore(fixtures.directory)
 
     init {
+        host.installScriptExecutor(scriptExecutor)
         restoreFixtures()
     }
 
@@ -185,6 +195,10 @@ internal class DaemonRuntime(
         val breakpointHash = hash(breakpointNodes)
         val seedNodes = this.seedNodes
         val seedHash = hash(seedNodes)
+        val scriptNodes = this.scriptNodes
+        val scriptHash = hash(scriptNodes)
+        val scriptIssues = host.scriptIssues.map { it.toDto() }
+        val scriptIssuesHash = hash(scriptIssues)
         val engine = host.engine
         val identity = engine.pairings.identity.value
         val offer = engine.pairings.offer.value
@@ -222,6 +236,11 @@ internal class DaemonRuntime(
             seedsEnabled = host.areSeedsEnabled(),
             seedHash = seedHash,
             seedNodes = seedNodes.takeUnless { request.seedHash == seedHash },
+            scriptsEnabled = host.areScriptsEnabled(),
+            scriptHash = scriptHash,
+            scriptNodes = scriptNodes.takeUnless { request.scriptHash == scriptHash },
+            scriptIssuesHash = scriptIssuesHash,
+            scriptIssues = scriptIssues.takeUnless { request.scriptIssuesHash == scriptIssuesHash },
             armedSeedIds = host.seedQueue.value.map { it.id },
             triagedHoldIds = host.triagedHolds.value.toList(),
             pairing = PairingDto(
@@ -352,7 +371,9 @@ internal class DaemonRuntime(
     fun currentProxyCertificate(): ProxyCertificateDto = proxy.currentCertificate().toDto()
 
     fun proxyTargets(): ProxyTargetsDto {
-        val fingerprint = proxy.status.value.caFingerprint
+        // Sampled rather than read off the last publish: whether a device holds the current root must not
+        // answer no merely because nothing has touched the proxy in this process yet.
+        val fingerprint = proxy.sample().caFingerprint
         return ProxyTargetsDto(
             supported = provisioner.supported,
             targets = provisioner.targets(fingerprint).map { it.toDto() },
@@ -640,6 +661,86 @@ internal class DaemonRuntime(
 
     suspend fun setSeedsEnabled(enabled: Boolean) = seedMutex.withLock { pushSeeds(enabled) }
 
+    suspend fun validateScript(source: String): ScriptValidationDto =
+        runCatching { host.validateScript(source) }.fold(
+            onSuccess = { ScriptValidationDto(true, it.onRequest, it.onResponse) },
+            onFailure = { ScriptValidationDto(false) },
+        )
+
+    suspend fun replaceScripts(nodes: List<DaemonRuleNode<ScriptRuleDto>>, enabled: Boolean) {
+        val validated = validatedScriptNodes(nodes)
+        require(validated.flattenRules().map { it.id }.distinct().size == validated.flattenRules().size) {
+            "Script ids must be unique"
+        }
+        scriptMutex.withLock {
+            scriptNodes = validated
+            pushScripts(enabled)
+        }
+    }
+
+    suspend fun upsertScript(script: ScriptRuleDto, groupId: String?): Boolean {
+        val validated = validatedScript(script)
+        return scriptMutex.withLock {
+            scriptNodes = scriptNodes.upsertRule(validated, groupId) { it.id } ?: return@withLock false
+            pushScripts(host.areScriptsEnabled())
+            true
+        }
+    }
+
+    suspend fun removeScript(id: String): Boolean = scriptMutex.withLock {
+        if (scriptNodes.findRule(id) { it.id } == null) return@withLock false
+        scriptNodes = scriptNodes.removeRule(id) { it.id }
+        pushScripts(host.areScriptsEnabled())
+        true
+    }
+
+    suspend fun setScriptsEnabled(enabled: Boolean) {
+        scriptMutex.withLock {
+            if (enabled) scriptNodes = validatedScriptNodes(scriptNodes)
+            pushScripts(enabled)
+        }
+    }
+
+    private suspend fun validatedScript(script: ScriptRuleDto): ScriptRuleDto {
+        require(script.id.isNotBlank()) { "Script id must not be blank" }
+        require(script.urlPattern.isNotBlank()) { "Script URL pattern must not be blank" }
+        val validation = host.validateScript(script.source)
+        return script.copy(
+            onRequest = validation.onRequest,
+            onResponse = validation.onResponse,
+        )
+    }
+
+    private suspend fun validatedScriptNodes(
+        nodes: List<DaemonRuleNode<ScriptRuleDto>>,
+    ): List<DaemonRuleNode<ScriptRuleDto>> {
+        val result = ArrayList<DaemonRuleNode<ScriptRuleDto>>(nodes.size)
+        for (node in nodes) {
+            val rules = ArrayList<ScriptRuleDto>(node.rules.size)
+            for (rule in node.rules) rules += validatedScript(rule)
+            result += node.copy(rules = rules)
+        }
+        return result
+    }
+
+    private suspend fun restoredScriptNodes(
+        nodes: List<DaemonRuleNode<ScriptRuleDto>>,
+    ): List<DaemonRuleNode<ScriptRuleDto>> {
+        val result = ArrayList<DaemonRuleNode<ScriptRuleDto>>(nodes.size)
+        for (node in nodes) {
+            val rules = ArrayList<ScriptRuleDto>(node.rules.size)
+            for (rule in node.rules) {
+                rules += try {
+                    validatedScript(rule)
+                } catch (_: Exception) {
+                    rule.copy(onRequest = false, onResponse = false)
+                }
+            }
+            result += node.copy(rules = rules)
+        }
+        return result
+    }
+
     /** Creates or edits a group in [family]. Unknown families are rejected by the caller. */
     suspend fun setRuleGroup(family: String, group: DaemonRuleGroup) {
         when (family) {
@@ -654,6 +755,10 @@ internal class DaemonRuntime(
             RULE_FAMILY_SEEDS -> seedMutex.withLock {
                 seedNodes = seedNodes.upsertGroup(group)
                 pushSeeds(host.areSeedsEnabled())
+            }
+            RULE_FAMILY_SCRIPTS -> scriptMutex.withLock {
+                scriptNodes = scriptNodes.upsertGroup(group)
+                pushScripts(host.areScriptsEnabled())
             }
         }
     }
@@ -686,6 +791,13 @@ internal class DaemonRuntime(
                 true
             } ?: false
         }
+        RULE_FAMILY_SCRIPTS -> scriptMutex.withLock {
+            scriptNodes.reorder(groupId, ids) { it.id }?.let {
+                scriptNodes = it
+                pushScripts(host.areScriptsEnabled())
+                true
+            } ?: false
+        }
         else -> false
     }
 
@@ -711,6 +823,13 @@ internal class DaemonRuntime(
                 true
             } ?: false
         }
+        RULE_FAMILY_SCRIPTS -> scriptMutex.withLock {
+            scriptNodes.removeGroup(id, withRules)?.let {
+                scriptNodes = it
+                pushScripts(host.areScriptsEnabled())
+                true
+            } ?: false
+        }
         else -> false
     }
 
@@ -718,6 +837,7 @@ internal class DaemonRuntime(
         RULE_FAMILY_MAP_LOCAL -> mapLocalNodes.groups()
         RULE_FAMILY_BREAKPOINTS -> breakpointNodes.groups()
         RULE_FAMILY_SEEDS -> seedNodes.groups()
+        RULE_FAMILY_SCRIPTS -> scriptNodes.groups()
         else -> emptyList()
     }
 
@@ -739,6 +859,11 @@ internal class DaemonRuntime(
         ruleBodies.retain(RULE_FAMILY_SEEDS, seedNodes.flattenRules().map { it.id })
         host.replaceSeeds(seedNodes.toHostSeeds(::seedBody), enabled)
         persistSeeds()
+    }
+
+    private suspend fun pushScripts(enabled: Boolean) {
+        host.replaceScripts(scriptNodes.toHostScripts(), enabled)
+        persistScripts()
     }
 
     private fun mapLocalBody(id: String): ByteArray = ruleBodies.body(RULE_FAMILY_MAP_LOCAL, id)
@@ -817,6 +942,14 @@ internal class DaemonRuntime(
                 ruleBodies.retain(RULE_FAMILY_SEEDS, seedNodes.flattenRules().map { it.id })
                 host.replaceSeeds(seedNodes.toHostSeeds(::seedBody), seeds.enabled)
                 if (migrated != null) persistSeeds()
+            }
+            fixtures.loadScriptsIfPresent()?.let { scripts ->
+                scriptNodes = if (scripts.enabled) {
+                    restoredScriptNodes(scripts.nodes)
+                } else {
+                    scripts.nodes
+                }
+                host.replaceScripts(scriptNodes.toHostScripts(), scripts.enabled)
             }
             fixtures.loadCaptureFilterIfPresent()?.let { filter ->
                 host.updateCaptureFilter(
@@ -897,6 +1030,10 @@ internal class DaemonRuntime(
 
     private fun persistSeeds() {
         fixtures.saveSeeds(PersistedSeeds(enabled = host.areSeedsEnabled(), nodes = seedNodes))
+    }
+
+    private fun persistScripts() {
+        fixtures.saveScripts(PersistedScripts(enabled = host.areScriptsEnabled(), nodes = scriptNodes))
     }
 
     private fun hash(value: Any): String {
@@ -1235,6 +1372,32 @@ internal class DaemonServer(
             )
             "set_breakpoints_enabled" -> {
                 runtime.setBreakpointsEnabled(request.decode(BooleanValue.serializer()).value)
+                success()
+            }
+            "validate_script" -> {
+                val value = request.decode(ValidateScriptRequest.serializer())
+                success(DaemonJson.encodeToJsonElement(runtime.validateScript(value.source)))
+            }
+            "replace_scripts" -> {
+                val value = request.decode(ReplaceScriptsRequest.serializer())
+                runtime.replaceScripts(value.nodes, value.enabled)
+                success()
+            }
+            "upsert_script" -> {
+                val value = request.decode(UpsertScriptRequest.serializer())
+                if (runtime.upsertScript(value.script, value.groupId)) {
+                    success()
+                } else {
+                    unknownGroup(value.groupId)
+                }
+            }
+            "remove_script" -> success(
+                DaemonJson.encodeToJsonElement(
+                    BooleanValue(runtime.removeScript(request.decode(IdRequest.serializer()).id)),
+                ),
+            )
+            "set_scripts_enabled" -> {
+                runtime.setScriptsEnabled(request.decode(BooleanValue.serializer()).value)
                 success()
             }
             "replace_seeds" -> {

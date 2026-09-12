@@ -172,8 +172,8 @@ class ProxyServer private constructor(
     ): Boolean {
         // Inside a decrypted tunnel the request-target is origin-form and the authority is the tunnel's,
         // which is the one thing that differs from a plain proxied request.
-        val target = tunnel?.within(head.second) ?: absoluteTarget(head.second)
-        if (target == null) {
+        val initialTarget = tunnel?.within(head.second) ?: absoluteTarget(head.second)
+        if (initialTarget == null) {
             // Someone typed this address into a browser. Not recorded: a page Wailo serves about itself is
             // not traffic the user came here to inspect.
             val page = if (head.first.equals("GET", ignoreCase = true)) {
@@ -184,6 +184,7 @@ class ProxyServer private constructor(
             if (page != null) writeResponse(clientOut, page) else respondDirectly(clientOut, 400, "Bad Request", DIRECT_REQUEST_HELP)
             return false
         }
+        var target = requireNotNull(initialTarget)
         if (head.first.equals("GET", ignoreCase = true)) {
             val page = runCatching { setup.page(target.url) }.getOrNull()
             if (page != null) {
@@ -225,7 +226,11 @@ class ProxyServer private constructor(
             // corrects what is forwarded: `sendRequest` sends these headers with the bytes the hold left.
             headers = if (held != null) forwardedHeaders.withoutContentEncoding() else forwardedHeaders,
             body = held?.bytes?.toByteString() ?: ByteString.EMPTY,
-            body_size = held?.bytes?.size?.toLong() ?: requestFrame.length,
+            body_size = held?.bytes?.size?.toLong() ?: when (requestFrame.kind) {
+                FramingKind.Fixed -> requestFrame.length
+                FramingKind.None -> 0
+                else -> -1
+            },
             // A body that outgrew the hold ceiling is offered as a fact, not an editing surface: the
             // daemon reads this and declines to stop an exchange it could only half show.
             body_truncated = held?.complete == false ||
@@ -233,6 +238,8 @@ class ProxyServer private constructor(
         )
 
         var requestBodyReplaced = held != null && requestCoding != null
+        var exchangeEdited = false
+        var selectedResponseBreakpoint: Boolean? = null
         when (val verdict = runCatching { rules.onRequest(peer, request) }.getOrDefault(RequestVerdict.Proceed())) {
             is RequestVerdict.Abort -> {
                 val consumed = consumeRequest(held, clientIn, requestFrame, intent, requestCoding)
@@ -241,7 +248,7 @@ class ProxyServer private constructor(
                 record(
                     intent,
                     exchange(request, startedAt, null, consumed.bytes, consumed.spoiled, 0, false)
-                        .copy(error = "aborted in Wailo"),
+                        .copy(error = "aborted in Wailo", edited = true),
                     peer,
                     consumed.ref,
                     null,
@@ -250,12 +257,30 @@ class ProxyServer private constructor(
             }
 
             is RequestVerdict.Respond -> {
-                val consumed = consumeRequest(held, clientIn, requestFrame, intent, requestCoding)
+                verdict.editedRequest?.let {
+                    request = it
+                    exchangeEdited = true
+                }
+                requestBodyReplaced = requestBodyReplaced || verdict.requestBodyReplaced
+                if (requestBodyReplaced) {
+                    request = request.copy(
+                        headers = request.headers.framedFor(request.body.size.toLong(), complete = true),
+                    )
+                }
+                val consumed = consumeRequest(
+                    held,
+                    clientIn,
+                    requestFrame,
+                    intent,
+                    requestCoding,
+                    replacement = request.body.toByteArray().takeIf { requestBodyReplaced },
+                )
                 request = request.recordedAfter(consumed)
                 val answered = writeResponse(clientOut, verdict.response)
                 record(
                     intent,
-                    exchange(request, startedAt, answered, consumed.bytes, consumed.spoiled, answered.body_size, false),
+                    exchange(request, startedAt, answered, consumed.bytes, consumed.spoiled, answered.body_size, false)
+                        .copy(edited = true),
                     peer,
                     consumed.ref,
                     spool(intent, verdict.response.body.toByteArray()),
@@ -266,10 +291,24 @@ class ProxyServer private constructor(
             }
 
             is RequestVerdict.Proceed -> {
-                verdict.edited?.let { request = it }
+                verdict.edited?.let {
+                    request = it
+                    exchangeEdited = true
+                }
                 requestBodyReplaced = requestBodyReplaced || verdict.bodyReplaced
+                selectedResponseBreakpoint = verdict.holdResponse
             }
         }
+        if (request.url != target.url) {
+            rewrittenTarget(request.url)?.let { rewritten ->
+                target = rewritten
+                request = request.copy(headers = request.headers.withHost(rewritten))
+            }
+        }
+        // Capture Filter stays the decision made from the original request, but response hooks and
+        // breakpoints match the final outgoing request after Scripts and the request breakpoint.
+        val responseIntent = runCatching { rules.intercepts(request.method, request.url) }.getOrDefault(intent)
+        val holdResponse = selectedResponseBreakpoint ?: responseIntent.holdResponse
 
         val upstream = try {
             openUpstream(target)
@@ -278,7 +317,10 @@ class ProxyServer private constructor(
             record(
                 intent,
                 exchange(request, startedAt, null, 0, false, 0, false)
-                    .copy(error = failure.message ?: "upstream connection failed"),
+                    .copy(
+                        error = failure.message ?: "upstream connection failed",
+                        edited = exchangeEdited,
+                    ),
                 peer,
                 null,
                 null,
@@ -311,7 +353,7 @@ class ProxyServer private constructor(
                 upstreamOut.flush()
                 // The head upstream is already written, so this only corrects the record — the client's
                 // own framing and coding reached the origin untouched.
-                request = request.recordedAfter(sent)
+                request = request.copy(headers = sent.headers ?: request.headers).recordedAfter(sent)
 
                 var responseHead = readHead(upstreamIn)
                     ?: throw IOException("Upstream closed before sending a response")
@@ -336,7 +378,7 @@ class ProxyServer private constructor(
                             requestSpoiled = sent.spoiled,
                             responseBytes = 0,
                             responseSpoiled = false,
-                        ),
+                        ).copy(edited = exchangeEdited),
                         peer,
                         sent.ref,
                         null,
@@ -354,12 +396,12 @@ class ProxyServer private constructor(
                 // byte-exact.
                 val holdable = (framing.kind != FramingKind.Fixed || framing.length <= MAX_HELD_BODY_BYTES) &&
                     canDecodeForCapture(responseHead.header("Content-Encoding"))
-                val scriptHoldable = intent.transformResponse &&
+                val scriptHoldable = responseIntent.transformResponse &&
                     responseHead.header("Content-Encoding") == null &&
                     !responseHead.isEventStream() &&
                     (framing.kind == FramingKind.None ||
                         (framing.kind == FramingKind.Fixed && framing.length <= MAX_SCRIPT_BODY_BYTES))
-                if ((intent.holdResponse && holdable) || scriptHoldable) {
+                if ((holdResponse && holdable) || scriptHoldable) {
                     return holdResponse(
                         head,
                         request,
@@ -371,6 +413,8 @@ class ProxyServer private constructor(
                         startedAt,
                         sent,
                         intent,
+                        exchangeEdited,
+                        holdResponse,
                     )
                 }
 
@@ -382,14 +426,16 @@ class ProxyServer private constructor(
                     upstream.socket.soTimeout = 0
                 }
                 var responseTemplate: HttpResponse? = null
-                if (intent.transformResponse) {
+                if (responseIntent.transformResponse) {
                     val unavailable = responseHead.asResponse(
                         bytes = framing.length,
                         spoiled = framing.kind != FramingKind.None,
                         decoded = false,
                     )
                     when (
-                        val verdict = runCatching { rules.onResponse(peer, request, unavailable) }
+                        val verdict = runCatching {
+                            rules.onResponse(peer, request, unavailable, breakpointSelected = false)
+                        }
                             .getOrDefault(ResponseVerdict.Proceed())
                     ) {
                         ResponseVerdict.Abort -> {
@@ -397,16 +443,19 @@ class ProxyServer private constructor(
                             return false
                         }
                         is ResponseVerdict.Proceed -> {
-                            responseTemplate = verdict.edited?.let { edited ->
-                                edited.copy(
-                                    body = ByteString.EMPTY,
-                                    headers = edited.headers.preserveFramingFrom(unavailable.headers),
-                                )
-                            } ?: unavailable
+                            verdict.edited?.let { edited ->
+                                exchangeEdited = true
+                                if (edited != unavailable) {
+                                    responseTemplate = edited.copy(
+                                        body = ByteString.EMPTY,
+                                        headers = edited.headers.preserveFramingFrom(unavailable.headers),
+                                    )
+                                }
+                            }
                         }
                     }
                 }
-                clientOut.write(responseTemplate?.headBytes(responseHead.third) ?: responseHead.raw)
+                clientOut.write(responseTemplate?.headBytes() ?: responseHead.raw)
                 clientOut.flush()
                 val response = relayBody(
                     source = upstreamIn,
@@ -430,7 +479,7 @@ class ProxyServer private constructor(
                         requestSpoiled = sent.spoiled,
                         responseBytes = response.bytes,
                         responseSpoiled = response.spoiled,
-                    ),
+                    ).copy(edited = exchangeEdited),
                     peer,
                     sent.ref,
                     response.ref,
@@ -464,27 +513,49 @@ class ProxyServer private constructor(
         startedAt: Long,
         sent: Relayed,
         intent: Interception,
+        editedBefore: Boolean,
+        breakpointSelected: Boolean,
     ): Boolean {
         val encoding = responseHead.header("Content-Encoding")
         val body = hold(upstreamIn, framing, encoding)
         if (!body.complete) {
-            return releaseOversized(head, request, responseHead, body, upstreamIn, clientOut, peer, startedAt, sent, intent)
+            return releaseOversized(
+                head,
+                request,
+                responseHead,
+                body,
+                upstreamIn,
+                clientOut,
+                peer,
+                startedAt,
+                sent,
+                intent,
+                editedBefore,
+            )
         }
         val original = responseHead.asResponse(body.bytes.size.toLong(), spoiled = false, decoded = encoding != null)
             .copy(body = body.bytes.toByteString())
-        val verdict = runCatching { rules.onResponse(peer, request, original) }
+        val verdict = runCatching { rules.onResponse(peer, request, original, breakpointSelected) }
             .getOrDefault(ResponseVerdict.Proceed())
         if (verdict is ResponseVerdict.Abort) {
             respondDirectly(clientOut, 502, "Bad Gateway", ABORTED_MESSAGE)
             record(intent, exchange(request, startedAt, original, sent.bytes, sent.spoiled, body.bytes.size.toLong(), false)
-                .copy(error = "aborted in Wailo"), peer, sent.ref, null)
+                .copy(error = "aborted in Wailo", edited = true), peer, sent.ref, null)
             return false
         }
         val chosen = (verdict as ResponseVerdict.Proceed).edited ?: original
-        val delivered = writeResponse(clientOut, chosen)
+        val delivered = if (chosen == original && encoding == null) {
+            clientOut.write(responseHead.raw)
+            clientOut.write(body.bytes)
+            clientOut.flush()
+            original
+        } else {
+            writeResponse(clientOut, chosen)
+        }
         record(
             intent,
-            exchange(request, startedAt, delivered, sent.bytes, sent.spoiled, delivered.body_size, false),
+            exchange(request, startedAt, delivered, sent.bytes, sent.spoiled, delivered.body_size, false)
+                .copy(edited = editedBefore || verdict.edited != null),
             peer,
             sent.ref,
             spool(intent, chosen.body.toByteArray()),
@@ -511,6 +582,7 @@ class ProxyServer private constructor(
         startedAt: Long,
         sent: Relayed,
         intent: Interception,
+        editedBefore: Boolean,
     ): Boolean {
         clientOut.write(
             buildString {
@@ -533,7 +605,7 @@ class ProxyServer private constructor(
                 sent.spoiled,
                 total,
                 written.isFailure,
-            ),
+            ).copy(edited = editedBefore),
             peer,
             sent.ref,
             runCatching { capture?.commit() }.getOrNull(),
@@ -558,10 +630,15 @@ class ProxyServer private constructor(
         intent: Interception,
         bodyReplaced: Boolean,
     ): Relayed {
+        val framedHeaders = if (bodyReplaced) {
+            request.headers
+        } else {
+            request.headers.preserveFramingFrom(head.headers)
+        }
         // Only a hold can have produced an edit, so with nothing held the body is still in the socket and
         // streaming it is both correct and the only way to leave the connection on a message boundary.
         if (held == null) {
-            upstreamOut.write(requestHead(head, target, request.headers))
+            upstreamOut.write(requestHead(head, target, request.method, framedHeaders))
             upstreamOut.flush()
             return relayBody(
                 source = clientIn,
@@ -569,22 +646,29 @@ class ProxyServer private constructor(
                 framing = framing,
                 record = intent.record,
                 contentEncoding = head.header("Content-Encoding"),
-            )
+            ).withHeaders(framedHeaders)
         }
         val bytes = if (bodyReplaced) request.body.toByteArray() else held.bytes
         if (held.complete) {
             val headers = if (bodyReplaced) {
-                request.headers.framedFor(bytes.size.toLong(), complete = true)
+                framedHeaders.framedFor(bytes.size.toLong(), complete = true)
             } else {
-                request.headers
+                framedHeaders
             }
-            upstreamOut.write(requestHead(head, target, headers))
+            upstreamOut.write(requestHead(head, target, request.method, headers))
             upstreamOut.write(bytes)
-            return Relayed(spool(intent, bytes), bytes.size.toLong(), spoiled = false, decoded = false)
+            return Relayed(
+                spool(intent, bytes),
+                bytes.size.toLong(),
+                spoiled = false,
+                decoded = false,
+                headers = headers,
+            )
         }
         // Everything past the ceiling still belongs to the origin, and the stream is mid-entity — so the
         // rest is finished from the reader the hold left behind, re-framed because its length is unknown.
-        upstreamOut.write(requestHead(head, target, request.headers.chunkedFraming()))
+        val headers = framedHeaders.chunkedFraming()
+        upstreamOut.write(requestHead(head, target, request.method, headers))
         val capture = if (intent.record && sink.isRecording()) sink.openBody() else null
         val written = runCatching { writeChunked(upstreamOut, bytes, held.rest, capture) }
         return Relayed(
@@ -592,6 +676,7 @@ class ProxyServer private constructor(
             bytes = written.getOrDefault(bytes.size.toLong()),
             spoiled = written.isFailure,
             decoded = false,
+            headers = headers,
         )
     }
 
@@ -778,7 +863,11 @@ class ProxyServer private constructor(
         val bytes: Long,
         val spoiled: Boolean,
         val decoded: Boolean,
+        val headers: List<Header>? = null,
     )
+
+    private fun Relayed.withHeaders(headers: List<Header>) =
+        Relayed(ref, bytes, spoiled, decoded, headers)
 
     /**
      * The request as it should be recorded now that its body has been captured.
@@ -858,7 +947,21 @@ class ProxyServer private constructor(
         framing: Framing,
         intent: Interception,
         contentEncoding: String?,
+        replacement: ByteArray? = null,
     ): Relayed {
+        if (replacement != null) {
+            val original = if (held == null) {
+                relayBody(source, null, framing, record = false, contentEncoding = contentEncoding)
+            } else {
+                Relayed(null, held.bytes.size.toLong(), spoiled = !held.complete, decoded = false)
+            }
+            return Relayed(
+                ref = spool(intent, replacement),
+                bytes = replacement.size.toLong(),
+                spoiled = original.spoiled,
+                decoded = false,
+            )
+        }
         if (held == null) return relayBody(source, null, framing, intent.record, contentEncoding)
         return Relayed(spool(intent, held.bytes), held.bytes.size.toLong(), !held.complete, decoded = false)
     }
@@ -1012,8 +1115,13 @@ class ProxyServer private constructor(
         }
     }
 
-    private fun requestHead(head: HttpHead, target: ProxyTarget, headers: List<Header>): ByteArray = buildString {
-        append("${head.first} ${target.pathAndQuery} ${head.third}\r\n")
+    private fun requestHead(
+        head: HttpHead,
+        target: ProxyTarget,
+        method: String,
+        headers: List<Header>,
+    ): ByteArray = buildString {
+        append("$method ${target.pathAndQuery} ${head.third}\r\n")
         headers.forEach { append("${it.name}: ${it.value_}\r\n") }
         append("\r\n")
     }.toByteArray(Charsets.ISO_8859_1)
@@ -1118,6 +1226,20 @@ internal fun absoluteTarget(target: String): ProxyTarget? {
     return ProxyTarget(host, port, path, target)
 }
 
+private fun rewrittenTarget(url: String): ProxyTarget? {
+    val uri = runCatching { URI(url) }.getOrNull() ?: return null
+    val scheme = uri.scheme?.lowercase()
+    if (scheme !in setOf("http", "https")) return null
+    val host = uri.host ?: return null
+    val secure = scheme == "https"
+    val port = if (uri.port > 0) uri.port else if (secure) 443 else 80
+    val path = buildString {
+        append(uri.rawPath?.takeIf { it.isNotEmpty() } ?: "/")
+        uri.rawQuery?.let { append("?$it") }
+    }
+    return ProxyTarget(host, port, path, url, secure)
+}
+
 /**
  * Replace, rather than keep, whatever `Host` the client sent: with an absolute-form target the authority
  * in the URL is the authority, and RFC 9112 has the proxy overwrite the header to match it. Forwarding a
@@ -1154,8 +1276,8 @@ private fun List<Header>.preserveFramingFrom(original: List<Header>): List<Heade
     return filterNot { it.name.lowercase() in framing } + original.filter { it.name.lowercase() in framing }
 }
 
-private fun HttpResponse.headBytes(fallbackMessage: String): ByteArray = buildString {
-    append("HTTP/1.1 $code ${message.ifBlank { fallbackMessage }}\r\n")
+private fun HttpResponse.headBytes(): ByteArray = buildString {
+    append("HTTP/1.1 $code ${message.ifBlank { reasonFor(code) }}\r\n")
     headers.forEach { append("${it.name}: ${it.value_}\r\n") }
     append("\r\n")
 }.toByteArray(Charsets.ISO_8859_1)
@@ -1177,6 +1299,7 @@ private fun HttpHead.asResponse(bytes: Long, spoiled: Boolean, decoded: Boolean)
 private fun reasonFor(code: Int): String = when (code) {
     200 -> "OK"
     201 -> "Created"
+    202 -> "Accepted"
     204 -> "No Content"
     301 -> "Moved Permanently"
     302 -> "Found"

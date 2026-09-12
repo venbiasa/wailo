@@ -5,6 +5,7 @@ import com.venbiasa.wailo.protocol.HttpExchange
 import com.venbiasa.wailo.protocol.HttpRequest
 import com.venbiasa.wailo.protocol.HttpResponse
 import com.venbiasa.wailo.protocol.MapLocalRule
+import com.venbiasa.wailo.protocol.ScriptPhase
 import okhttp3.Headers
 import okhttp3.Interceptor
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
@@ -16,6 +17,8 @@ import okhttp3.ResponseBody.Companion.toResponseBody
 import okio.Buffer
 import okio.ByteString
 import okio.ByteString.Companion.toByteString
+import okio.ForwardingSink
+import okio.buffer
 import java.io.IOException
 import java.util.UUID
 
@@ -46,74 +49,68 @@ class WailoInterceptor internal constructor(
 ) : Interceptor {
 
     override fun intercept(chain: Interceptor.Chain): Response {
-        val request = chain.request()
-        val url = request.url.toString()
-        val method = request.method
-        val host = request.url.host
+        val original = chain.request()
+        val url = original.url.toString()
+        val method = original.method
         val startedAtEpochMs = System.currentTimeMillis()
         val startNs = System.nanoTime()
 
-        val shouldCapture = WailoCaptureFilterStore.shouldCapture(host)
-        val mapRule = WailoRuleStore.match(url, method)
-        val breakpoint = WailoBreakpointStore.match(url, method)
-
-        // Filtered host with nothing to intercept: pass straight through — don't buffer the body or emit.
-        if (!shouldCapture && mapRule == null && breakpoint == null) {
-            return chain.proceed(request)
+        // The filter is deliberately decided before Scripts can rewrite the URL.
+        val shouldCapture = WailoCaptureFilterStore.shouldCapture(original.url.host)
+        val hasScript = WailoScriptStore.matches(url, method, ScriptPhase.SCRIPT_PHASE_REQUEST) ||
+            WailoScriptStore.matches(url, method, ScriptPhase.SCRIPT_PHASE_RESPONSE)
+        if (
+            !shouldCapture &&
+            !hasScript &&
+            WailoRuleStore.match(url, method) == null &&
+            WailoBreakpointStore.match(url, method) == null
+        ) {
+            return chain.proceed(original)
         }
 
-        // No breakpoint: Map Local (if it matches) serves and short-circuits; otherwise the real network.
-        // When a breakpoint matches it instead *owns* the exchange (below) and Map Local sources the response
-        // it shows rather than short-circuiting (ADR-0033).
-        if (breakpoint == null) {
-            if (mapRule != null) {
-                serveMapLocal(mapRule, request, shouldCapture, startedAtEpochMs, startNs)?.let { return it }
-            }
-            val response = proceedToNetwork(chain, request, requestEdited = false, shouldCapture, startedAtEpochMs, startNs)
-            if (shouldCapture) {
-                emit(startedAtEpochMs, elapsedMs(startNs), captureRequest(request), captureResponse(response))
-            }
-            return response
-        }
+        val requestPhase = transformRequest(original)
+        var outgoing = requestPhase.request
+        var requestEdited = requestPhase.edited
+        val breakpoint = WailoBreakpointStore.match(outgoing.url.toString(), outgoing.method)
 
-        // Breakpoint owns the exchange (ADR-0033). Request phase: pause before the response is sourced.
-        // Abort fails the call; an edited request replaces the original; a disconnect falls open (proceed
-        // with the original).
-        var outgoing = request
-        var requestEdited = false
-        if (breakpoint.onRequest) {
+        if (breakpoint?.onRequest == true) {
             val gate = WailoControlChannel.breakpointGate
             if (gate != null) {
-                when (val decision = gate.pauseRequest(breakpoint.ruleId, captureRequest(request))) {
-                    WailoRequestDecision.Abort -> abort(captureRequest(request), startedAtEpochMs, startNs, shouldCapture)
+                when (val decision = gate.pauseRequest(breakpoint.ruleId, captureRequest(outgoing))) {
+                    WailoRequestDecision.Abort ->
+                        abort(captureRequest(outgoing), startedAtEpochMs, startNs, shouldCapture)
                     is WailoRequestDecision.Proceed -> decision.edited?.let {
-                        outgoing = applyEdited(request, it)
+                        outgoing = applyEdited(outgoing, it)
                         requestEdited = true
                     }
                 }
             }
         }
 
-        // Source the response. Map Local — matched against the (possibly edited) outgoing request — supplies
-        // it when a rule matches, so the mocked value *becomes* the breakpoint's response (ADR-0033);
-        // otherwise the real network does, and a Map Local fetch miss falls open to it. Matching the outgoing
-        // request also subsumes the old edited-request re-check (ADR-0032).
         val mapped = WailoRuleStore.match(outgoing.url.toString(), outgoing.method)
             ?.let { mapLocalResponse(it, outgoing) }
         val servedFromMapLocal = mapped != null
-        val response = mapped
+        val sourced = mapped
             ?: proceedToNetwork(chain, outgoing, requestEdited, shouldCapture, startedAtEpochMs, startNs)
-        // The exchange is a modification of the real one when the request was edited or the response came
-        // from Map Local; a response-phase edit flags it too, inside the handler.
-        val baseEdited = requestEdited || servedFromMapLocal
+        val responsePhase = transformResponse(outgoing, sourced)
+        val response = responsePhase.response
+        val baseEdited = requestEdited || servedFromMapLocal || responsePhase.edited
 
-        // Response phase: pause before the app sees it, on the sourced response (Map Local- or network-based).
-        // Needs the full body to show and maybe replace, so it consumes the response and rebuilds one.
-        if (breakpoint.onResponse && WailoControlChannel.breakpointGate != null) {
-            return handleResponseBreakpoint(outgoing, response, breakpoint.ruleId, baseEdited, startedAtEpochMs, startNs, shouldCapture)
+        if (breakpoint?.onResponse == true && WailoControlChannel.breakpointGate != null) {
+            val delivered = handleResponseBreakpoint(
+                outgoing,
+                response,
+                breakpoint.ruleId,
+                baseEdited,
+                startedAtEpochMs,
+                startNs,
+                shouldCapture,
+            )
+            waitForScriptDelay(responsePhase.delayMillis)
+            return delivered
         }
 
-        // No response phase: capture without consuming (peekBody) and hand the sourced response back.
+        waitForScriptDelay(responsePhase.delayMillis)
         if (shouldCapture) {
             emit(startedAtEpochMs, elapsedMs(startNs), captureRequest(outgoing), captureResponse(response), edited = baseEdited)
         }
@@ -139,6 +136,246 @@ class WailoInterceptor internal constructor(
             }
             throw e
         }
+
+    private data class RequestPhase(val request: Request, val edited: Boolean)
+
+    private data class ScriptRequestInput(val model: HttpRequest, val replayable: Boolean)
+
+    private data class ResponsePhase(
+        val response: Response,
+        val edited: Boolean,
+        val delayMillis: Int,
+    )
+
+    private fun transformRequest(request: Request): RequestPhase {
+        if (
+            !WailoScriptStore.matches(
+                request.url.toString(),
+                request.method,
+                ScriptPhase.SCRIPT_PHASE_REQUEST,
+            )
+        ) {
+            return RequestPhase(request, edited = false)
+        }
+        val transformer = WailoControlChannel.scriptTransformer ?: return RequestPhase(request, false)
+        val input = scriptRequest(request)
+        val result = transformer.transform(
+            phase = ScriptPhase.SCRIPT_PHASE_REQUEST,
+            request = input.model,
+            requestBodyReplayable = input.replayable,
+        ) ?: return RequestPhase(request, false)
+        val transformed = result.request ?: return RequestPhase(request, false)
+        if (transformed == input.model) return RequestPhase(request, false)
+        val applied = runCatching {
+            applyScriptRequest(request, transformed, result.request_body_replaced)
+        }.getOrNull() ?: return RequestPhase(request, false)
+        return RequestPhase(applied, edited = true)
+    }
+
+    private fun transformResponse(request: Request, response: Response): ResponsePhase {
+        if (
+            !WailoScriptStore.matches(
+                request.url.toString(),
+                request.method,
+                ScriptPhase.SCRIPT_PHASE_RESPONSE,
+            )
+        ) {
+            return ResponsePhase(response, edited = false, delayMillis = 0)
+        }
+        val transformer = WailoControlChannel.scriptTransformer ?: return ResponsePhase(response, false, 0)
+        val requestInput = scriptRequest(request)
+        val materialized = materializeResponse(response)
+        val result = transformer.transform(
+            phase = ScriptPhase.SCRIPT_PHASE_RESPONSE,
+            request = requestInput.model,
+            response = materialized.model,
+            requestBodyReplayable = requestInput.replayable,
+        ) ?: return ResponsePhase(materialized.response, false, 0)
+        val transformed = result.response ?: return ResponsePhase(materialized.response, false, 0)
+        if (result.response_body_replaced && !materialized.bodyAvailable) {
+            return ResponsePhase(materialized.response, false, 0)
+        }
+        val applied = runCatching {
+            applyScriptResponse(
+                materialized.response,
+                transformed,
+                result.response_body_replaced,
+            )
+        }.getOrNull() ?: return ResponsePhase(materialized.response, false, 0)
+        return ResponsePhase(
+            response = applied,
+            edited = transformed != materialized.model || result.delay_ms != 0,
+            delayMillis = result.delay_ms,
+        )
+    }
+
+    private fun scriptRequest(request: Request): ScriptRequestInput {
+        val body = request.body
+        val declared = runCatching { body?.contentLength() ?: 0L }.getOrDefault(-1L)
+        val canReplay = body == null ||
+            (!body.isDuplex() && !body.isOneShot() && declared <= MAX_SCRIPT_BODY_BYTES)
+        if (!canReplay) {
+            return ScriptRequestInput(
+                HttpRequest(
+                    method = request.method,
+                    url = request.url.toString(),
+                    headers = request.headers.toModel(),
+                    body_size = declared,
+                    body_truncated = true,
+                ),
+                replayable = false,
+            )
+        }
+        val bytes = if (body == null) {
+            ByteString.EMPTY
+        } else {
+            runCatching {
+                val buffer = Buffer()
+                var written = 0L
+                val bounded = object : ForwardingSink(buffer) {
+                    override fun write(source: Buffer, byteCount: Long) {
+                        if (written + byteCount > MAX_SCRIPT_BODY_BYTES) {
+                            throw IOException("Script body limit")
+                        }
+                        super.write(source, byteCount)
+                        written += byteCount
+                    }
+                }.buffer()
+                body.writeTo(bounded)
+                bounded.flush()
+                buffer.readByteString()
+            }.getOrElse {
+                return ScriptRequestInput(
+                    HttpRequest(
+                        method = request.method,
+                        url = request.url.toString(),
+                        headers = request.headers.toModel(),
+                        body_size = declared,
+                        body_truncated = true,
+                    ),
+                    replayable = false,
+                )
+            }
+        }
+        return ScriptRequestInput(
+            HttpRequest(
+                method = request.method,
+                url = request.url.toString(),
+                headers = request.headers.toModel(),
+                body = bytes,
+                body_size = if (declared >= 0) declared else bytes.size.toLong(),
+            ),
+            replayable = true,
+        )
+    }
+
+    private data class MaterializedResponse(
+        val response: Response,
+        val model: HttpResponse,
+        val bodyAvailable: Boolean,
+    )
+
+    private fun materializeResponse(response: Response): MaterializedResponse {
+        val body = response.body
+        val declared = runCatching { body?.contentLength() ?: 0L }.getOrDefault(-1L)
+        if (body != null && (declared < 0 || declared > MAX_SCRIPT_BODY_BYTES)) {
+            return MaterializedResponse(
+                response = response,
+                model = HttpResponse(
+                    code = response.code,
+                    message = response.message,
+                    headers = response.headers.toModel(),
+                    body_size = declared,
+                    body_truncated = true,
+                ),
+                bodyAvailable = false,
+            )
+        }
+        val contentType = body?.contentType()
+        val peeked = if (body == null) {
+            ByteArray(0)
+        } else {
+            response.peekBody(MAX_SCRIPT_BODY_BYTES + 1).bytes()
+        }
+        if (peeked.size > MAX_SCRIPT_BODY_BYTES) {
+            return MaterializedResponse(
+                response = response,
+                model = HttpResponse(
+                    code = response.code,
+                    message = response.message,
+                    headers = response.headers.toModel(),
+                    body_size = declared,
+                    body_truncated = true,
+                ),
+                bodyAvailable = false,
+            )
+        }
+        body?.close()
+        val bytes = peeked.toByteString()
+        val rebuilt = response.newBuilder().body(bytes.toResponseBody(contentType)).build()
+        return MaterializedResponse(
+            response = rebuilt,
+            model = HttpResponse(
+                code = response.code,
+                message = response.message,
+                headers = response.headers.toModel(),
+                body = bytes,
+                body_size = bytes.size.toLong(),
+            ),
+            bodyAvailable = true,
+        )
+    }
+
+    private fun applyScriptRequest(original: Request, edited: HttpRequest, bodyReplaced: Boolean): Request {
+        val headers = if (bodyReplaced) edited.headers.withBodyLength(edited.body.size) else edited.headers
+        val okHeaders = headers.toOkHeaders()
+        val requestBody = if (bodyReplaced) {
+            val contentType = okHeaders["Content-Type"]?.toMediaTypeOrNull()
+            when {
+                edited.body.size > 0 -> edited.body.toByteArray().toRequestBody(contentType)
+                requiresRequestBody(edited.method) -> ByteArray(0).toRequestBody(contentType)
+                else -> null
+            }
+        } else {
+            original.body
+        }
+        return original.newBuilder()
+            .url(edited.url)
+            .method(edited.method, requestBody)
+            .headers(okHeaders)
+            .build()
+    }
+
+    private fun applyScriptResponse(original: Response, edited: HttpResponse, bodyReplaced: Boolean): Response {
+        val headers = if (bodyReplaced) edited.headers.withBodyLength(edited.body.size) else edited.headers
+        val okHeaders = headers.toOkHeaders()
+        val body = if (bodyReplaced) {
+            edited.body.toResponseBody(okHeaders["Content-Type"]?.toMediaTypeOrNull())
+        } else {
+            original.body
+        }
+        return original.newBuilder()
+            .code(edited.code)
+            .headers(okHeaders)
+            .body(body)
+            .build()
+    }
+
+    private fun List<Header>.withBodyLength(size: Int): List<Header> =
+        filterNot {
+            it.name.equals("Content-Length", true) ||
+                it.name.equals("Transfer-Encoding", true) ||
+                it.name.equals("Content-Encoding", true)
+        } + Header("Content-Length", size.toString())
+
+    private fun waitForScriptDelay(delayMillis: Int) {
+        if (delayMillis <= 0) return
+        try {
+            Thread.sleep(delayMillis.toLong())
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+        }
+    }
 
     // Pause the response phase: the desktop can edit it, abort the call, or resume it unchanged. The body
     // is read in full (consuming the stream) so it can be shown and swapped; the returned response is
@@ -375,5 +612,6 @@ class WailoInterceptor internal constructor(
         // Methods OkHttp requires to carry a request body; an edited request for one of these with an
         // empty body still needs a (zero-length) body rather than null.
         val REQUIRES_BODY_METHODS = setOf("POST", "PUT", "PATCH", "PROPPATCH", "REPORT")
+        const val MAX_SCRIPT_BODY_BYTES = 8L * 1024L * 1024L
     }
 }

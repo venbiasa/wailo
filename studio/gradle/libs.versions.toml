@@ -11,6 +11,7 @@ ktor = "3.4.3"
 jmdns = "3.6.3"
 zxing = "3.5.3"
 mcp = "2.0.0"
+graal = "25.2.4"
 # The published SDK artifact this build consumes; matches the root build's group/version.
 wailoProtocol = "0.1.0-SNAPSHOT"
 
@@ -28,6 +29,8 @@ wailo-protocol = { module = "com.venbiasa.wailo:wailo-protocol", version.ref = "
 jmdns = { module = "org.jmdns:jmdns", version.ref = "jmdns" }
 zxing-core = { module = "com.google.zxing:core", version.ref = "zxing" }
 mcp-sdk = { module = "io.modelcontextprotocol.sdk:mcp", version.ref = "mcp" }
+graal-polyglot = { module = "org.graalvm.polyglot:polyglot", version.ref = "graal" }
+graal-js = { module = "org.graalvm.polyglot:js-community", version.ref = "graal" }
 
 [plugins]
 kotlinMultiplatform = { id = "org.jetbrains.kotlin.multiplatform", version.ref = "kotlin" }

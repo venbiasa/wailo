@@ -8,7 +8,10 @@ import com.venbiasa.wailo.engine.ConnectedDevice
 import com.venbiasa.wailo.engine.PausedExchange
 import com.venbiasa.wailo.host.HostBreakpointRule
 import com.venbiasa.wailo.host.HostMapLocalRule
+import com.venbiasa.wailo.host.HostScript
 import com.venbiasa.wailo.host.HostSeed
+import com.venbiasa.wailo.host.ScriptRuntimeIssue
+import com.venbiasa.wailo.host.ScriptValidation
 import com.venbiasa.wailo.host.urlPatternMatches
 import com.venbiasa.wailo.protocol.CaptureFilter
 import com.venbiasa.wailo.protocol.HttpRequest
@@ -128,6 +131,14 @@ class DaemonClient internal constructor(
     val breakpointRules: StateFlow<List<HostBreakpointRule>> = _breakpointRules.asStateFlow()
     private val _breakpointsEnabled = MutableStateFlow(true)
     val breakpointsEnabled: StateFlow<Boolean> = _breakpointsEnabled.asStateFlow()
+    private val _scriptNodes = MutableStateFlow<List<DaemonRuleNode<HostScript>>>(emptyList())
+    val scriptNodes: StateFlow<List<DaemonRuleNode<HostScript>>> = _scriptNodes.asStateFlow()
+    private val _scripts = MutableStateFlow<List<HostScript>>(emptyList())
+    val scripts: StateFlow<List<HostScript>> = _scripts.asStateFlow()
+    private val _scriptsEnabled = MutableStateFlow(true)
+    val scriptsEnabled: StateFlow<Boolean> = _scriptsEnabled.asStateFlow()
+    private val _scriptIssues = MutableStateFlow<List<ScriptRuntimeIssue>>(emptyList())
+    val scriptIssues: StateFlow<List<ScriptRuntimeIssue>> = _scriptIssues.asStateFlow()
     private val _seedNodes = MutableStateFlow<List<DaemonRuleNode<HostSeed>>>(emptyList())
     val seedNodes: StateFlow<List<DaemonRuleNode<HostSeed>>> = _seedNodes.asStateFlow()
     private val _seeds = MutableStateFlow<List<HostSeed>>(emptyList())
@@ -188,6 +199,8 @@ class DaemonClient internal constructor(
     private var mapHash: String? = null
     private var breakpointHash: String? = null
     private var seedHash: String? = null
+    private var scriptHash: String? = null
+    private var scriptIssuesHash: String? = null
     private var holdsHash: String? = null
     private var captureFilterHash: String? = null
 
@@ -573,6 +586,39 @@ class DaemonClient internal constructor(
         _breakpointsEnabled.value = enabled
     }
 
+    suspend fun validateScript(source: String): ScriptValidation? {
+        val result = rpc.call(
+            "validate_script",
+            DaemonJson.encodeToJsonElement(ValidateScriptRequest(source)),
+            ScriptValidationDto.serializer(),
+        )
+        return result.takeIf { it.valid }?.let { ScriptValidation(it.onRequest, it.onResponse) }
+    }
+
+    suspend fun replaceScriptNodes(nodes: List<DaemonRuleNode<HostScript>>, enabled: Boolean) {
+        val dtos = nodes.mapRules { it.toDto() }
+        command("replace_scripts", ReplaceScriptsRequest(enabled, dtos))
+        applyScripts(dtos)
+        _scriptsEnabled.value = enabled
+    }
+
+    suspend fun upsertScript(script: HostScript, groupId: String? = null) {
+        val dto = script.toDto()
+        command("upsert_script", UpsertScriptRequest(dto, groupId))
+        scriptNodeDtos.upsertRule(dto, groupId) { it.id }?.let(::applyScripts)
+    }
+
+    suspend fun removeScript(id: String): Boolean {
+        val removed = booleanCommand("remove_script", IdRequest(id))
+        if (removed) applyScripts(scriptNodeDtos.removeRule(id) { it.id })
+        return removed
+    }
+
+    suspend fun setScriptsEnabled(enabled: Boolean) {
+        command("set_scripts_enabled", BooleanValue(enabled))
+        _scriptsEnabled.value = enabled
+    }
+
     /** Seeds publish exactly like Map Local above, bodies apart from the layout (ADR-0086). */
     suspend fun replaceSeedNodes(
         nodes: List<DaemonRuleNode<HostSeed>>,
@@ -610,6 +656,7 @@ class DaemonClient internal constructor(
         RULE_FAMILY_MAP_LOCAL -> _mapLocalNodes.value.mapRules { it.id }
         RULE_FAMILY_BREAKPOINTS -> _breakpointNodes.value.mapRules { it.id }
         RULE_FAMILY_SEEDS -> _seedNodes.value.mapRules { it.id }
+        RULE_FAMILY_SCRIPTS -> _scriptNodes.value.mapRules { it.id }
         else -> emptyList()
     }
 
@@ -621,6 +668,7 @@ class DaemonClient internal constructor(
             RULE_FAMILY_MAP_LOCAL -> applyMapLocal(mapLocalNodeDtos.upsertGroup(group))
             RULE_FAMILY_BREAKPOINTS -> applyBreakpoints(breakpointNodeDtos.upsertGroup(group))
             RULE_FAMILY_SEEDS -> applySeeds(seedNodeDtos.upsertGroup(group))
+            RULE_FAMILY_SCRIPTS -> applyScripts(scriptNodeDtos.upsertGroup(group))
         }
     }
 
@@ -632,6 +680,7 @@ class DaemonClient internal constructor(
                 RULE_FAMILY_MAP_LOCAL -> mapLocalNodeDtos.removeGroup(id, withRules)?.let(::applyMapLocal)
                 RULE_FAMILY_BREAKPOINTS -> breakpointNodeDtos.removeGroup(id, withRules)?.let(::applyBreakpoints)
                 RULE_FAMILY_SEEDS -> seedNodeDtos.removeGroup(id, withRules)?.let(::applySeeds)
+                RULE_FAMILY_SCRIPTS -> scriptNodeDtos.removeGroup(id, withRules)?.let(::applyScripts)
             }
         }
         return removed
@@ -649,6 +698,7 @@ class DaemonClient internal constructor(
                 RULE_FAMILY_BREAKPOINTS ->
                     breakpointNodeDtos.reorder(groupId, ids) { it.id }?.let(::applyBreakpoints)
                 RULE_FAMILY_SEEDS -> seedNodeDtos.reorder(groupId, ids) { it.id }?.let(::applySeeds)
+                RULE_FAMILY_SCRIPTS -> scriptNodeDtos.reorder(groupId, ids) { it.id }?.let(::applyScripts)
             }
         }
         return ordered
@@ -758,6 +808,7 @@ class DaemonClient internal constructor(
     private var mapLocalNodeDtos: List<DaemonRuleNode<MapLocalRuleDto>> = emptyList()
     private var breakpointNodeDtos: List<DaemonRuleNode<BreakpointRuleDto>> = emptyList()
     private var seedNodeDtos: List<DaemonRuleNode<SeedRuleDto>> = emptyList()
+    private var scriptNodeDtos: List<DaemonRuleNode<ScriptRuleDto>> = emptyList()
 
     // A rule arrives described, not carried: every rule here has an empty body and the size and digest
     // the daemon reported for it (ADR-0086). Anything that needs the bytes calls [readRuleBody].
@@ -782,6 +833,15 @@ class DaemonClient internal constructor(
         _seeds.value = nodes.toHostSeeds { ByteArray(0) }
     }
 
+    private fun applyScripts(nodes: List<DaemonRuleNode<ScriptRuleDto>>) {
+        scriptNodeDtos = nodes
+        scriptHash = null
+        _scriptNodes.value = nodes.mapRules { it.toDomain() }
+        _scripts.value = nodes.flatMap { node ->
+            node.rules.map { it.toDomain(effectiveEnabled(it.enabled, node.group)) }
+        }
+    }
+
     private suspend fun pollOnce(): Boolean {
         val current = _exchanges.value
         val pollRequest = PollRequest(
@@ -790,6 +850,8 @@ class DaemonClient internal constructor(
             mapLocalHash = mapHash,
             breakpointHash = breakpointHash,
             seedHash = seedHash,
+            scriptHash = scriptHash,
+            scriptIssuesHash = scriptIssuesHash,
             holdsHash = holdsHash,
             captureFilterHash = captureFilterHash,
         )
@@ -828,6 +890,11 @@ class DaemonClient internal constructor(
         _breakpointsEnabled.value = response.breakpointsEnabled
         response.breakpointNodes?.let(::applyBreakpoints)
         breakpointHash = response.breakpointHash
+        _scriptsEnabled.value = response.scriptsEnabled
+        response.scriptNodes?.let(::applyScripts)
+        scriptHash = response.scriptHash
+        response.scriptIssues?.let { issues -> _scriptIssues.value = issues.map(ScriptRuntimeIssueDto::toDomain) }
+        scriptIssuesHash = response.scriptIssuesHash
         _seedsEnabled.value = response.seedsEnabled
         response.seedNodes?.let(::applySeeds)
         seedHash = response.seedHash

@@ -46,6 +46,16 @@ protocol WailoBreakpointGate: AnyObject {
     )
 }
 
+protocol WailoScriptTransformer: AnyObject {
+    func transform(
+        phase: ScriptPhase,
+        request: HttpRequest,
+        response: HttpResponse?,
+        requestBodyReplayable: Bool,
+        completion: @escaping (ScriptTransformResult?) -> Void
+    )
+}
+
 /// A `URLProtocol` that copies each URLSession HTTP(S) exchange into a `CaptureSink` — subject to the
 /// desktop's CaptureFilter, which decides per host whether the whole exchange is captured at all
 /// (ADR-0029); a filtered host is dropped at the source. It normally leaves the real request/response
@@ -72,6 +82,7 @@ public final class WailoURLProtocol: URLProtocol {
     nonisolated(unsafe) static var sink: CaptureSink?
     nonisolated(unsafe) static var bodyFetcher: WailoBodyFetcher?
     nonisolated(unsafe) static var breakpointGate: WailoBreakpointGate?
+    nonisolated(unsafe) static var scriptTransformer: WailoScriptTransformer?
     // Optional cap on captured body bytes; nil (the default) captures the full body. The CaptureFilter
     // decides whole-exchange whether a host is captured at all (ADR-0029), so memory is bounded by
     // *which* hosts pass the filter rather than by a per-body ceiling. Larger-than-cap bodies (when a cap
@@ -98,6 +109,9 @@ public final class WailoURLProtocol: URLProtocol {
     // (the request actually sent, edited if the request phase changed it).
     private var responseBreakpointRuleId: String?
     private var breakpointRequestContext: HttpRequest?
+    private var outgoingRequest: HttpRequest?
+    private var requestBodyReplaced = false
+    private var responseScriptDelayMs: Int32 = 0
     // True once the exchange diverges from the real network one — a request-phase edit or a Map Local-sourced
     // response (ADR-0033) — so a response resumed unchanged is still mirrored as `edited`. A response-phase
     // edit or an abort flags the row on its own path.
@@ -119,61 +133,73 @@ public final class WailoURLProtocol: URLProtocol {
         startNanos = DispatchTime.now().uptimeNanoseconds
 
         let method = request.httpMethod ?? "GET"
-        let urlString = request.url?.absoluteString
-
-        // Drain the request body up front, but only when we'll actually use the bytes: a host the
-        // CaptureFilter admits (whose whole exchange we capture) or any breakpoint match (which shows the
-        // body to the desktop regardless of the filter). URLSession moves httpBody into httpBodyStream
-        // before we run, and a stream can be read only once, so we buffer it here and reuse it for capture
-        // and the replay (sendToNetwork restores it, since reading now consumes the stream the replay
-        // would send). For a filtered host with no breakpoint we skip this, leaving the stream to pass
-        // through untouched so memory stays bounded to the hosts that pass the filter.
-        let breakpointMatch = urlString.flatMap { WailoBreakpointStore.shared.match(url: $0, method: method) }
+        let urlString = request.url?.absoluteString ?? ""
+        let breakpointMatch = WailoBreakpointStore.shared.match(url: urlString, method: method)
         let shouldCapture = WailoCaptureFilterStore.shared.shouldCapture(host: request.url?.host)
-        if shouldCapture || breakpointMatch != nil {
+        let requestScript = WailoScriptStore.shared.matches(
+            url: urlString, method: method, phase: .SCRIPT_PHASE_REQUEST
+        )
+        let responseScript = WailoScriptStore.shared.matches(
+            url: urlString, method: method, phase: .SCRIPT_PHASE_RESPONSE
+        )
+        let declared = declaredRequestBodySize()
+        let unknownStream = request.httpBody == nil
+            && request.httpBodyStream != nil
+            && request.value(forHTTPHeaderField: "Content-Length") == nil
+        let scriptBodyCanBeBuffered = !unknownStream
+            && declared >= 0
+            && declared <= Int64(Self.maxScriptBodyBytes)
+        if shouldCapture || breakpointMatch != nil || ((requestScript || responseScript) && scriptBodyCanBeBuffered) {
             requestBody = WailoURLProtocol.readBody(from: request)
         }
 
-        // No breakpoint: Map Local (metadata match), then fetch the body from the desktop and serve it,
-        // short-circuiting the network. Any failure (no fetcher, not connected, timeout, rule gone) falls
-        // open to the network. When a breakpoint matches it instead owns the exchange and Map Local sources
-        // the response it shows (ADR-0033) — handled below via `sourceResponse`.
-        if breakpointMatch == nil {
-            if let urlString,
-               let rule = WailoRuleStore.shared.match(url: urlString, method: method),
-               let fetcher = WailoURLProtocol.bodyFetcher {
-                fetcher.fetchBody(ruleId: rule.id, url: urlString, method: method) { [weak self] mapped in
-                    guard let self, !self.stopped else { return }
-                    if let mapped {
-                        self.serveMapped(mapped)
-                    } else {
-                        self.sendToNetwork()
-                    }
-                }
-                return
-            }
-            sendToNetwork()
+        guard requestScript, let transformer = WailoURLProtocol.scriptTransformer else {
+            continueAfterRequestScripts()
             return
         }
+        let input = scriptRequest()
+        transformer.transform(
+            phase: .SCRIPT_PHASE_REQUEST,
+            request: input.request,
+            response: nil,
+            requestBodyReplayable: input.replayable
+        ) { [weak self] result in
+            guard let self, !self.stopped else { return }
+            if let result, let transformed = result.request, transformed != input.request {
+                self.outgoingRequest = transformed
+                self.requestBodyReplaced = result.request_body_replaced
+                self.baseEdited = true
+            }
+            self.continueAfterRequestScripts()
+        }
+    }
 
-        // Breakpoint owns the exchange (ADR-0033). Arm the response phase (checked in `finish`); if the rule
-        // breaks on the request, pause before anything is sent — the desktop can edit the request, abort the
-        // call, or resume it unchanged (a disconnect fails open) — then source the response.
-        let match = breakpointMatch!
+    private func continueAfterRequestScripts() {
+        let current = outgoingRequest ?? captureRequest()
+        let match = WailoBreakpointStore.shared.match(url: current.url, method: current.method)
+        guard let match else {
+            sourceResponse(edited: outgoingRequest)
+            return
+        }
         if match.onResponse { responseBreakpointRuleId = match.ruleId }
         if match.onRequest, let gate = WailoURLProtocol.breakpointGate {
-            gate.pauseRequest(ruleId: match.ruleId, request: captureRequest()) { [weak self] decision in
+            gate.pauseRequest(ruleId: match.ruleId, request: current) { [weak self] decision in
                 guard let self, !self.stopped else { return }
                 switch decision {
                 case .abort:
                     self.abort()
                 case let .proceed(edited):
-                    self.sourceResponse(edited: edited)
+                    if let edited {
+                        self.outgoingRequest = edited
+                        self.requestBodyReplaced = true
+                        self.baseEdited = true
+                    }
+                    self.sourceResponse(edited: self.outgoingRequest)
                 }
             }
             return
         }
-        sourceResponse(edited: nil)
+        sourceResponse(edited: outgoingRequest)
     }
 
     override public func stopLoading() {
@@ -230,9 +256,16 @@ public final class WailoURLProtocol: URLProtocol {
         if let edited {
             if let editedURL = URL(string: edited.url) { replay.url = editedURL }
             replay.httpMethod = edited.method
-            replay.httpBody = edited.body.isEmpty ? nil : edited.body
+            if requestBodyReplaced {
+                replay.httpBody = edited.body.isEmpty ? nil : edited.body
+                replay.httpBodyStream = nil
+            } else if let requestBody {
+                replay.httpBody = requestBody
+                replay.httpBodyStream = nil
+            }
             replay.allHTTPHeaderFields = Dictionary(
-                edited.headers.map { ($0.name, $0.value) },
+                (requestBodyReplaced ? headersWithBodyLength(edited.headers, edited.body.count) : edited.headers)
+                    .map { ($0.name, $0.value) },
                 uniquingKeysWith: { _, latest in latest }
             )
         } else if let requestBody, !requestBody.isEmpty {
@@ -281,7 +314,9 @@ public final class WailoURLProtocol: URLProtocol {
         var headerFields: [String: String] = [:]
         for header in headers { headerFields[header.name] = header.value }
         return HTTPURLResponse(
-            url: request.url ?? URL(string: "about:blank")!,
+            url: outgoingRequest.flatMap { URL(string: $0.url) }
+                ?? request.url
+                ?? URL(string: "about:blank")!,
             statusCode: status,
             httpVersion: "HTTP/1.1",
             headerFields: headerFields
@@ -297,6 +332,61 @@ public final class WailoURLProtocol: URLProtocol {
             emit(response: nil, body: nil, error: error, edited: baseEdited)
             return
         }
+        guard let http = response as? HTTPURLResponse else {
+            finishAfterResponseScripts(data: data, response: response)
+            return
+        }
+        let context = outgoingRequest ?? captureRequest()
+        guard
+            WailoScriptStore.shared.matches(
+                url: context.url,
+                method: context.method,
+                phase: .SCRIPT_PHASE_RESPONSE
+            ),
+            let transformer = WailoURLProtocol.scriptTransformer
+        else {
+            finishAfterResponseScripts(data: data, response: response)
+            return
+        }
+        let current = scriptResponse(http, body: data)
+        transformer.transform(
+            phase: .SCRIPT_PHASE_RESPONSE,
+            request: context,
+            response: current,
+            requestBodyReplayable: scriptRequest().replayable
+        ) { [weak self] result in
+            guard let self, !self.stopped else { return }
+            guard let result, let transformed = result.response else {
+                self.finishAfterResponseScripts(data: data, response: response)
+                return
+            }
+            if transformed == current {
+                self.responseScriptDelayMs = result.delay_ms
+                if result.delay_ms != 0 { self.baseEdited = true }
+                self.finishAfterResponseScripts(data: data, response: response)
+                return
+            }
+            if result.response_body_replaced && (data?.count ?? 0) > Self.maxScriptBodyBytes {
+                self.finishAfterResponseScripts(data: data, response: response)
+                return
+            }
+            let transformedData = result.response_body_replaced ? transformed.body : data
+            let transformedResponse = self.makeResponse(
+                code: Int(transformed.code),
+                headers: result.response_body_replaced
+                    ? self.headersWithBodyLength(transformed.headers, transformed.body.count)
+                    : transformed.headers
+            )
+            self.responseScriptDelayMs = result.delay_ms
+            if transformed != current || result.delay_ms != 0 { self.baseEdited = true }
+            self.finishAfterResponseScripts(
+                data: transformedData,
+                response: transformedResponse ?? response
+            )
+        }
+    }
+
+    private func finishAfterResponseScripts(data: Data?, response: URLResponse?) {
         if let ruleId = responseBreakpointRuleId,
            let gate = WailoURLProtocol.breakpointGate,
            let http = response as? HTTPURLResponse {
@@ -325,26 +415,49 @@ public final class WailoURLProtocol: URLProtocol {
     /// exchange is still flagged `edited` when it diverged upstream — a request-phase edit or a Map Local-
     /// sourced response resumed unchanged (ADR-0033) — via `baseEdited`.
     private func forwardOriginal(data: Data?, response: URLResponse?) {
-        if let response {
-            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        afterScriptDelay { [weak self] in
+            guard let self, !self.stopped else { return }
+            if let response {
+                self.client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            }
+            if let data {
+                self.client?.urlProtocol(self, didLoad: data)
+            }
+            self.client?.urlProtocolDidFinishLoading(self)
+            self.emit(response: response, body: data, error: nil, edited: self.baseEdited)
         }
-        if let data {
-            client?.urlProtocol(self, didLoad: data)
-        }
-        client?.urlProtocolDidFinishLoading(self)
-        emit(response: response, body: data, error: nil, edited: baseEdited)
     }
 
     /// Delivers a response-phase breakpoint's edited response: rebuilds an `HTTPURLResponse` from the
     /// desktop's status/headers and hands its body to the caller, flagging the exchange `edited`.
     private func forwardEdited(_ edited: HttpResponse) {
         let response = makeResponse(code: Int(edited.code), headers: edited.headers)
-        if let response {
-            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        afterScriptDelay { [weak self] in
+            guard let self, !self.stopped else { return }
+            if let response {
+                self.client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            }
+            self.client?.urlProtocol(self, didLoad: edited.body)
+            self.client?.urlProtocolDidFinishLoading(self)
+            self.emit(response: response, body: edited.body, error: nil, edited: true)
         }
-        client?.urlProtocol(self, didLoad: edited.body)
-        client?.urlProtocolDidFinishLoading(self)
-        emit(response: response, body: edited.body, error: nil, edited: true)
+    }
+
+    private func afterScriptDelay(_ action: @escaping () -> Void) {
+        let delay = max(0, Int(responseScriptDelayMs))
+        guard delay > 0 else {
+            action()
+            return
+        }
+        DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(delay), execute: action)
+    }
+
+    private func headersWithBodyLength(_ headers: [Header], _ size: Int) -> [Header] {
+        headers.filter {
+            $0.name.caseInsensitiveCompare("Content-Length") != .orderedSame
+                && $0.name.caseInsensitiveCompare("Transfer-Encoding") != .orderedSame
+                && $0.name.caseInsensitiveCompare("Content-Encoding") != .orderedSame
+        } + [Header(name: "Content-Length", value: "\(size)")]
     }
 
     private func emit(response: URLResponse?, body: Data?, error: Error?, edited: Bool = false) {
@@ -371,9 +484,42 @@ public final class WailoURLProtocol: URLProtocol {
         sink.onExchange(exchange)
     }
 
+    private struct ScriptRequestInput {
+        let request: HttpRequest
+        let replayable: Bool
+    }
+
+    private func scriptRequest() -> ScriptRequestInput {
+        let full = requestBodyReplaced ? outgoingRequest?.body : (requestBody ?? request.httpBody)
+        let hasBody = full != nil
+            || request.httpBodyStream != nil
+            || declaredRequestBodySize() > 0
+        let replayable = !hasBody || (full?.count ?? Int.max) <= Self.maxScriptBodyBytes
+        let headers = (request.allHTTPHeaderFields ?? [:]).map { Header(name: $0.key, value: $0.value) }
+        return ScriptRequestInput(
+            request: HttpRequest(
+                method: outgoingRequest?.method ?? request.httpMethod ?? "GET",
+                url: outgoingRequest?.url ?? request.url?.absoluteString ?? "",
+                body: replayable ? (full ?? Data()) : Data(),
+                body_size: full.map { Int64($0.count) } ?? declaredRequestBodySize(),
+                body_truncated: hasBody && !replayable
+            ) {
+                $0.headers = outgoingRequest?.headers ?? headers
+            },
+            replayable: replayable
+        )
+    }
+
     private func captureRequest() -> HttpRequest {
-        // Read from the buffer drained in startLoading, not request.httpBody: URLSession moves the body
-        // into httpBodyStream before we run, leaving request.httpBody nil for most bodies.
+        if var outgoingRequest {
+            if !requestBodyReplaced && requestBody == nil { return outgoingRequest }
+            let full = requestBodyReplaced ? outgoingRequest.body : (requestBody ?? outgoingRequest.body)
+            let (captured, truncated) = WailoURLProtocol.capturedBody(full)
+            outgoingRequest.body = captured
+            outgoingRequest.body_size = Int64(full.count)
+            outgoingRequest.body_truncated = truncated
+            return outgoingRequest
+        }
         let full = requestBody ?? Data()
         let (captured, truncated) = WailoURLProtocol.capturedBody(full)
         let headers = (request.allHTTPHeaderFields ?? [:]).map { Header(name: $0.key, value: $0.value) }
@@ -385,6 +531,21 @@ public final class WailoURLProtocol: URLProtocol {
             // built before the body was drained), so the size column stays meaningful.
             body_size: requestBody.map { Int64($0.count) } ?? declaredRequestBodySize(),
             body_truncated: truncated
+        ) {
+            $0.headers = headers
+        }
+    }
+
+    private func scriptResponse(_ response: HTTPURLResponse, body: Data?) -> HttpResponse {
+        let full = body ?? Data()
+        let available = full.count <= Self.maxScriptBodyBytes
+        let headers = response.allHeaderFields.map { Header(name: "\($0.key)", value: "\($0.value)") }
+        return HttpResponse(
+            code: Int32(response.statusCode),
+            message: "",
+            body: available ? full : Data(),
+            body_size: Int64(full.count),
+            body_truncated: !available
         ) {
             $0.headers = headers
         }
@@ -448,4 +609,6 @@ public final class WailoURLProtocol: URLProtocol {
         guard let cap, full.count > cap else { return (full, false) }
         return (Data(full.prefix(cap)), true)
     }
+
+    private static let maxScriptBodyBytes = 8 * 1024 * 1024
 }

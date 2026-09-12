@@ -104,6 +104,9 @@ private fun run(client: DaemonClient, images: TrayImages) {
             setMapLocalEnabled = { enabled ->
                 scope.launch { runCatching { client.setMapLocalEnabled(enabled) } }
             },
+            setScriptsEnabled = { enabled ->
+                scope.launch { runCatching { client.setScriptsEnabled(enabled) } }
+            },
             setBreakpointsEnabled = { enabled ->
                 scope.launch { runCatching { client.setBreakpointsEnabled(enabled) } }
             },
@@ -167,6 +170,8 @@ private fun run(client: DaemonClient, images: TrayImages) {
                     capturePort = client.capturePort.value,
                     capturing = client.capturing.value,
                     mapLocalEnabled = client.mapLocalEnabled.value,
+                    scriptsEnabled = client.scriptsEnabled.value,
+                    scriptIssueCount = client.scriptIssues.value.size,
                     breakpointsEnabled = client.breakpointsEnabled.value,
                     seedsEnabled = client.seedsEnabled.value,
                     allowlistEnabled = filter.allowlist_enabled,

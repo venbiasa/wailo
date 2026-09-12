@@ -103,6 +103,50 @@ $CLI list_exchanges
 $CLI stop                              # the daemon otherwise remains running
 ```
 
+## Transforming requests and responses
+
+The **Scripts** panel runs ordered, synchronous JavaScript hooks on both Socket and Proxy traffic. Source
+stays in the daemon; SDKs receive match metadata and make a bounded transform call only when a hook can
+match. The order is:
+
+`Capture Filter → request Scripts → request breakpoint → Map Local/network → response Scripts → response breakpoint → delay → caller`
+
+```javascript
+function onRequest({ request }) {
+  request.headers.set("X-Debug", "1");
+  return request;
+}
+
+function onResponse({ request, response }) {
+  response.body.internal = undefined;
+  response.statusCode = 200;
+  response.delayMs = 250;
+  return response;
+}
+```
+
+`method`, `url`, `headers`, and `body` are mutable on requests. Responses expose `statusCode`, `headers`,
+`body`, and `delayMs`; their `request` context is read-only. Headers preserve duplicates and provide
+`get`, `getAll`, `set`, `append`, and `delete`. `bodyType` is `json`, `text`, `binary` (a copied
+`Uint8Array`), or `unavailable`. An unavailable request stream still permits metadata edits but cannot be
+replaced. A failing script is rolled back while later rules continue; a worker timeout restores the whole
+phase input.
+
+Source is limited to 64 KiB, replaceable bodies to 8 MiB, and delay to 60 seconds. Hooks cannot use async
+APIs, modules, Java/host access, files, network, environment variables, native access, or threads.
+
+```bash
+$CLI set_script --id hide-internal --url-pattern 'https://api.example.com/*' \
+  --script-file ./hide-internal.js
+$CLI list_scripts
+$CLI get_script --id hide-internal
+$CLI set_scripts_enabled --off
+```
+
+`set_script` requires exactly one of `--script-file` or `--script`. The MCP equivalents are
+`set_script`, `list_scripts`, `get_script`, `remove_script`, and `set_scripts_enabled`.
+Release candidates run the [Script transform smoke](docs/script-transform-smoke.md).
+
 ## Capturing through the proxy
 
 Some things cannot host the SDK: a browser, a `curl`, a third-party app, an emulator you did not build, a
@@ -148,8 +192,8 @@ $CLI setup_proxy_target --id emulator-5554
 $CLI clear_proxy_target --id emulator-5554
 ```
 
-Proxied rows are ticked in the traffic list's **Proxy** column and obey the same Capture Filter, Map
-Local, Breakpoints, and Seeds as SDK traffic — one rule set, both paths (ADR-0072). Release candidates run
+Proxied rows are ticked in the traffic list's **Proxy** column and obey the same Capture Filter, Scripts,
+Map Local, Breakpoints, and Seeds as SDK traffic — one rule set, both paths (ADR-0072/0099). Release candidates run
 the [bundled proxy physical smoke](docs/proxy-device-smoke.md) on a real iPhone and Android device.
 
 ## MCP for Cursor and Claude
@@ -163,7 +207,7 @@ cd studio
 
 The committed [`.cursor/mcp.json`](.cursor/mcp.json) already points Cursor at that distribution.
 Restart Cursor, then enable **wailo** under **Customize → MCPs**. Its tools cover traffic and device
-inspection, waits, capture controls, Map Local, Capture Filter, breakpoint rules, live hold
+inspection, waits, capture controls, Map Local, Scripts, Capture Filter, breakpoint rules, live hold
 resume/edit/abort, and the full proxy workflow. Proxy mutations are explicit tools; their structured
 results report network exposure, confirmed trust, stale roots, pending cleanup, and remaining manual work.
 Call `get_proxy_setup_guide` first; every proxy mutation requires `confirm=true`.
@@ -208,7 +252,8 @@ $CLI set_mcp_redaction --off       # hand agents real credentials
 With access off, an agent's tool calls are refused with an error saying how to restore it — nothing changes
 for Studio or the CLI. With redaction on, authorization and cookie headers, sensitive query parameters, and
 secret-looking body fields read back as `<wailo:redacted>`, so a live token does not end up in a model
-context or a provider's logs. Studio itself always shows real values; redaction applies only to MCP.
+context or a provider's logs. Script source is withheld as one `<wailo:redacted>` marker rather than
+partially inspected. Studio itself always shows real values; redaction applies only to MCP.
 
 ## Using the SDK (M1)
 

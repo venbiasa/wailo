@@ -4,13 +4,10 @@ import Wire
 
 /**
  * One Envelope per WebSocket frame. Device -> desktop: the client opens with a Hello, then streams
- * exchanges, plus a RuleAck after applying rules, a CaptureFilterAck after applying the capture filter,
- * a BodyRequest when a Map Local rule matches, a BreakpointRulesAck after applying breakpoint rules,
- * and a BreakpointHit when a breakpoint pauses a request/response. Desktop -> device: pushes a RuleSet
- * (match-metadata), a CaptureFilter (allow/block lists), and a BreakpointRules snapshot right after the
- * Hello and whenever they change, replies to a BodyRequest with a BodyResponse (ADR-0019), and replies
- * to a BreakpointHit with a BreakpointDecision. The receiver keys on which oneof field is set; new kinds
- * are a oneof extension (ADR-0008), so this stays backward-compatible.
+ * exchanges and acknowledgements, requests matched Map Local bodies and Script transforms, and reports
+ * breakpoint hits. Desktop -> device: pushes rule snapshots and replies to each request or hit. The
+ * receiver keys on which oneof field is set; new kinds are a oneof extension (ADR-0008), so this stays
+ * backward-compatible.
  *
  * Over WiFi the exchange above is preceded by the identity-first v3 handshake (ADR-0060) and every
  * frame after it is wrapped in a SealedFrame. Loopback sessions — Simulator, `adb reverse`, the
@@ -83,6 +80,10 @@ extension Envelope : Proto3Codable {
             case 21: message = .auth_result_v3(try protoReader.decode(AuthResultV3.self))
             case 22: message = .revoke_device(try protoReader.decode(RevokeDevice.self))
             case 23: message = .revoke_device_ack(try protoReader.decode(RevokeDeviceAck.self))
+            case 24: message = .script_rule_set(try protoReader.decode(ScriptRuleSet.self))
+            case 25: message = .script_rule_set_ack(try protoReader.decode(ScriptRuleSetAck.self))
+            case 26: message = .script_transform_request(try protoReader.decode(ScriptTransformRequest.self))
+            case 27: message = .script_transform_result(try protoReader.decode(ScriptTransformResult.self))
             default: try protoReader.readUnknownField(tag: tag)
             }
         }
@@ -177,6 +178,22 @@ extension Envelope : Codable {
             self.message = .revoke_device_ack(revoke_device_ack)
         } else if let revoke_device_ack = try container.decodeIfPresent(RevokeDeviceAck.self, forKey: "revoke_device_ack") {
             self.message = .revoke_device_ack(revoke_device_ack)
+        } else if let script_rule_set = try container.decodeIfPresent(ScriptRuleSet.self, forKey: "scriptRuleSet") {
+            self.message = .script_rule_set(script_rule_set)
+        } else if let script_rule_set = try container.decodeIfPresent(ScriptRuleSet.self, forKey: "script_rule_set") {
+            self.message = .script_rule_set(script_rule_set)
+        } else if let script_rule_set_ack = try container.decodeIfPresent(ScriptRuleSetAck.self, forKey: "scriptRuleSetAck") {
+            self.message = .script_rule_set_ack(script_rule_set_ack)
+        } else if let script_rule_set_ack = try container.decodeIfPresent(ScriptRuleSetAck.self, forKey: "script_rule_set_ack") {
+            self.message = .script_rule_set_ack(script_rule_set_ack)
+        } else if let script_transform_request = try container.decodeIfPresent(ScriptTransformRequest.self, forKey: "scriptTransformRequest") {
+            self.message = .script_transform_request(script_transform_request)
+        } else if let script_transform_request = try container.decodeIfPresent(ScriptTransformRequest.self, forKey: "script_transform_request") {
+            self.message = .script_transform_request(script_transform_request)
+        } else if let script_transform_result = try container.decodeIfPresent(ScriptTransformResult.self, forKey: "scriptTransformResult") {
+            self.message = .script_transform_result(script_transform_result)
+        } else if let script_transform_result = try container.decodeIfPresent(ScriptTransformResult.self, forKey: "script_transform_result") {
+            self.message = .script_transform_result(script_transform_result)
         } else {
             self.message = nil
         }
@@ -206,6 +223,10 @@ extension Envelope : Codable {
         case .auth_result_v3(let auth_result_v3): try container.encode(auth_result_v3, forKey: preferCamelCase ? "authResultV3" : "auth_result_v3")
         case .revoke_device(let revoke_device): try container.encode(revoke_device, forKey: preferCamelCase ? "revokeDevice" : "revoke_device")
         case .revoke_device_ack(let revoke_device_ack): try container.encode(revoke_device_ack, forKey: preferCamelCase ? "revokeDeviceAck" : "revoke_device_ack")
+        case .script_rule_set(let script_rule_set): try container.encode(script_rule_set, forKey: preferCamelCase ? "scriptRuleSet" : "script_rule_set")
+        case .script_rule_set_ack(let script_rule_set_ack): try container.encode(script_rule_set_ack, forKey: preferCamelCase ? "scriptRuleSetAck" : "script_rule_set_ack")
+        case .script_transform_request(let script_transform_request): try container.encode(script_transform_request, forKey: preferCamelCase ? "scriptTransformRequest" : "script_transform_request")
+        case .script_transform_result(let script_transform_result): try container.encode(script_transform_result, forKey: preferCamelCase ? "scriptTransformResult" : "script_transform_result")
         case Optional.none: break
         }
     }
@@ -243,6 +264,10 @@ extension Envelope {
         case auth_result_v3(AuthResultV3)
         case revoke_device(RevokeDevice)
         case revoke_device_ack(RevokeDeviceAck)
+        case script_rule_set(ScriptRuleSet)
+        case script_rule_set_ack(ScriptRuleSetAck)
+        case script_transform_request(ScriptTransformRequest)
+        case script_transform_result(ScriptTransformResult)
 
         fileprivate func encode(to protoWriter: ProtoWriter) throws {
             switch self {
@@ -265,6 +290,10 @@ extension Envelope {
             case .auth_result_v3(let auth_result_v3): try protoWriter.encode(tag: 21, value: auth_result_v3)
             case .revoke_device(let revoke_device): try protoWriter.encode(tag: 22, value: revoke_device)
             case .revoke_device_ack(let revoke_device_ack): try protoWriter.encode(tag: 23, value: revoke_device_ack)
+            case .script_rule_set(let script_rule_set): try protoWriter.encode(tag: 24, value: script_rule_set)
+            case .script_rule_set_ack(let script_rule_set_ack): try protoWriter.encode(tag: 25, value: script_rule_set_ack)
+            case .script_transform_request(let script_transform_request): try protoWriter.encode(tag: 26, value: script_transform_request)
+            case .script_transform_result(let script_transform_result): try protoWriter.encode(tag: 27, value: script_transform_result)
             }
         }
 

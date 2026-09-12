@@ -3,6 +3,7 @@ package com.venbiasa.wailo.mcp
 import com.venbiasa.wailo.engine.CapturedExchange
 import com.venbiasa.wailo.engine.WailoEngine
 import com.venbiasa.wailo.host.HeadlessHost
+import com.venbiasa.wailo.host.HostScript
 import com.venbiasa.wailo.protocol.HttpExchange
 import com.venbiasa.wailo.protocol.HttpRequest
 import com.venbiasa.wailo.protocol.HttpResponse
@@ -13,6 +14,36 @@ import kotlin.test.assertTrue
 import kotlinx.coroutines.runBlocking
 
 class WailoMcpServiceTest {
+    @Test
+    fun scriptSourceIsFullyRedactedWhenSecretRedactionIsOn() = runBlocking {
+        val host = HeadlessHost.wrap(WailoEngine())
+        val script = HostScript(
+            id = "secret",
+            urlPattern = "*",
+            source = """const token = "private"; function onRequest({ request }) { return request; }""",
+            onRequest = true,
+            onResponse = false,
+        )
+        try {
+            val redactedBackend = object : McpBackend by LocalMcpBackend(host, 8899) {
+                override val scripts = listOf(script)
+                override val redactSecrets = true
+            }
+            val redacted = WailoMcpService(redactedBackend).call("get_script", mapOf("id" to "secret"))
+            assertEquals(REDACTED_VALUE, redacted.data["source"])
+            assertEquals(true, redacted.data["source_redacted"])
+
+            val visibleBackend = object : McpBackend by LocalMcpBackend(host, 8899) {
+                override val scripts = listOf(script)
+                override val redactSecrets = false
+            }
+            val visible = WailoMcpService(visibleBackend).call("get_script", mapOf("id" to "secret"))
+            assertEquals(script.source, visible.data["source"])
+        } finally {
+            host.stop()
+        }
+    }
+
 
     @Test
     fun fullControlSurfaceHasStableUniqueNames() {
@@ -59,6 +90,11 @@ class WailoMcpServiceTest {
                 "remove_breakpoint",
                 "list_breakpoints",
                 "set_breakpoints_enabled",
+                "set_script",
+                "remove_script",
+                "list_scripts",
+                "get_script",
+                "set_scripts_enabled",
                 "set_seed",
                 "remove_seed",
                 "list_seeds",

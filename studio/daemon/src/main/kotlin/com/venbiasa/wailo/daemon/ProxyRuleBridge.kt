@@ -2,6 +2,7 @@ package com.venbiasa.wailo.daemon
 
 import com.venbiasa.wailo.host.HeadlessHost
 import com.venbiasa.wailo.host.HostBreakpointRule
+import com.venbiasa.wailo.host.HostScript
 import com.venbiasa.wailo.host.captureFilterAdmits
 import com.venbiasa.wailo.host.methodPatternMatches
 import com.venbiasa.wailo.host.urlPatternMatches
@@ -10,6 +11,8 @@ import com.venbiasa.wailo.protocol.BreakpointDecision
 import com.venbiasa.wailo.protocol.BreakpointPhase
 import com.venbiasa.wailo.protocol.HttpRequest
 import com.venbiasa.wailo.protocol.HttpResponse
+import com.venbiasa.wailo.protocol.ScriptPhase
+import com.venbiasa.wailo.protocol.ScriptTransformRequest
 import com.venbiasa.wailo.proxy.Interception
 import com.venbiasa.wailo.proxy.ProxyRules
 import com.venbiasa.wailo.proxy.RequestVerdict
@@ -40,42 +43,86 @@ internal class HostProxyRules(private val host: HeadlessHost) : ProxyRules {
         return Interception(
             holdRequest = rule?.onRequest == true,
             holdResponse = rule?.onResponse == true,
+            transformRequest = matchingScript(url, method, ScriptPhase.SCRIPT_PHASE_REQUEST),
+            transformResponse = matchingScript(url, method, ScriptPhase.SCRIPT_PHASE_RESPONSE),
             record = captureFilterAdmits(host.engine.captureFilter.value, hostOf(url)),
         )
     }
 
     override fun onRequest(client: String, request: HttpRequest): RequestVerdict {
-        val rule = matchingBreakpoint(request.url, request.method)
-            ?: return mapLocal(request)?.let { RequestVerdict.Respond(it) } ?: RequestVerdict.Proceed()
-
-        var outgoing = request
+        val scripted = transformRequest(request)
+        var outgoing = scripted.request
+        var changed = scripted.changed
+        var bodyReplaced = scripted.bodyReplaced
+        val rule = matchingBreakpoint(outgoing.url, outgoing.method)
         // A body too large to hold was never offered for editing, so pausing on it would show a human a
         // request they cannot faithfully approve.
-        if (rule.onRequest && !request.body_truncated) {
-            val decision = await(client, BreakpointPhase.BREAKPOINT_PHASE_REQUEST, request, null)
+        if (rule?.onRequest == true && !outgoing.body_truncated) {
+            val decision = await(client, BreakpointPhase.BREAKPOINT_PHASE_REQUEST, outgoing, null)
                 ?: return RequestVerdict.Abort
             if (decision.action == BreakpointAction.BREAKPOINT_ACTION_ABORT) return RequestVerdict.Abort
-            decision.edited_request?.let { outgoing = it }
+            decision.edited_request?.let {
+                outgoing = it
+                changed = true
+                bodyReplaced = true
+            }
         }
 
-        val mapped = mapLocal(outgoing) ?: return RequestVerdict.Proceed(outgoing.takeIf { it !== request })
-        if (!rule.onResponse) return RequestVerdict.Respond(mapped)
+        val mapped = mapLocal(outgoing)
+            ?: return RequestVerdict.Proceed(
+                edited = outgoing.takeIf { changed },
+                bodyReplaced = bodyReplaced,
+                holdResponse = rule?.onResponse == true,
+            )
+        val scriptedResponse = transformResponse(outgoing, mapped)
+        var chosen = scriptedResponse.response
+        if (rule?.onResponse != true || chosen.body_truncated) {
+            if (!waitForDelay(scriptedResponse.delayMillis)) return RequestVerdict.Abort
+            return RequestVerdict.Respond(
+                response = chosen,
+                editedRequest = outgoing.takeIf { changed },
+                requestBodyReplaced = bodyReplaced,
+            )
+        }
 
         // The fixture becomes the breakpoint's response rather than bypassing it (ADR-0033), so the
         // response phase runs here — the relay is answering locally and will never call onResponse.
-        val decision = await(client, BreakpointPhase.BREAKPOINT_PHASE_RESPONSE, outgoing, mapped)
+        val decision = await(client, BreakpointPhase.BREAKPOINT_PHASE_RESPONSE, outgoing, chosen)
             ?: return RequestVerdict.Abort
         if (decision.action == BreakpointAction.BREAKPOINT_ACTION_ABORT) return RequestVerdict.Abort
         if (!waitForDelay(decision.delay_ms)) return RequestVerdict.Abort
-        return RequestVerdict.Respond(decision.edited_response ?: mapped)
+        decision.edited_response?.let { chosen = it }
+        if (!waitForDelay(scriptedResponse.delayMillis)) return RequestVerdict.Abort
+        return RequestVerdict.Respond(
+            response = chosen,
+            editedRequest = outgoing.takeIf { changed },
+            requestBodyReplaced = bodyReplaced,
+        )
     }
 
-    override fun onResponse(client: String, request: HttpRequest, response: HttpResponse): ResponseVerdict {
-        val decision = await(client, BreakpointPhase.BREAKPOINT_PHASE_RESPONSE, request, response)
+    override fun onResponse(
+        client: String,
+        request: HttpRequest,
+        response: HttpResponse,
+        breakpointSelected: Boolean,
+    ): ResponseVerdict {
+        val scripted = transformResponse(request, response)
+        var chosen = scripted.response
+        if (!breakpointSelected || chosen.body_truncated) {
+            if (!waitForDelay(scripted.delayMillis)) return ResponseVerdict.Abort
+            return ResponseVerdict.Proceed(chosen.takeIf { scripted.changed })
+        }
+        val decision = await(client, BreakpointPhase.BREAKPOINT_PHASE_RESPONSE, request, chosen)
             ?: return ResponseVerdict.Proceed()
         if (decision.action == BreakpointAction.BREAKPOINT_ACTION_ABORT) return ResponseVerdict.Abort
         if (!waitForDelay(decision.delay_ms)) return ResponseVerdict.Abort
-        return ResponseVerdict.Proceed(decision.edited_response)
+        decision.edited_response?.let { chosen = it }
+        if (!waitForDelay(scripted.delayMillis)) return ResponseVerdict.Abort
+        return ResponseVerdict.Proceed(
+            chosen.takeIf {
+                scripted.changed || decision.edited_response != null || decision.delay_ms != 0
+            },
+        )
     }
 
     /** Release every waiting relay thread, so stopping the proxy does not strand a client on a hold. */
@@ -117,6 +164,78 @@ internal class HostProxyRules(private val host: HeadlessHost) : ProxyRules {
             rule.enabled && urlPatternMatches(rule.urlPattern, url) &&
                 methodPatternMatches(rule.method, method)
         }
+    }
+
+    private fun matchingScript(url: String, method: String, phase: ScriptPhase): Boolean {
+        if (!host.areScriptsEnabled()) return false
+        return host.scripts.value.any { rule -> rule.matches(url, method, phase) }
+    }
+
+    private fun HostScript.matches(url: String, method: String, phase: ScriptPhase): Boolean =
+        enabled &&
+            when (phase) {
+                ScriptPhase.SCRIPT_PHASE_REQUEST -> onRequest
+                ScriptPhase.SCRIPT_PHASE_RESPONSE -> onResponse
+                else -> false
+            } &&
+            urlPatternMatches(urlPattern, url) &&
+            methodPatternMatches(this.method, method)
+
+    private data class ScriptedRequest(
+        val request: HttpRequest,
+        val changed: Boolean,
+        val bodyReplaced: Boolean,
+    )
+
+    private data class ScriptedResponse(
+        val response: HttpResponse,
+        val changed: Boolean,
+        val delayMillis: Int,
+    )
+
+    private fun transformRequest(request: HttpRequest): ScriptedRequest {
+        if (!matchingScript(request.url, request.method, ScriptPhase.SCRIPT_PHASE_REQUEST)) {
+            return ScriptedRequest(request, false, false)
+        }
+        val result = runBlocking {
+            host.transformScripts(
+                ScriptTransformRequest(
+                    correlation_id = UUID.randomUUID().toString(),
+                    phase = ScriptPhase.SCRIPT_PHASE_REQUEST,
+                    request = request,
+                    request_body_replayable = !request.body_truncated,
+                ),
+            )
+        }
+        val transformed = result.request ?: request
+        return ScriptedRequest(
+            transformed,
+            changed = transformed != request,
+            bodyReplaced = result.request_body_replaced,
+        )
+    }
+
+    private fun transformResponse(request: HttpRequest, response: HttpResponse): ScriptedResponse {
+        if (!matchingScript(request.url, request.method, ScriptPhase.SCRIPT_PHASE_RESPONSE)) {
+            return ScriptedResponse(response, false, 0)
+        }
+        val result = runBlocking {
+            host.transformScripts(
+                ScriptTransformRequest(
+                    correlation_id = UUID.randomUUID().toString(),
+                    phase = ScriptPhase.SCRIPT_PHASE_RESPONSE,
+                    request = request,
+                    response = response,
+                    request_body_replayable = !request.body_truncated,
+                ),
+            )
+        }
+        val transformed = result.response ?: response
+        return ScriptedResponse(
+            transformed,
+            changed = transformed != response || result.delay_ms != 0,
+            delayMillis = result.delay_ms,
+        )
     }
 
     /**

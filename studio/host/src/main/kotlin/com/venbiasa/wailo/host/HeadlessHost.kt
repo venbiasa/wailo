@@ -7,6 +7,7 @@ import com.venbiasa.wailo.engine.ConnectedDevice
 import com.venbiasa.wailo.engine.InMemoryBodyStore
 import com.venbiasa.wailo.engine.MapLocalBodyProvider
 import com.venbiasa.wailo.engine.PausedExchange
+import com.venbiasa.wailo.engine.ScriptTransformProvider
 import com.venbiasa.wailo.engine.WailoEngine
 import com.venbiasa.wailo.engine.pairing.PairingManager
 import com.venbiasa.wailo.engine.pairing.InMemoryPairingKeyStore
@@ -16,6 +17,9 @@ import com.venbiasa.wailo.protocol.CaptureFilter
 import com.venbiasa.wailo.protocol.HttpRequest
 import com.venbiasa.wailo.protocol.HttpResponse
 import com.venbiasa.wailo.protocol.MapLocalRule
+import com.venbiasa.wailo.protocol.ScriptPhase
+import com.venbiasa.wailo.protocol.ScriptTransformRequest
+import com.venbiasa.wailo.protocol.ScriptTransformResult
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.seconds
 import kotlinx.coroutines.CancellationException
@@ -32,7 +36,7 @@ import kotlinx.coroutines.sync.withLock
 
 /**
  * UI-free orchestration over [WailoEngine] for CLI / MCP / Appium frontends (ADR-0055). Owns the Map
- * Local, breakpoint, and Seed registries with their feature masters, Seed auto-spend, and query helpers,
+ * Local, Script, breakpoint, and Seed registries with their feature masters, Seed auto-spend, and query helpers,
  * so no frontend reimplements them.
  *
  * Every frontend reaches this through the daemon that owns it (ADR-0058), Studio included: a seed is
@@ -100,6 +104,16 @@ class HeadlessHost private constructor(
     @Volatile
     private var breakpointsEnabled = true
 
+    private val scriptMutex = Mutex()
+    private val _scripts = MutableStateFlow<List<HostScript>>(emptyList())
+    val scripts: StateFlow<List<HostScript>> = _scripts.asStateFlow()
+
+    @Volatile
+    private var scriptsEnabled = true
+
+    @Volatile
+    private var scriptExecutor: ScriptExecutor? = null
+
     /**
      * Optional fallback for rules pushed through the low-level [updateRules] API. Rules registered with
      * [upsertMapLocalRule] always resolve from the host's in-memory registry first.
@@ -132,6 +146,7 @@ class HeadlessHost private constructor(
     fun start(): Boolean = engine.start()
 
     fun stop() {
+        runCatching { scriptExecutor?.close() }
         engine.stop()
         scope.cancel()
     }
@@ -277,6 +292,82 @@ class HeadlessHost private constructor(
     }
 
     fun areBreakpointsEnabled(): Boolean = breakpointsEnabled
+
+    fun installScriptExecutor(executor: ScriptExecutor) {
+        scriptExecutor = executor
+        engine.scriptTransformProvider = ScriptTransformProvider(::transformScripts)
+    }
+
+    suspend fun validateScript(source: String): ScriptValidation =
+        requireNotNull(scriptExecutor) { "Script executor is not installed" }.validate(source)
+
+    suspend fun upsertScript(script: HostScript) {
+        validateScriptDefinition(script)
+        scriptMutex.withLock {
+            val current = _scripts.value
+            val index = current.indexOfFirst { it.id == script.id }
+            _scripts.value = if (index == -1) {
+                current + script
+            } else {
+                current.toMutableList().also { it[index] = script }
+            }
+            scriptExecutor?.clearIssue(script.id)
+            pushRegisteredScripts()
+        }
+    }
+
+    suspend fun removeScript(id: String): Boolean = scriptMutex.withLock {
+        val current = _scripts.value
+        val next = current.filterNot { it.id == id }
+        if (next.size == current.size) return@withLock false
+        _scripts.value = next
+        scriptExecutor?.clearIssue(id)
+        pushRegisteredScripts()
+        true
+    }
+
+    suspend fun replaceScripts(scripts: List<HostScript>, enabled: Boolean) {
+        require(scripts.map { it.id }.distinct().size == scripts.size) { "Script ids must be unique" }
+        scripts.forEach(::validateScriptDefinition)
+        scriptMutex.withLock {
+            val nextById = scripts.associateBy { it.id }
+            _scripts.value
+                .filter { current -> nextById[current.id] != current }
+                .forEach { scriptExecutor?.clearIssue(it.id) }
+            _scripts.value = scripts.toList()
+            scriptsEnabled = enabled
+            pushRegisteredScripts()
+        }
+    }
+
+    suspend fun setScriptsEnabled(enabled: Boolean) {
+        scriptMutex.withLock {
+            scriptsEnabled = enabled
+            pushRegisteredScripts()
+        }
+    }
+
+    fun areScriptsEnabled(): Boolean = scriptsEnabled
+
+    val scriptIssues: List<ScriptRuntimeIssue>
+        get() = scriptExecutor?.issues?.value.orEmpty()
+
+    suspend fun transformScripts(request: ScriptTransformRequest): ScriptTransformResult {
+        val input = request.identityResult()
+        if (!scriptsEnabled) return input
+        val matches = _scripts.value.filter { script ->
+            script.enabled &&
+                when (request.phase) {
+                    ScriptPhase.SCRIPT_PHASE_REQUEST -> script.onRequest
+                    ScriptPhase.SCRIPT_PHASE_RESPONSE -> script.onResponse
+                    else -> false
+                } &&
+                urlPatternMatches(script.urlPattern, request.request?.url.orEmpty()) &&
+                methodPatternMatches(script.method, request.request?.method.orEmpty())
+        }
+        if (matches.isEmpty()) return input
+        return runCatching { scriptExecutor?.execute(matches, request) }.getOrNull() ?: input
+    }
 
     fun listDevices(): List<ConnectedDevice> = engine.connectedDevices.value
 
@@ -467,6 +558,28 @@ class HeadlessHost private constructor(
             },
         )
     }
+
+    private fun pushRegisteredScripts() {
+        engine.updateScriptRules(
+            if (scriptsEnabled) {
+                _scripts.value.map(HostScript::toProtocolRule)
+            } else {
+                emptyList()
+            },
+        )
+    }
+
+    private fun validateScriptDefinition(script: HostScript) {
+        require(script.id.isNotBlank()) { "Script id must not be blank" }
+        require(script.urlPattern.isNotBlank()) { "Script URL pattern must not be blank" }
+        require(script.onRequest || script.onResponse) { "Script must define onRequest, onResponse, or both" }
+    }
+
+    private fun ScriptTransformRequest.identityResult() = ScriptTransformResult(
+        correlation_id = correlation_id,
+        request = request,
+        response = response,
+    )
 
     companion object {
         /**

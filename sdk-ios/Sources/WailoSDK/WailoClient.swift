@@ -8,7 +8,7 @@ import Wire
 /// Reconnection is deliberately hard to wedge. `URLSessionWebSocketTask` does not guarantee that the
 /// `send`/`receive` completion handlers fire on every failure, so every path that can end a connection
 /// funnels through `handleDisconnect`, which always schedules the next attempt when allowed.
-final class WailoClient: NSObject, CaptureSink, WailoBodyFetcher, WailoBreakpointGate, URLSessionWebSocketDelegate, WailoTransportLink, @unchecked Sendable {
+final class WailoClient: NSObject, CaptureSink, WailoBodyFetcher, WailoBreakpointGate, WailoScriptTransformer, URLSessionWebSocketDelegate, WailoTransportLink, @unchecked Sendable {
 
     private let url: URL
     private let reconnectDelay: TimeInterval
@@ -116,6 +116,22 @@ final class WailoClient: NSObject, CaptureSink, WailoBodyFetcher, WailoBreakpoin
 
     func pauseRequest(ruleId: String, request: HttpRequest, completion: @escaping (WailoRequestDecision) -> Void) {
         session.pauseRequest(ruleId: ruleId, request: request, completion: completion)
+    }
+
+    func transform(
+        phase: ScriptPhase,
+        request: HttpRequest,
+        response: HttpResponse?,
+        requestBodyReplayable: Bool,
+        completion: @escaping (ScriptTransformResult?) -> Void
+    ) {
+        session.transform(
+            phase: phase,
+            request: request,
+            response: response,
+            requestBodyReplayable: requestBodyReplayable,
+            completion: completion
+        )
     }
 
     func pauseResponse(
