@@ -112,9 +112,11 @@ internal fun BodyLoadingNotice(text: String = "Loading body…", modifier: Modif
  * [body] is that same distinction one step earlier: nothing has been read yet, so the pane says so
  * instead of reporting the body absent.
  *
- * A non-null [contentEncoding] means the capture never decoded these bytes, so they are shown as the dump
- * they are, under a notice naming the coding. Without it a brotli response is an unexplained hex dump on
- * a body the headers call JSON, which reads as Wailo having broken the response.
+ * A [contentEncoding] the bytes still carry means the capture never decoded them, so they are shown as
+ * the dump they are, under a notice naming the coding. Without it a brotli response is an unexplained hex
+ * dump on a body the headers call JSON, which reads as Wailo having broken the response. The header only
+ * raises the question; [analyzeBody] asks the bytes, because a client that decompressed for itself leaves
+ * the header behind over plaintext.
  *
  * Saving a body is deliberately not here: it acts on the bytes rather than on a view of them, so it lives
  * in the pane header beside the tabs (see [SaveBodyButton]) and does not move as the user switches
@@ -135,7 +137,7 @@ internal fun BodyPreview(
         return
     }
     val analysis = remember(body, contentType, truncated, contentEncoding) {
-        analyzeBody(body, contentType, truncated, encoded = contentEncoding != null)
+        analyzeBody(body, contentType, truncated, contentEncoding)
     }
     if (analysis.isEmpty) {
         Box(modifier.padding(16.dp)) { MutedText("No body") }
@@ -155,9 +157,9 @@ internal fun BodyPreview(
         }
         // Names the coding rather than the tool's limits first: the reader's question is why this JSON
         // response is a hex dump, and the answer is that nobody has decompressed it yet.
-        if (contentEncoding != null) {
+        if (analysis.encoding != null) {
             MutedText(
-                "(still $contentEncoding-encoded • Wailo decodes only gzip and deflate)",
+                "(still ${analysis.encoding}-encoded • Wailo decodes only gzip and deflate)",
                 Modifier.padding(start = 16.dp, end = 16.dp, top = 8.dp),
             )
         }

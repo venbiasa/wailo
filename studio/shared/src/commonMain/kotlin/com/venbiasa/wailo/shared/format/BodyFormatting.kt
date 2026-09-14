@@ -36,6 +36,11 @@ internal data class BodyAnalysis(
     val previewers: List<PreviewKind>,
     val default: PreviewKind,
     val imageFormat: ImageFormat?,
+    /**
+     * The coding the stored bytes are *verified* to still be under, or null when they are plaintext —
+     * which is not the same as what `Content-Encoding` said. See [isStillEncoded].
+     */
+    val encoding: String? = null,
 )
 
 internal fun List<Header>.contentType(): String? =
@@ -77,20 +82,21 @@ internal fun bodyContent(body: ByteString, contentType: String?, maxTextChars: I
  * keep a plain-Text fallback so a mis-sniff is never a dead end. A [truncated] body can't be a valid
  * image, so image detection is skipped and it falls through to the byte/text path.
  *
- * An [encoded] body is classified as nothing at all. Compressed bytes are not the payload, whatever they
- * happen to sniff as — and a short one can pass the text check and then render as mojibake — so the dump
- * is the only honest view, with the caller naming the coding that is in the way.
+ * A body still under a [contentEncoding] is classified as nothing at all. Compressed bytes are not the
+ * payload, whatever they happen to sniff as, so the dump is the only honest view — but the header alone
+ * does not establish that, which is why [isStillEncoded] gets a vote.
  */
 internal fun analyzeBody(
     body: ByteString,
     contentType: String?,
     truncated: Boolean,
-    encoded: Boolean = false,
+    contentEncoding: String? = null,
 ): BodyAnalysis {
     if (body.size == 0) {
         return BodyAnalysis(isEmpty = true, previewers = emptyList(), default = PreviewKind.Text, imageFormat = null)
     }
-    if (encoded) return BodyAnalysis(false, listOf(PreviewKind.Hex), PreviewKind.Hex, null)
+    val encoding = contentEncoding?.takeIf { isStillEncoded(body, it) }
+    if (encoding != null) return BodyAnalysis(false, listOf(PreviewKind.Hex), PreviewKind.Hex, null, encoding)
     val imageFormat = if (truncated) null else sniffImageFormat(body)
     if (imageFormat != null) {
         return BodyAnalysis(false, listOf(PreviewKind.Image), PreviewKind.Image, imageFormat)
@@ -126,10 +132,11 @@ internal fun analyzeBody(
  * for the previewer, and a file name is the same kind of claim. A name that already agrees keeps it, and
  * a body nothing identified gets `bin` rather than a guess.
  *
- * A [contentEncoding] that survived capture means the bytes are still compressed (ADR-0096), so the file
- * is named for the *coding*: `search.br`, not `search.json`, which would hand someone an archive under
- * the name of the thing inside it. A coding *list* names every layer (`gzip-br`), since that is what the
- * bytes are — punctuation and all, it has to survive being a file name.
+ * Bytes still compressed are named for their *coding* instead: `search.br`, not `search.json`, which
+ * would hand someone an archive under the name of the thing inside it. A coding list names every layer
+ * (`gzip-br`), since that is what the bytes are — punctuation and all, it has to survive being a file
+ * name. Only a coding the bytes actually carry counts, so a header left behind by a client that already
+ * decompressed does not rename a readable body.
  */
 internal fun bodyFileName(
     base: String,
@@ -138,11 +145,11 @@ internal fun bodyFileName(
     truncated: Boolean,
     contentEncoding: String?,
 ): String {
-    if (contentEncoding != null) {
-        val codings = contentEncoding.lowercase().split(',').map { it.trim() }.filter { it.isNotEmpty() }
-        return "$base.${fileNameSafe(codings.joinToString("-"))}"
+    val analysis = analyzeBody(body, contentType, truncated, contentEncoding)
+    analysis.encoding?.let { coding ->
+        val layers = coding.lowercase().split(',').mapNotNull { it.trim().ifEmpty { null } }
+        return "$base.${fileNameSafe(layers.joinToString("-"))}"
     }
-    val analysis = analyzeBody(body, contentType, truncated)
     val extension = when (analysis.default) {
         PreviewKind.Image -> analysis.imageFormat?.fileExtension
         PreviewKind.Json -> "json"
@@ -152,6 +159,33 @@ internal fun bodyFileName(
         PreviewKind.Hex -> "bin"
     } ?: return base
     return if (base.endsWith(".$extension", ignoreCase = true)) base else "$base.$extension"
+}
+
+/**
+ * Whether [body] really is still under [contentEncoding], rather than merely labelled with it.
+ *
+ * The header cannot answer this on its own. Wailo's proxy keeps the two in step (ADR-0096), but an SDK
+ * capture cannot: it reports the origin's headers beside the bytes its platform HTTP client handed it,
+ * and URLSession (like OkHttp below an application interceptor) has already decompressed them. On that
+ * path `Content-Encoding: gzip` sits over the plaintext far more often than over gzip, so trusting it
+ * would turn most captured JSON into a hex dump.
+ *
+ * The bytes are the witness. Every coding here announces itself with a signature except brotli, which
+ * has none by design — for that one the fallback is the weaker question of whether this reads as text,
+ * which is wrong only for a payload that is binary either way and already had no preview to lose.
+ */
+internal fun isStillEncoded(body: ByteString, contentEncoding: String): Boolean {
+    if (body.size < 2) return false
+    fun byteAt(index: Int): Int = body[index].toInt() and 0xFF
+    // A list applies its codings in order, so the last one named is the outermost — the one these bytes
+    // are wrapped in right now.
+    return when (contentEncoding.lowercase().split(',').last().trim()) {
+        "gzip", "x-gzip" -> byteAt(0) == 0x1F && byteAt(1) == 0x8B
+        "zstd" -> body.size >= 4 && byteAt(0) == 0x28 && byteAt(1) == 0xB5 && byteAt(2) == 0x2F && byteAt(3) == 0xFD
+        // zlib-wrapped deflate is a 0x78 CMF with a checksummed header; raw deflate has no marker at all.
+        "deflate" -> (byteAt(0) == 0x78 && (byteAt(0) * 256 + byteAt(1)) % 31 == 0) || !isProbablyText(body)
+        else -> !isProbablyText(body)
+    }
 }
 
 /**

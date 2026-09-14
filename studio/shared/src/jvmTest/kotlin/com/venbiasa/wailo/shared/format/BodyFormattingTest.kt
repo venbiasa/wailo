@@ -16,6 +16,9 @@ class BodyFormattingTest {
     private fun bytes(vararg values: Int): ByteString =
         ByteArray(values.size) { values[it].toByte() }.toByteString()
 
+    // A gzip member's first bytes: the magic pair, deflate method, no flags.
+    private val gzipBytes = bytes(0x1F, 0x8B, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00)
+
     @Test
     fun contentTypeLookupIsCaseInsensitive() {
         val headers = listOf(
@@ -178,13 +181,34 @@ class BodyFormattingTest {
 
     @Test
     fun anUndecodedBodyIsOnlyEverADump() {
-        // Compressed JSON is not JSON, and a short enough payload can even pass the text sniff — so the
-        // encoded flag has to override what the bytes look like, not merely add a caveat to it.
-        val analysis =
-            analyzeBody("looks like text".encodeUtf8(), "application/json", truncated = false, encoded = true)
+        // Compressed JSON is not JSON, so a coding the bytes really carry overrides the Content-Type.
+        val analysis = analyzeBody(gzipBytes, "application/json", truncated = false, contentEncoding = "gzip")
         assertEquals(listOf(PreviewKind.Hex), analysis.previewers)
         assertEquals(PreviewKind.Hex, analysis.default)
+        assertEquals("gzip", analysis.encoding)
         assertNull(analysis.imageFormat)
+        // zstd has a four-byte signature; zlib-wrapped deflate has a 0x78 CMF whose header divides by 31.
+        val zstd = bytes(0x28, 0xB5, 0x2F, 0xFD, 0x24)
+        assertEquals("zstd", analyzeBody(zstd, "application/json", false, "zstd").encoding)
+        val zlib = bytes(0x78, 0x9C, 0x4B, 0x2C)
+        assertEquals("deflate", analyzeBody(zlib, "application/json", false, "deflate").encoding)
+    }
+
+    @Test
+    fun aHeaderLeftOverADecodedBodyStillShowsTheBody() {
+        // An SDK capture reports the origin's headers beside bytes URLSession or OkHttp already inflated,
+        // so Content-Encoding: gzip over plaintext is the common case, not the exception. Believing it
+        // would bury most captured JSON in a hex dump.
+        val json = analyzeBody("""{"a":1}""".encodeUtf8(), "application/json", false, contentEncoding = "gzip")
+        assertEquals(PreviewKind.Json, json.default)
+        assertNull(json.encoding)
+        // The bytes need not be text to be decoded: a protobuf body carries no gzip magic either.
+        val protobuf = analyzeBody(bytes(0x08, 0xB0, 0xEA, 0x01, 0x2A), "application/x-protobuf", false, "gzip")
+        assertNull(protobuf.encoding)
+        // Brotli has no signature to check, so text is the only tell — and it is enough for the bodies
+        // anyone reads.
+        assertNull(analyzeBody("""{"a":1}""".encodeUtf8(), "application/json", false, "br").encoding)
+        assertEquals("br", analyzeBody(bytes(0x1B, 0x00, 0x00, 0x24), "application/json", false, "br").encoding)
     }
 
     @Test
@@ -203,11 +227,13 @@ class BodyFormattingTest {
     @Test
     fun anUndecodedBodyIsNamedForItsCoding() {
         // The file holds compressed bytes; calling it .json would name the thing inside the archive.
-        val json = """{"a":1}""".encodeUtf8()
-        assertEquals("search.br", bodyFileName("search", json, "application/json", false, "br"))
-        assertEquals("search.json", bodyFileName("search", json, "application/json", false, null))
+        assertEquals("search.gzip", bodyFileName("search", gzipBytes, "application/json", false, "gzip"))
         // Every layer is named, and the punctuation that separates them cannot reach the file name.
-        assertEquals("search.gzip-br", bodyFileName("search", json, "application/json", false, "gzip, br"))
+        val brotli = bytes(0x1B, 0x00, 0x00, 0x24)
+        assertEquals("search.gzip-br", bodyFileName("search", brotli, "application/json", false, "gzip, br"))
+        // A header the bytes do not bear names nothing: this body is readable, so it is saved readable.
+        val json = """{"a":1}""".encodeUtf8()
+        assertEquals("search.json", bodyFileName("search", json, "application/json", false, "gzip"))
     }
 
     @Test
