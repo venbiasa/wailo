@@ -29,6 +29,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -289,6 +290,9 @@ internal fun <T : LayoutRule<T>> GroupedRuleListPage(
     }
 }
 
+// Scaled to the card's 12sp copy, which a default 40.dp button dwarfs.
+private val ConfirmButtonHeight = 30.dp
+
 /**
  * The confirmation a non-empty group's delete raises (ADR-0026). It states the count because the rules go
  * with the group, which is the part a user can't see once the group is collapsed.
@@ -311,7 +315,7 @@ private fun DeleteGroupCard(
     ) {
         Column(
             Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             Text(
                 "Delete group?",
@@ -322,11 +326,32 @@ private fun DeleteGroupCard(
                 "\u201c${group.name.ifBlank { "New group" }}\u201d and its $ruleCount " +
                     (if (ruleCount == 1) "rule" else "rules") + " will be deleted. This can\u2019t be undone.",
                 style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.error,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = onConfirm) { Text("Delete") }
-                TextButton(onClick = onCancel) { Text("Cancel") }
+            // Red belongs on the irreversible action, not on the sentence explaining it: a wholly red
+            // message reads as an error to fix, and leaves the risky button looking like the safe one.
+            Row(
+                Modifier.padding(top = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Button(
+                    onClick = onConfirm,
+                    modifier = Modifier.height(ConfirmButtonHeight),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error,
+                        contentColor = MaterialTheme.colorScheme.onError,
+                    ),
+                    contentPadding = PaddingValues(horizontal = 14.dp),
+                ) {
+                    Text("Delete", style = MaterialTheme.typography.labelMedium)
+                }
+                TextButton(
+                    onClick = onCancel,
+                    modifier = Modifier.height(ConfirmButtonHeight),
+                    contentPadding = PaddingValues(horizontal = 12.dp),
+                ) {
+                    Text("Cancel", style = MaterialTheme.typography.labelMedium)
+                }
             }
         }
     }
